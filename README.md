@@ -301,11 +301,33 @@ A lab is worth describing to its agents once: which Macs you have, which one has
 serial, what they must not touch. Write that in a short Markdown file and hand it
 to them with a prompt.
 
+## Verified on hardware
+
+On an M3 Max host (J516cAP, macOS 27.0.1) driving an M1 MacBook Air (J313) through its DFU port:
+
+- `macvdmtool reboot` resets the target from an M3 host: back 37 s later. (It was already verified
+  from an **M5 Pro** host, J704AP, on macOS 26.5.) With the watchdog stopped at runtime (systemd's
+  `RuntimeWatchdogSec` set to 0) and `kernel.panic=0`, a crashed Air stayed down for 2 minutes until
+  `macvdmtool reboot` brought it back in 36 s.
+- Apple Silicon's U-Boot arms `apple_wdt` and leaves it running into Linux: booting with
+  `watchdog.handle_boot_enabled=0` logs `watchdog0 running and kernel based pre-userspace handler
+  disabled` within the first second. With `watchdog.open_timeout=N` (lab boots don't set it today),
+  a boot that hangs or gets stuck before something opens `/dev/watchdog` is reset: a test boot stuck
+  in the initramfs waiting for its root device came back on its known-good kernel by itself.
+
+From the sources, not measured: m1n1 disables the watchdog, so m1n1 itself runs unwatched, and
+U-Boot feeds it while U-Boot or Limine waits, so a boot sitting at a prompt or a menu stays up. Once
+Linux runs, the kernel feeds it until something opens `/dev/watchdog` (forever without
+`open_timeout`), and a healthy boot must open it in time too. `lab-agent setup`'s
+`RuntimeWatchdogSec=30s` has systemd open it once the real root is up (the initramfs doesn't get
+that setting), and systemd then keeps it fed for as long as it runs, even through a boot stuck in
+emergency mode.
+
 ## Not yet verified on hardware
 
-- `macvdmtool` driving the target from an M3 host. (It is verified from an **M5 Pro** host, J704AP, on macOS 26.5.)
-- Whether `apple_wdt` can be armed before the kernel starts (m1n1/U-Boot).
-  If it can, tier 1 would also cover early-boot hangs.
+- The serial console from an M3 host. A USB 2.0 cable (no SBU wires) carried no serial data either
+  way, so it is still open whether serial mode works from an M3 host with a SuperSpeed cable. Reset
+  needs only CC.
 
 ## Development
 
