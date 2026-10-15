@@ -71,6 +71,8 @@ const since = t => (Date.now() - new Date(t)) / 1000;
 
 // ——— API ———————————————————————————————————————————————————————————————
 // On a trusted network labd needs no token; otherwise the saved one is sent.
+// A tailnet viewer may look without one, and unlocks changes with one.
+const lockable = () => !S.open || S.viewer;
 const authH = () => S.token ? { Authorization: 'Bearer ' + S.token } : {};
 async function api(path, opt = {}) {
   const r = await fetch(path, { ...opt, headers: { ...(opt.headers || {}), ...authH() } });
@@ -301,7 +303,7 @@ function bar() {
     `<button class="stat" onclick="go('#/jobs')" title="jobs running or queued">${ic('pulse')}<b>${running}</b></button>`,
     `<button class="stat hide-sm" id="theme-btn" title="theme: ${esc(t?.title || '')}">${ic('palette')}</button>`,
     `<button class="stat" title="${!S.online ? 'labd unreachable' : S.stream === 'up' ? 'connected · live stream' : 'connected · polling'}"><span class="live ${S.online ? '' : 'down'}"></span></button>`,
-    S.open ? '' : `<button class="stat" onclick="lock()" title="lock">${ic('lock')}</button>`,
+    lockable() ? `<button class="stat" onclick="lock()" title="${S.viewer && !S.token ? 'view only: unlock with an admin token' : 'lock'}">${ic('lock')}</button>` : '',
   ].join(''));
   const tb = $('#theme-btn');
   if (tb) tb.onclick = e => themeMenu(e.currentTarget);
@@ -1641,7 +1643,7 @@ function mainMenu(anchor) {
   menu(anchor, `<div class="mh"><span>Omarchy · maclab</span><span class="og" style="color:var(--accent)">${OMARCHY}</span></div>
     ${VIEWS.map(([v], i) => `<button data-go="${v}" class="${v === S.view ? 'on' : ''}">${ic({ macs: 'laptop', jobs: 'history', builds: 'hammer', run: 'rocket', live: 'monitor' }[v])} ${v[0].toUpperCase() + v.slice(1)}<span class="r">${i + 1}</span></button>`).join('')}
     <hr><button data-theme>${ic('palette')} Style<span class="r">&gt;</span></button>
-    ${S.open ? '' : `<button data-lock>${ic('lock')} Lock<span class="r">L</span></button>`}`, m => {
+    ${!lockable() ? '' : `<button data-lock>${ic('lock')} Lock<span class="r">L</span></button>`}`, m => {
     $$('[data-go]', m).forEach(b => b.onclick = () => go('#/' + b.dataset.go));
     $('[data-theme]', m).onclick = e => { e.stopPropagation(); themeMenu(anchor); };
     $('[data-lock]', m) && ($('[data-lock]', m).onclick = () => lock());
@@ -1689,9 +1691,11 @@ async function lock(msg = '') {
     if (!tok) return;
     S.token = tok;
     try {
-      const r = await fetch('/api/devices', { headers: { Authorization: 'Bearer ' + tok } });
+      // A viewer can already read /api/devices, so ask labd what the token is worth.
+      const r = await fetch(S.viewer ? '/api/auth' : '/api/devices', { headers: { Authorization: 'Bearer ' + tok } });
       if (r.status === 401) throw new Error('That token was not accepted.');
       if (!r.ok) throw new Error(await r.text());
+      if (S.viewer && (await r.json()).role !== 'admin') throw new Error('That token was not accepted.');
       store('token', tok);
       unlock();
     } catch (err) { $('#lock-msg').textContent = err.message; $('#lock-msg').className = 'msg bad'; $('#lock-token').select(); }
@@ -1739,14 +1743,18 @@ document.addEventListener('keydown', e => {
   if (S.locked || /INPUT|TEXTAREA|SELECT/.test(document.activeElement?.tagName) || document.activeElement?.closest?.('.xterm')) return;
   const n = +e.key;
   if (n >= 1 && n <= VIEWS.length && !e.ctrlKey && !e.metaKey && !e.altKey) go('#/' + VIEWS[n - 1][0]);
-  if (e.key === 'l' && !e.ctrlKey && !e.metaKey && !S.open) lock();
+  if (e.key === 'l' && !e.ctrlKey && !e.metaKey && lockable()) lock();
 });
 
 // ——— start ———————————————————————————————————————————————————————————————————
 (async function start() {
   shell();
   await Promise.all([loadThemes(), logoSVG()]);
-  try { S.open = !(await (await fetch('/api/auth')).json()).token_required; } catch { S.open = false; }
+  try {
+    const a = await (await fetch('/api/auth')).json();
+    S.open = !a.token_required;
+    S.viewer = a.role === 'viewer';
+  } catch { S.open = false; }
   if (!S.open && !S.token) {
     // An older labd has no /api/auth: try without a token before asking for one.
     S.open = (await fetch('/api/devices').catch(() => null))?.ok || false;

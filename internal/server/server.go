@@ -15,7 +15,9 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -41,6 +43,12 @@ type Config struct {
 	// Trust lists networks whose clients get admin access without a token,
 	// judged by the connection's source address only.
 	Trust []*net.IPNet
+	// Tailscale lets tailnet peers in by identity: logins in Admins get admin
+	// access, every other peer may only look.
+	Tailscale bool
+	Admins    []string
+	// WhoIs names the peer behind a tailnet address; tests swap in fakes.
+	WhoIs func(ctx context.Context, ip string) (*TailnetPeer, error)
 	// OOBFactory builds a controller for a device; tests swap in fakes.
 	OOBFactory func(*api.Device) (oob.Controller, error)
 	// BuilderToken authenticates builder hosts; empty disables builds.
@@ -71,6 +79,8 @@ type Server struct {
 	builds      *buildMgr
 	notifyHooks []func(Notification)
 	serialMu    sync.Mutex
+	whoMu       sync.Mutex
+	whoCache    map[netip.Addr]whoisEntry
 }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
@@ -85,6 +95,12 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	if cfg.OfflineAfter == 0 {
 		cfg.OfflineAfter = time.Minute
+	}
+	if cfg.Tailscale && cfg.WhoIs == nil {
+		if _, err := exec.LookPath(tailscaleCLI()); err != nil {
+			return nil, fmt.Errorf("--tailscale needs the tailscale CLI: %w", err)
+		}
+		cfg.WhoIs = tailscaleWhoIs
 	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
@@ -337,20 +353,20 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
-	m.HandleFunc("GET /api/devices", s.admin(s.hDevices))
-	m.HandleFunc("GET /api/devices/{name}", s.admin(s.hDevice))
+	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
+	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
 	m.HandleFunc("PATCH /api/devices/{name}", s.admin(s.hPatchDevice))
 	m.HandleFunc("POST /api/devices/{name}/lease", s.admin(s.hLease))
 	m.HandleFunc("DELETE /api/devices/{name}/lease", s.admin(s.hRelease))
 	m.HandleFunc("POST /api/devices/{name}/reset", s.admin(s.hReset))
 	m.HandleFunc("GET /api/devices/{name}/serial", s.admin(s.hSerial))
-	m.HandleFunc("GET /api/devices/{name}/oob", s.admin(s.hOOBStatus))
-	m.HandleFunc("GET /api/stream", s.admin(s.hStream))
+	m.HandleFunc("GET /api/devices/{name}/oob", s.viewer(s.hOOBStatus))
+	m.HandleFunc("GET /api/stream", s.viewer(s.hStream))
 	m.HandleFunc("POST /api/devices/{name}/screenshot", s.admin(s.hScreenshot))
-	m.HandleFunc("GET /api/devices/{name}/screen", s.admin(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/screens", s.admin(s.hScreens))
-	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.admin(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/logs", s.admin(s.hLogs))
+	m.HandleFunc("GET /api/devices/{name}/screen", s.viewer(s.hScreen))
+	m.HandleFunc("GET /api/devices/{name}/screens", s.viewer(s.hScreens))
+	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.viewer(s.hScreen))
+	m.HandleFunc("GET /api/devices/{name}/logs", s.viewer(s.hLogs))
 	m.HandleFunc("GET /api/devices/{name}/console", s.admin(s.hConsoleRaw))
 	m.HandleFunc("POST /api/devices/{name}/console", s.admin(s.hConsoleWrite))
 	m.HandleFunc("POST /api/devices/{name}/console/arm", s.admin(s.hConsoleArm))
@@ -358,12 +374,12 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/enroll-tokens", s.admin(s.hEnrollToken))
 	m.HandleFunc("POST /api/artifacts", s.admin(s.hPutArtifact))
 	m.HandleFunc("POST /api/jobs", s.admin(s.hSubmit))
-	m.HandleFunc("GET /api/jobs", s.admin(s.hJobs))
-	m.HandleFunc("GET /api/jobs/{id}", s.admin(s.hJob))
-	m.HandleFunc("GET /api/jobs/{id}/wait", s.admin(s.hWait))
+	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
+	m.HandleFunc("GET /api/jobs/{id}", s.viewer(s.hJob))
+	m.HandleFunc("GET /api/jobs/{id}/wait", s.viewer(s.hWait))
 	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
 	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
-	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.admin(s.hJobFile))
+	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.viewer(s.hJobFile))
 	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
@@ -373,13 +389,13 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/installed/{release}/manifest", s.admin(s.hFreezeManifest))
 	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.admin(s.hFreezeEntry))
 	m.HandleFunc("POST /api/installed/{release}/promote", s.admin(s.hPromote))
-	m.HandleFunc("GET /api/installed/{release}", s.admin(s.hInstalledStatus))
-	m.HandleFunc("GET /api/builds", s.admin(s.hBuilds))
-	m.HandleFunc("GET /api/builds/{id}", s.admin(s.hBuild))
-	m.HandleFunc("GET /api/builds/{id}/log", s.admin(s.hBuildLog))
-	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.admin(s.hBuildFile))
+	m.HandleFunc("GET /api/installed/{release}", s.viewer(s.hInstalledStatus))
+	m.HandleFunc("GET /api/builds", s.viewer(s.hBuilds))
+	m.HandleFunc("GET /api/builds/{id}", s.viewer(s.hBuild))
+	m.HandleFunc("GET /api/builds/{id}/log", s.viewer(s.hBuildLog))
+	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
 	m.HandleFunc("POST /api/builds/{id}/cancel", s.admin(s.hCancelBuild))
-	m.HandleFunc("GET /api/builders", s.admin(s.hBuilders))
+	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
 	m.HandleFunc("POST /api/devices/{name}/exec", s.admin(s.hExec))
 	web.Register(m)
 	return m
@@ -398,9 +414,25 @@ func bearer(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
+// admin guards everything that changes the lab, the console (lab shell) and
+// the Mac's stored serial log.
 func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) != 1 && !s.trusted(r) {
+		switch a, who := s.access(r); a {
+		case adminAccess:
+			h(w, r)
+		case viewAccess:
+			httpErr(w, 403, "%s may only look; this needs a lab admin", who)
+		default:
+			httpErr(w, 401, "bad admin token")
+		}
+	}
+}
+
+// viewer guards read-only endpoints, which tailnet viewers may use too.
+func (s *Server) viewer(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if a, _ := s.access(r); a == noAccess {
 			httpErr(w, 401, "bad admin token")
 			return
 		}
@@ -444,10 +476,12 @@ func ParseTrust(v string) ([]*net.IPNet, error) {
 	return out, nil
 }
 
-// hAuth tells the UI whether this client needs a token at all.
+// hAuth tells the UI whether this client needs a token at all, and whether
+// it may only look. Sent with a token, it says what that token is worth.
 func (s *Server) hAuth(w http.ResponseWriter, r *http.Request) {
-	t := s.trusted(r)
-	writeJSON(w, map[string]bool{"trusted": t, "token_required": !t})
+	a, who := s.access(r)
+	role := map[access]string{viewAccess: "viewer", adminAccess: "admin"}[a]
+	writeJSON(w, map[string]any{"trusted": a == adminAccess, "token_required": a == noAccess, "role": role, "login": who})
 }
 
 type ctxKey struct{}

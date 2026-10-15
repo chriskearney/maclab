@@ -112,6 +112,13 @@ func (v *dev) viewLocked() DeviceView {
 	if d.Lease != nil && time.Now().After(d.Lease.Expires) {
 		d.Lease = nil
 	}
+	if d.OOB != nil {
+		// The controller's token resets the Mac and opens its root console:
+		// labd alone talks to the controller, clients only show the URL.
+		oob := *d.OOB
+		oob.Token = ""
+		d.OOB = &oob
+	}
 	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue), ScreenAt: v.screenAt}
 }
 
