@@ -102,6 +102,37 @@ Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
 1 = + hardware watchdog (`apple_wdt`, armed through systemd),
 2 = + out-of-band reset and serial.
 
+On a tier 1 Mac a test boot recovers from hangs without a controller Mac, once Linux runs.
+U-Boot leaves `apple_wdt` running into Linux (it feeds it itself while it or Limine waits,
+so a Mac sitting at a U-Boot prompt or the Limine menu is not reset). A test boot's
+command line adds `systemd.watchdog_sec=0 watchdog.open_timeout=120`: systemd, in the
+initramfs too, leaves the watchdog alone, and the kernel pings it only for 120 s. Any boot
+that hasn't opened it by then is reset within 30 s, a healthy one too, so lab-agent opens
+it on every test boot (about 5 s after the kernel starts, on an M1 Air; if it can't, it
+logs that the Mac will be reset): a boot that hung, or is alive but stuck before lab-agent
+runs (say waiting for its root device), is reset. lab-agent then holds the watchdog (so
+the Mac still shows tier 1) and feeds it only while:
+
+- PID 1 answers. lab-agent asks it for its version every 10 s, and 30 s without an answer
+  stops the feeding, test or not. This stands in for systemd's own watchdog, which is off
+  on a test boot: a wedged PID 1 is reset within 90 s of its last answer, where
+  `RuntimeWatchdogSec=30s` takes 30 s, and a PID 1 too busy to answer for 30 s counts as
+  wedged, which lab-agent logs.
+- A test runs within its timeout plus 20 s (2 minutes more for a GUI test, as waiting for
+  the desktop session can outlast a short timeout). Nothing else extends that: a test that hangs where its timeout
+  can't reach it ends in a reset although lab-agent keeps checking in, while labd still
+  waits for it.
+- Outside tests, the last check-in that reached labd, or the last command starting or
+  ending, was less than 10 minutes ago. A test boot stays up for as long as labd is in
+  touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
+  is reset after 10 minutes without labd.
+
+Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
+on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd
+is down it resets every 11 minutes or so. The watchdog stays running when lab-agent exits,
+so a shutdown that stalls is reset 60 s after that, and so is a test boot whose lab-agent
+is stopped (`systemctl stop lab-agent`).
+
 ## Setup
 
 ```sh

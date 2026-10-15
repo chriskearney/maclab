@@ -655,6 +655,35 @@ func TestSuspendDuringTestIsNotACrash(t *testing.T) {
 	}
 }
 
+// labd waits longer for a GUI test, as long as the agent's watchdog lets
+// one run (the desktop session can take that long to appear): a GUI test may
+// outlast another test's wait.
+func TestGUITestWait(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.s.cfg.TestGrace, l.s.cfg.GUIGrace = time.Second, 3*time.Second
+	l.sim.TestFiles = func(test, kernel string) map[string][]byte {
+		if strings.HasPrefix(test, "slow-") {
+			time.Sleep(2500 * time.Millisecond)
+		}
+		return nil
+	}
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-gui behavior=ok"), Tests: []api.TestSpec{
+		{Name: "slow-gui", Builtin: "x", GUI: true, TimeoutSec: 1},
+		{Name: "slow-plain", Builtin: "x", TimeoutSec: 1},
+	}})
+	got := map[string]api.TestResult{}
+	for _, tr := range j.Result.Tests {
+		got[tr.Name] = tr
+	}
+	if tr := got["slow-gui"]; !tr.Passed {
+		t.Errorf("GUI test taking 2.5 s with labd waiting 1+1+3 s: %+v", tr)
+	}
+	if tr := got["slow-plain"]; tr.Passed || !strings.Contains(tr.Error, "no result after 2s") {
+		t.Errorf("plain test taking 2.5 s with labd waiting 1+1 s: %+v", tr)
+	}
+}
+
 func TestShortQuietSpellDuringTest(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()

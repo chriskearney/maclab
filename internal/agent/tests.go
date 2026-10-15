@@ -28,6 +28,19 @@ func Builtins() []string {
 	return names
 }
 
+// guiSessionWait is how long a GUI test waits for the desktop session. The
+// wait counts against the test's timeout but isn't cut short by it, so a GUI
+// test with a shorter timeout can take this long.
+const guiSessionWait = 2 * time.Minute
+
+// testTimeout is how long a test may run before it is killed.
+func testTimeout(t api.TestSpec) time.Duration {
+	if t.TimeoutSec > 0 {
+		return time.Duration(t.TimeoutSec) * time.Second
+	}
+	return 5 * time.Minute
+}
+
 func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult {
 	res := api.TestResult{Name: t.Name}
 	fail := func(err error) api.TestResult { res.Error = err.Error(); res.ExitCode = -1; return res }
@@ -52,11 +65,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		return fail(errors.New("test has neither builtin nor script"))
 	}
 
-	timeout := time.Duration(t.TimeoutSec) * time.Second
-	if timeout <= 0 {
-		timeout = 5 * time.Minute
-	}
-	tctx, cancel := context.WithTimeout(ctx, timeout)
+	tctx, cancel := context.WithTimeout(ctx, testTimeout(t))
 	defer cancel()
 
 	env := append(os.Environ(), "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name)
@@ -65,7 +74,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		if l.GUIUser == "" {
 			return fail(errors.New("gui test, but no gui_user configured (lab-agent setup --gui-user)"))
 		}
-		u, genv, err := guiEnv(l.GUIUser, 2*time.Minute)
+		u, genv, err := guiEnv(l.GUIUser, guiSessionWait)
 		if err != nil {
 			return fail(err)
 		}

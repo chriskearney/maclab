@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
@@ -40,6 +41,15 @@ type System interface {
 	// Reboot and Crash run after the command's result has been reported.
 	Reboot() error
 	Crash(mode string) error
+
+	// OpenWatchdog takes the hardware watchdog for the agent to feed on a
+	// test boot. Nothing stops it again: once the agent exits, the machine
+	// resets unless something else feeds it.
+	OpenWatchdog() (io.Writer, error)
+	// PingInit returns once the init system (PID 1) answers a question, or
+	// an error if it doesn't before ctx ends. The agent feeds the watchdog
+	// only while it answers.
+	PingInit(ctx context.Context) error
 
 	// Alive is false while a simulated machine is hung. Always true on Linux.
 	Alive() bool

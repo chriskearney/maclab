@@ -284,14 +284,18 @@ func stockCmdline() (string, error) {
 // and loglevel, so a test boot starts the way the user's own boots do (an M1
 // Pro's desktop failed to start only with them removed); dmesg and the journal
 // record every level anyway. A serial console, or a.Verbose, makes the
-// boot verbose instead: no quiet or splash, and loglevel=7.
+// boot verbose instead: no quiet or splash, and loglevel=7. The watchdog
+// parameters replace the base's: systemd stays off the watchdog so the agent
+// can hold it, and the boot gets its deadline (see watchdog.go).
 func testCmdline(base string, a api.StageArgs, job string) string {
 	verbose := a.Serial || a.Verbose
 	var out []string
 	for _, f := range strings.Fields(base) {
 		switch {
 		case strings.HasPrefix(f, "BOOT_IMAGE="), strings.HasPrefix(f, "initrd="),
-			strings.HasPrefix(f, "maclab."), strings.HasPrefix(f, "panic="):
+			strings.HasPrefix(f, "maclab."), strings.HasPrefix(f, "panic="),
+			strings.HasPrefix(f, "systemd.watchdog_sec="), strings.HasPrefix(f, "watchdog.open_timeout="),
+			strings.HasPrefix(f, "watchdog.handle_boot_enabled="):
 			continue
 		case verbose && (strings.HasPrefix(f, "loglevel=") || f == "quiet" || f == "splash"):
 			continue
@@ -301,7 +305,8 @@ func testCmdline(base string, a api.StageArgs, job string) string {
 	if verbose {
 		out = append(out, "loglevel=7")
 	}
-	out = append(out, "panic=10")
+	out = append(out, "panic=10", "systemd.watchdog_sec=0",
+		fmt.Sprintf("watchdog.open_timeout=%d", int(labBootDeadline/time.Second)))
 	if a.Serial {
 		out = append(out, "console=ttySAC0,115200", "console=tty0")
 	}

@@ -55,6 +55,10 @@ type Config struct {
 	OMTPublish bool
 	// OMTEvery re-runs omarchy-m-test on each idle Mac's known-good kernel this often; 0 never.
 	OMTEvery time.Duration
+	// TestGrace is how long past a test's timeout labd waits for its result
+	// (default 2 minutes); GUIGrace is how much longer for a GUI test (default
+	// 2 minutes, see guiWait). Tests shorten them.
+	TestGrace, GUIGrace time.Duration
 }
 
 type Server struct {
@@ -82,6 +86,12 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	if cfg.BootTimeout == 0 {
 		cfg.BootTimeout = 4 * time.Minute
+	}
+	if cfg.TestGrace == 0 {
+		cfg.TestGrace = 2 * time.Minute
+	}
+	if cfg.GUIGrace == 0 {
+		cfg.GUIGrace = 2 * time.Minute
 	}
 	if cfg.OfflineAfter == 0 {
 		cfg.OfflineAfter = time.Minute
