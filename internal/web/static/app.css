@@ -276,6 +276,7 @@ code, .code { font-family: var(--mono); color: var(--strong); background: var(--
 .fact .v .good { color: var(--ok); }
 .mac .actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .mac .problems { color: var(--warn); font-size: 12px; }
+.mac .warnings { color: var(--dim); }
 .mac .job { display: flex; align-items: center; gap: 10px; padding: 9px 11px; border-radius: 6px; background: var(--sunken); border: 1px solid var(--line); cursor: pointer; }
 .mac .job:hover { border-color: var(--accent-line); }
 

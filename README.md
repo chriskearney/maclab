@@ -124,7 +124,26 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
 - Records the running kernel as known-good.
 - Sets `kernel.panic = 10`.
 - Arms the hardware watchdog (`RuntimeWatchdogSec=30s`).
+- Keeps the journal on disk, if it isn't already, with
+  `/etc/systemd/journald.conf.d/90-maclab.conf` (`Storage=persistent`), and
+  moves this boot's journal there, so labd can read a failed lab boot's journal.
+  `--volatile-journal` leaves journald alone.
 - Installs and starts `lab-agent.service`.
+
+`setup` refuses, before changing anything, a Mac that can't reboot unattended:
+one whose disk needs a passphrase at boot (dm-crypt root, an `/etc/crypttab` or
+`/etc/crypttab.initramfs` entry unlocked at boot without a key file, or
+`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=` or `cryptdevice=` on
+the cmdline), or, under Limine, one with Limine config enrollment on. Limine then
+checks `limine.conf` against a checksum built into its EFI binary and stops
+booting once the lab edits `limine.conf`. Enrollment is on when
+`EFI/BOOT/BOOTAA64.EFI` or `EFI/limine/limine_aa64.efi` on the ESP holds a
+checksum, or when `ENABLE_ENROLL_LIMINE_CONFIG=yes` in `/etc/default/limine` has
+every Limine update enroll one; set it to `no` there, then run
+`sudo limine enroll-config --reset <binary>` for each enrolled binary.
+`lab-agent preflight` reports the same as problems, which hold jobs back, and
+warns about a journal that isn't kept across reboots: that loses the logs of a
+lab boot that fails, but doesn't hold jobs back.
 
 Then run the baseline:
 

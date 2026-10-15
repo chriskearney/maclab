@@ -397,6 +397,7 @@ function macCard(d) {
   const kgMatch = d.known_good && d.known_good === d.kernel;
   const job = d.active_job && (S.jobCache[d.active_job] || S.jobs.find(j => j.id === d.active_job));
   const problems = d.facts?.problems || [];
+  const warnings = d.facts?.warnings || [];
   const tierColor = tier === 2 ? 'var(--ok)' : tier === 1 ? 'var(--accent)' : 'var(--warn)';
   const thumb = !zero(d.screen_at) ? `<a class="thumb" href="#/live/${esc(d.name)}" title="latest screen capture"><img data-screen="${esc(d.name)}" data-at="${esc(d.screen_at)}" alt=""><span class="age">${ago(d.screen_at)}</span></a>` : '';
   return `<article class="mac ${esc(d.state)} ${thumb ? 'has-thumb' : ''}" style="--c:${d.state === 'needs_hands' ? 'var(--bad)' : d.state === 'recovering' ? 'var(--warn)' : 'var(--info)'}">
@@ -420,6 +421,7 @@ function macCard(d) {
     ${history(d)}
     ${job ? `<div class="job" onclick="go('#/jobs/${esc(job.id)}')">${ic('pulse', 'strong')}<span class="strong">${esc(jobKind(job))}</span><span class="dim">${esc(job.state)}</span><span class="grow"></span><span class="muted">${esc(job.id)}</span>${ic('chev', 'muted')}</div>` : ''}
     ${problems.length ? `<div class="problems">${ic('alert')} ${problems.map(esc).join(' · ')}</div>` : ''}
+    ${warnings.length ? `<div class="problems warnings">${ic('alert')} ${warnings.map(esc).join(' · ')}</div>` : ''}
     <div class="actions">
       ${d.known_good ? `<button class="btn primary sm" onclick="go('#/run?device=${esc(d.name)}')">${ic('play')} Boot a kernel</button>`
         : `<button class="btn primary sm" onclick="confirmJob('${esc(d.name)}','baseline')">${ic('shield')} Run baseline</button>`}

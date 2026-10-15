@@ -19,6 +19,7 @@ const (
 	unitPath    = "/etc/systemd/system/lab-agent.service"
 	sysctlPath  = "/etc/sysctl.d/90-maclab.conf"
 	watchdogCfg = "/etc/systemd/system.conf.d/90-maclab-watchdog.conf"
+	journalCfg  = "/etc/systemd/journald.conf.d/90-maclab.conf"
 )
 
 const unit = `[Unit]
@@ -40,7 +41,10 @@ type SetupOptions struct {
 	Token     string
 	GUIUser   string
 	Autologin bool // log GUIUser into the desktop on boot, with idle lock off
-	Log       func(format string, args ...any)
+	// VolatileJournal leaves journald alone; preflight then warns that a
+	// failed lab boot's journal is lost.
+	VolatileJournal bool
+	Log             func(format string, args ...any)
 }
 
 // Setup makes this Mac a lab device. Every step is idempotent, and every
@@ -51,12 +55,14 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		return fmt.Errorf("setup must run as root")
 	}
 	l := &Linux{WorkDir: "/var/lib/maclab", GUIUser: o.GUIUser}
-	if err := os.MkdirAll(l.WorkDir, 0o755); err != nil {
-		return err
-	}
-
 	b, err := detectBootloader()
 	if err != nil {
+		return err
+	}
+	if hard, _ := unattended(b); len(hard) > 0 {
+		return fmt.Errorf("this Mac cannot reboot unattended; fix this and run setup again:\n  - %s", strings.Join(hard, "\n  - "))
+	}
+	if err := os.MkdirAll(l.WorkDir, 0o755); err != nil {
 		return err
 	}
 	switch g := b.(type) {
@@ -105,6 +111,15 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		say("hardware watchdog armed via systemd (30s)")
 	} else {
 		say("no /dev/watchdog0: hangs after boot need out-of-band reset or a human")
+	}
+
+	if move, err := persistJournal("/", o.VolatileJournal); err != nil {
+		say("journal: %v", err)
+	} else if move {
+		if err := moveJournal(); err != nil {
+			return fmt.Errorf("journal: %w (running setup again retries it)", err)
+		}
+		say("journal: kept on disk across reboots (labd reads a failed lab boot's journal)")
 	}
 
 	if err := serialGetty(o.GUIUser); err != nil {
@@ -159,10 +174,61 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	}
 	say("lab-agent.service enabled and running")
 
-	if p := l.Preflight(); len(p) > 0 {
+	p, w := l.Preflight()
+	if len(p) > 0 {
 		say("preflight problems:\n  - %s", strings.Join(p, "\n  - "))
 	} else {
 		say("preflight OK. Next: `lab baseline %s` proves the one-shot boot before any test kernel runs.", cfg.Name)
+	}
+	if len(w) > 0 {
+		say("preflight warnings:\n  - %s", strings.Join(w, "\n  - "))
+	}
+	return nil
+}
+
+// persistJournal turns journald's persistent storage on with a drop-in,
+// unless leave is set or the journal is already kept on disk without one: the
+// drop-in existing means setup made it. It says whether journald still has to
+// take the drop-in up and move this boot's journal to disk: setup wrote it
+// just now, or restarting journald failed in an earlier run.
+func persistJournal(root string, leave bool) (bool, error) {
+	if leave {
+		return false, nil
+	}
+	p := filepath.Join(root, journalCfg)
+	wrote := false
+	if volatileJournal(root) != "" {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return false, err
+		}
+		conf := "# maclab: keep the journal on disk, so labd can read a failed lab boot's journal from the next boot\n[Journal]\nStorage=persistent\n"
+		if err := os.WriteFile(p, []byte(conf), 0o644); err != nil {
+			return false, err
+		}
+		if why := volatileJournal(root); why != "" {
+			return false, fmt.Errorf("wrote %s, but the journal is still not kept on disk (%s)", journalCfg, why)
+		}
+		wrote = true
+	}
+	if _, err := os.Stat(p); err != nil {
+		return false, nil // kept on disk without the lab's drop-in
+	}
+	return wrote || journalInRun(root), nil
+}
+
+// moveJournal has journald take up setup's drop-in and move this boot's
+// journal from /run to /var/log/journal. The directory comes first, with
+// systemd-tmpfiles' attributes: on btrfs its NOCOW flag then reaches every
+// journal file created in it, the first one included.
+func moveJournal() error {
+	if err := os.MkdirAll("/var/log/journal", 0o755); err != nil {
+		return err
+	}
+	exec.Command("systemd-tmpfiles", "--create", "--prefix", "/var/log/journal").Run()
+	for _, c := range [][]string{{"systemctl", "restart", "systemd-journald"}, {"journalctl", "--flush"}} {
+		if out, err := exec.Command(c[0], c[1:]...).CombinedOutput(); err != nil {
+			return fmt.Errorf("%s: %v: %s", strings.Join(c, " "), err, out)
+		}
 	}
 	return nil
 }

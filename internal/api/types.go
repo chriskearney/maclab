@@ -93,7 +93,8 @@ type Facts struct {
 	GUIUser       string   `json:"gui_user,omitempty"`
 	AgentVersion  string   `json:"agent_version"`
 	PreflightOK   bool     `json:"preflight_ok"`
-	Problems      []string `json:"problems,omitempty"`
+	Problems      []string `json:"problems,omitempty"` // each one holds jobs back
+	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
 }
 
 type Health struct {
