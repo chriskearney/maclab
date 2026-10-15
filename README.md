@@ -283,7 +283,8 @@ install over a kernel it didn't install, including the running one.
 
 The device tree comes from m1n1 on the ESP, not from the test kernel, and that includes a
 release package booted with `lab run`. A kernel that needs new DT bindings needs a matching
-m1n1 stage 2. A lab boot doesn't exercise device-tree changes.
+m1n1 stage 2. A lab boot doesn't exercise device-tree changes. [Two installs per Mac](docs/ab-installs.md)
+proposes how it could.
 
 ## For AI agents
 
