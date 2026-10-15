@@ -96,6 +96,9 @@ func (l *Linux) Facts() api.Facts {
 		f.Machine = charsToString(u.Machine[:])
 	}
 	f.DTModel = readTrim("/proc/device-tree/model")
+	if c := readTrim("/proc/device-tree/compatible"); c != "" {
+		f.Compatible = strings.Split(c, "\x00")
+	}
 	if _, err := exec.LookPath("mkinitcpio"); err == nil {
 		f.Initramfs = "mkinitcpio"
 	} else if _, err := exec.LookPath("dracut"); err == nil {

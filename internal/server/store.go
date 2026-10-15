@@ -106,7 +106,15 @@ func (s *store) jobs(device string, limit int, unfinished bool) ([]*api.Job, err
 		q += ` AND state != 'done'`
 	}
 	q += ` ORDER BY created DESC LIMIT ?`
-	rows, err := s.db.Query(q, device, device, limit)
+	return scanJobs(s.db.Query(q, device, device, limit))
+}
+
+// kernelJobs lists the finished jobs that ran a kernel artifact, newest first.
+func (s *store) kernelJobs(sha string) ([]*api.Job, error) {
+	return scanJobs(s.db.Query(`SELECT data FROM jobs WHERE json_extract(data, '$.spec.kernel')=? AND state='done' ORDER BY created DESC`, sha))
+}
+
+func scanJobs(rows *sql.Rows, err error) ([]*api.Job, error) {
 	if err != nil {
 		return nil, err
 	}
