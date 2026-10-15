@@ -67,7 +67,7 @@ func serveMCP(ctx context.Context) error {
 		CmdlineStrip      []string `json:"cmdline_strip,omitempty" jsonschema:"globs of base parameters to drop, e.g. asahi.* apple_t6030_display.*"`
 		VerboseBoot       bool     `json:"verbose_boot,omitempty" jsonschema:"boot with loglevel=7 and without quiet/splash; by default a test boot keeps the Mac's own (always verbose with a serial console)"`
 		InstalledManifest string   `json:"installed_manifest,omitempty" jsonschema:"sha256 of a frozen expected manifest: boot the INSTALLED release through its installer entry, check identity, compare with the frozen pre-install baseline, never promote (needs a lease)"`
-		Tests             []string `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal"`
+		Tests             []string `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal, suspend-devices"`
 		GUITests          []string `json:"gui_tests,omitempty" jsonschema:"builtin tests to run inside the GUI user's Hyprland session: gui-smoke, gui-terminal"`
 		Scripts           []string `json:"scripts,omitempty" jsonschema:"local paths of shell scripts to run as tests (as root); write outputs to $MACLAB_OUT"`
 		GUIScripts        []string `json:"gui_scripts,omitempty" jsonschema:"local paths of shell scripts to run in the Wayland session"`

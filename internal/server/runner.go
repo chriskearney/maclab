@@ -297,6 +297,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		if t.TimeoutSec == 0 {
 			timeout = 7 * time.Minute
 		}
+		if n := realSleepNote(v.snapshot(), t); n != "" {
+			r.ev("warning: %s", n)
+		}
 		r.ev("test %s: running", t.Name)
 		var tr api.TestResult
 		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, timeout, &tr, func(n string) { r.ev("%s", n) })
@@ -442,6 +445,21 @@ func testVerdict(t api.TestResult) string {
 		return "error: " + t.Error
 	}
 	return fmt.Sprintf("fail (exit %d)", t.ExitCode)
+}
+
+// realSleepNote warns that a suspend-* test needs a person on an Apple
+// Silicon Mac: its RTC has no wakealarm, so neither the Mac nor the lab can
+// wake it, and an OOB reset only ends the boot. The builtin suspend-devices
+// resumes by itself (pm_test).
+func realSleepNote(d api.Device, t api.TestSpec) string {
+	if !strings.HasPrefix(t.Name, "suspend-") || t.Builtin == "suspend-devices" || !strings.HasPrefix(d.Facts.DTModel, "Apple ") {
+		return ""
+	}
+	n := fmt.Sprintf("test %s puts %s to sleep, and it can't wake itself (Apple Silicon's RTC has no wakealarm): someone must press a key on it", t.Name, d.Name)
+	if d.OOB != nil {
+		n += "; an OOB reset would end the test"
+	}
+	return n
 }
 
 func testsFor(spec api.JobSpec) []api.TestSpec {

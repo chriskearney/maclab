@@ -18,17 +18,21 @@ import (
 //go:embed tests/*.sh
 var builtinTests embed.FS
 
-// Builtins lists the tests embedded in the agent.
+// Builtins lists the tests embedded in the agent: the scripts, and
+// suspend-devices, which is Go.
 func Builtins() []string {
 	ents, _ := builtinTests.ReadDir("tests")
 	var names []string
 	for _, e := range ents {
 		names = append(names, e.Name()[:len(e.Name())-3])
 	}
-	return names
+	return append(names, suspendDevicesTest)
 }
 
 func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult {
+	if t.Builtin == suspendDevicesTest {
+		return suspendDevices(ctx, t, outDir, l.GUIUser)
+	}
 	res := api.TestResult{Name: t.Name}
 	fail := func(err error) api.TestResult { res.Error = err.Error(); res.ExitCode = -1; return res }
 
