@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -198,6 +199,17 @@ fi
 # maclab: end
 `, hookMarker, envName, g.ESP.UUID, envName, envName, envVar, envVar, envVar, envVar, envName, envVar,
 		maclabCfg, maclabCfg, maclabCfg, maclabCfg)
+}
+
+var reHook = regexp.MustCompile(`(?s)\n?` + regexp.QuoteMeta(hookMarker) + `.*?\n# maclab: end\n?`)
+
+// stripHook returns custom.cfg without the hook installHook appended, or false
+// if the hook has lost its end marker.
+func stripHook(custom []byte) ([]byte, bool) {
+	if !reHook.Match(custom) {
+		return custom, !bytes.Contains(custom, []byte(hookMarker))
+	}
+	return reHook.ReplaceAll(custom, nil), true
 }
 
 // installHook appends the one-shot hook to custom.cfg (backing it up first) and

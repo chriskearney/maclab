@@ -115,7 +115,13 @@ func (v *dev) viewLocked() DeviceView {
 	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue), ScreenAt: v.screenAt}
 }
 
-func (v *dev) publishLocked() { v.s.hub.publish("device", v.d.Name, v.viewLocked()) }
+// publishLocked sends the device to the web UI, which adds a device it
+// hasn't seen: never one lab forget dropped.
+func (v *dev) publishLocked() {
+	if !v.forgotten {
+		v.s.hub.publish("device", v.d.Name, v.viewLocked())
+	}
+}
 
 // rearmSerial asks the controller to put the Mac's debug UART back into
 // serial mode: the Mac drops out of it on every reboot.

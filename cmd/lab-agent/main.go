@@ -18,6 +18,7 @@ import (
 const usage = `lab-agent: the Mac side of the test lab
 
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin]
+  sudo lab-agent uninstall [--dry-run] [--force]   undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)
@@ -42,6 +43,12 @@ func main() {
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
 		fs.Parse(os.Args[2:])
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto,
+			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
+	case "uninstall":
+		dry := fs.Bool("dry-run", false, "print each action without taking it")
+		force := fs.Bool("force", false, "uninstall even with a job in flight, or with the bootloader not found")
+		fs.Parse(os.Args[2:])
+		err = agent.Uninstall(agent.UninstallOptions{DryRun: *dry, Force: *force,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "preflight":
 		l := &agent.Linux{WorkDir: "/var/lib/maclab"}

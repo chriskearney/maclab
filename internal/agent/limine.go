@@ -86,6 +86,70 @@ func detectLimine() (*limineLayout, error) {
 	return l, nil
 }
 
+// limineChecksumSlot marks where a Limine EFI binary holds the BLAKE2B of
+// limine.conf that `limine enroll-config` writes: 128 '0's until then.
+const limineChecksumSlot = "++CONFIG_B2SUM_SIGNATURE++"
+
+// limineConfigEnrolled says whether a Limine EFI binary has limine.conf's
+// checksum enrolled. Limine then stops booting ("CHECKSUM MISMATCH") once
+// limine.conf changes. Like Limine, it reads the 128 characters after the
+// first signature: all '0' means none.
+func limineConfigEnrolled(bin []byte) bool {
+	i := bytes.Index(bin, []byte(limineChecksumSlot))
+	if i < 0 || len(bin) < i+len(limineChecksumSlot)+128 {
+		return false
+	}
+	sum := bin[i+len(limineChecksumSlot):][:128]
+	return !bytes.Equal(sum, bytes.Repeat([]byte("0"), 128))
+}
+
+// reLimineSetting matches a setting in /etc/default/limine as Limine's tools
+// read it (load_key_value_config in /usr/lib/limine/limine-common-functions).
+var reLimineSetting = regexp.MustCompile(`^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$`)
+
+// limineEnrollsConfig says whether Limine's tools enroll limine.conf's
+// checksum at every update. They read ENABLE_ENROLL_LIMINE_CONFIG from
+// defaults (/etc/default/limine) and nowhere else: the last assignment wins,
+// one leading and one trailing double quote come off, and only "yes" is on.
+func limineEnrollsConfig(defaults string) bool {
+	b, err := os.ReadFile(defaults)
+	if err != nil {
+		return false
+	}
+	on := false
+	for _, line := range strings.Split(string(b), "\n") {
+		if m := reLimineSetting.FindStringSubmatch(line); m != nil && m[1] == "ENABLE_ENROLL_LIMINE_CONFIG" {
+			on = strings.TrimPrefix(strings.TrimSuffix(m[2], `"`), `"`) == "yes"
+		}
+	}
+	return on
+}
+
+// enrollment says why limine.conf's checksum is, or after the next Limine
+// update will be, built into Limine, and how to turn that off; "" if it
+// isn't. It reads the loader U-Boot boots and the copy Limine's tools install
+// and enroll, which an EFI boot entry may name. defaults is
+// /etc/default/limine.
+func (l *limineLayout) enrollment(defaults string) string {
+	var why, fix []string
+	if limineEnrollsConfig(defaults) {
+		why = append(why, "ENABLE_ENROLL_LIMINE_CONFIG=yes in /etc/default/limine, so every Limine update enrolls it")
+		fix = append(fix, "set ENABLE_ENROLL_LIMINE_CONFIG=no in /etc/default/limine")
+	}
+	for _, p := range []string{l.Loader, filepath.Join(l.ESP.Target, "EFI/limine/limine_aa64.efi")} {
+		if b, err := os.ReadFile(p); err == nil && limineConfigEnrolled(b) {
+			why = append(why, p+" has it enrolled")
+			fix = append(fix, "run `sudo limine enroll-config --reset "+p+"`")
+		}
+	}
+	if len(why) == 0 {
+		return ""
+	}
+	return "Limine config enrollment is on (" + strings.Join(why, "; ") + "): Limine then checks limine.conf against the checksum built into it " +
+		"and stops booting at all (\"CHECKSUM MISMATCH\") once limine.conf changes, as it does whenever the lab adds or removes its entries. " +
+		"To turn it off, " + strings.Join(fix, ", then ")
+}
+
 func (l *limineLayout) name() string { return "limine" }
 
 func (l *limineLayout) problems() []string {
@@ -224,6 +288,18 @@ func (l *limineLayout) writeEntriesLocked() error {
 	if out == string(conf) {
 		return nil
 	}
+	return writeSynced(l.Conf, []byte(out))
+}
+
+// removeEntriesLocked takes the marked block out of limine.conf, leaving the
+// file as it was before setup added the block. The caller holds the
+// boot-partition locks.
+func (l *limineLayout) removeEntriesLocked() error {
+	conf, err := os.ReadFile(l.Conf)
+	if err != nil || !reMaclabBlock.Match(conf) {
+		return err
+	}
+	out := strings.TrimRight(reMaclabBlock.ReplaceAllString(string(conf), "\n"), "\n") + "\n"
 	return writeSynced(l.Conf, []byte(out))
 }
 

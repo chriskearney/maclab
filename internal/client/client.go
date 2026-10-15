@@ -123,6 +123,11 @@ func (c *Client) Lease(ctx context.Context, name, holder string, ttl time.Durati
 	return &out, c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/lease", jsonBody(api.LeaseRequest{Holder: holder, TTLSec: int(ttl.Seconds())}), &out)
 }
 
+// ForgetDevice takes a Mac out of the lab; its jobs stay.
+func (c *Client) ForgetDevice(ctx context.Context, name string) error {
+	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name), nil, nil)
+}
+
 func (c *Client) Release(ctx context.Context, name, holder string) error {
 	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name)+"/lease?holder="+url.QueryEscape(holder), nil, nil)
 }

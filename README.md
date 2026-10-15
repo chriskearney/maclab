@@ -135,6 +135,21 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 
 No other job runs on a Mac until its baseline passes.
 
+To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made: it stops
+and removes the agent and its config (with the device secret), clears a lab one-shot, removes the
+maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
+the modules the lab installed, and the panic, watchdog, serial-getty and autologin settings, and
+maclab's journald drop-in, if a newer setup wrote one. U-Boot's `ubootefi.var.pre-maclab` is kept,
+not restored: it would drop any EFI variable set since. It refuses on a lab kernel. While the maclab
+block is in `limine.conf`, it also refuses while Limine config enrollment is on, and says how to turn
+it off: a Limine binary on the ESP with the file's checksum enrolled would not boot once the block
+came out, and with `ENABLE_ENROLL_LIMINE_CONFIG=yes` any Limine update could enroll one mid-uninstall.
+Without `--force`, it refuses while a job is in flight or the bootloader can't be found; with it, a
+bootloader it can't find is left alone, and so is `/var/lib/maclab`. `--dry-run` prints each action,
+or the refusal, without taking it. labd still lists the Mac afterwards:
+`lab forget <device>` on the controller drops it (its jobs stay), so it can enroll again under the
+same name.
+
 ### Out-of-band control from a macOS host
 
 On the controller Mac, build `macvdmtool` (Xcode command line tools).

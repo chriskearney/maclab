@@ -39,6 +39,12 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data`, d.ID, d.N
 	return err
 }
 
+// deleteDevice drops a device's record. Its jobs stay in the history.
+func (s *store) deleteDevice(id string) error {
+	_, err := s.db.Exec(`DELETE FROM devices WHERE id=?`, id)
+	return err
+}
+
 type deviceRow struct {
 	d          api.Device
 	secretHash string

@@ -9,8 +9,10 @@ import (
 	"unicode/utf16"
 )
 
+// efivarsDir is where efivarfs is mounted (a temp dir in tests).
+var efivarsDir = "/sys/firmware/efi/efivars"
+
 const (
-	efivarsDir = "/sys/firmware/efi/efivars"
 	// systemd's Boot Loader Interface vendor GUID (LoaderEntryOneShot, LoaderInfo, ...).
 	bliGUID = "4a67b082-0a4c-41cf-b6c7-440b29bb8c4f"
 	// U-Boot's vendor GUID for RTStorageVolatile and VarToFile.

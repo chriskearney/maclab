@@ -51,6 +51,8 @@ func (s *Server) deviceLoop(v *dev) {
 		select {
 		case <-s.ctx.Done():
 			return
+		case <-v.gone:
+			return
 		case id := <-v.queue:
 			j, err := s.store.job(id)
 			if err != nil || j.State == api.JobDone {

@@ -35,8 +35,13 @@ type dev struct {
 	dirty    bool // a lab kernel may still be staged on the Mac
 	restore  api.DeviceState
 	queue    chan string
+	gone     chan struct{} // closed when the device is forgotten: ends deviceLoop
 	oob      oob.Controller
 	oobStop  context.CancelFunc
+
+	// forgotten: lab forget deleted the device's row. Set under mu, which
+	// every save holds, so nothing still holding the device writes it back.
+	forgotten bool
 
 	shotMu     sync.Mutex
 	screenAt   time.Time
@@ -54,7 +59,7 @@ type dev struct {
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256)}
+		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{})}
 	return v
 }
 
@@ -71,8 +76,20 @@ func (v *dev) snapshot() api.Device {
 	return d
 }
 
+var errForgotten = errors.New("the device was forgotten (lab forget)")
+
+// storeLocked saves the device, unless lab forget deleted its row: a
+// check-in, the monitor or a promotion still holding it must not bring the
+// row back, where it would clash with a Mac enrolled again under its name.
+func (v *dev) storeLocked() error {
+	if v.forgotten {
+		return errForgotten
+	}
+	return v.s.store.saveDevice(&v.d, v.secretHash)
+}
+
 func (v *dev) saveLocked() {
-	if err := v.s.store.saveDevice(&v.d, v.secretHash); err != nil {
+	if err := v.storeLocked(); err != nil && !errors.Is(err, errForgotten) {
 		v.s.log.Printf("save device %s: %v", v.d.Name, err)
 	}
 }

@@ -43,6 +43,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
+  lab forget <device>                 take a Mac out of the lab (after lab-agent uninstall); its jobs stay
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
   lab installed freeze-entry <device> --release R    freeze the installer's boot entry, after the install
   lab installed promote <device> --release R --job <id> --accepted-by <who>
@@ -482,6 +483,17 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 			return err
 		}
 		fmt.Printf("%s leased by %s until %s\n", pos[0], l.Holder, l.Expires.Format(time.TimeOnly))
+		return nil
+
+	case "forget":
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab forget <device>"); err != nil {
+			return err
+		}
+		if err := c.ForgetDevice(ctx, pos[0]); err != nil {
+			return err
+		}
+		fmt.Printf("forgot %s; its jobs stay. `lab enroll %s` adds it again.\n", pos[0], pos[0])
 		return nil
 
 	case "release":
