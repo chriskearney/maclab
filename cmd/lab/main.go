@@ -41,6 +41,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab crashtest <device>              deliberately panic the Mac and check it recovers by itself
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
+  lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel, tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
@@ -433,6 +434,22 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		fmt.Println(url)
 		return nil
+
+	case "retry":
+		noWait := fs.Bool("no-wait", false, "queue and return")
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab retry <job>"); err != nil {
+			return err
+		}
+		j, err := c.Retry(ctx, pos[0], holder())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("job %s queued on %s (a retry of %s)\n", j.ID, j.Spec.Device, pos[0])
+		if *noWait {
+			return nil
+		}
+		return follow(ctx, c, j.ID)
 
 	case "cancel":
 		pos := parse(fs, args)

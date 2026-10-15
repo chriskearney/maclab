@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,8 +15,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -74,6 +77,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 	panicGrace = 2 * time.Second
 	serialStall = 3 * time.Second
 	quietGrace = 3 * time.Second
+	stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &lab{t: t, cancel: cancel, name: name}
 	sim := agent.NewSim(t.TempDir())
@@ -767,6 +771,197 @@ func TestCmdlineBaseAndStrip(t *testing.T) {
 	}
 	if _, code, err := l.s.Submit(api.JobSpec{Device: "sim-mac", CmdlineStrip: []string{"[bad"}}); err == nil || code != 400 {
 		t.Fatalf("bad glob: %d %v", code, err)
+	}
+}
+
+// stageEvents lists a job's failed staging attempts.
+func stageEvents(j *api.Job) []string {
+	var out []string
+	for _, e := range j.Events {
+		if strings.HasPrefix(e.Msg, "staging attempt ") {
+			out = append(out, e.Msg)
+		}
+	}
+	return out
+}
+
+// A staging that fails once, as a dropped download would, is tried again
+// after the half-staged leftovers are cleaned up, and the job passes.
+func TestStageRetryTransient(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.FailStage(func(n int) error {
+		if n == 1 {
+			return errors.New("fetch artifact: unexpected EOF")
+		}
+		return nil
+	})
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-flaky behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	if ev := stageEvents(j); len(ev) != 1 || ev[0] != "staging attempt 1 of 3 failed: fetch artifact: unexpected EOF" {
+		t.Fatalf("staging events: %q", ev)
+	}
+}
+
+// The same error twice in a row (numbers aside) looks permanent: no third attempt.
+func TestStageRetrySameErrorStops(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.FailStage(func(n int) error { return fmt.Errorf("ESP has %d MB free, needs 120 MB", 20-n) })
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-full behavior=ok")})
+	l.expect(j, api.OutcomeStageFailed)
+	if ev := stageEvents(j); len(ev) != 2 || !strings.HasPrefix(ev[1], "staging attempt 2 of 3 failed: ESP has 18 MB free") {
+		t.Fatalf("staging events: %q", ev)
+	}
+	want := "couldn't stage: ESP has 18 MB free, needs 120 MB (the same error twice: looks permanent, not retrying). Retry with `lab retry " + j.ID + "`"
+	if j.Summary != want {
+		t.Fatalf("summary %q, want %q", j.Summary, want)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady })
+}
+
+// Three different errors use up the attempts.
+func TestStageRetryGivesUp(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	errs := []string{"connection reset by peer", "the ESP lock is held", "unexpected EOF"}
+	l.sim.FailStage(func(n int) error { return errors.New(errs[min(n, 3)-1]) })
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-unlucky behavior=ok")})
+	l.expect(j, api.OutcomeStageFailed)
+	if ev := stageEvents(j); len(ev) != 3 || ev[2] != "staging attempt 3 of 3 failed: unexpected EOF" {
+		t.Fatalf("staging events: %q", ev)
+	}
+	if want := "couldn't stage: unexpected EOF (3 attempts failed). Retry with `lab retry " + j.ID + "`"; j.Summary != want {
+		t.Fatalf("summary %q, want %q", j.Summary, want)
+	}
+}
+
+// An attempt that may still be running isn't tried again: one labd stopped
+// waiting for, or one whose Mac went quiet on the same boot. A cleanup and a
+// second attempt would race it over the same files.
+func TestStageNoRetryWhileItMayRun(t *testing.T) {
+	for _, c := range []struct {
+		name    string
+		timeout time.Duration                         // labd's wait for an attempt, if shorter
+		first   func(l *lab, release <-chan struct{}) // the first attempt, still staging
+		want    string
+	}{
+		{"labd stops waiting", time.Second, func(l *lab, release <-chan struct{}) { <-release },
+			"staging failed: no result after 1s (not tried again: the Mac may still be staging it)"},
+		{"the Mac goes quiet", 0, func(l *lab, release <-chan struct{}) { l.sim.Quiet(5 * time.Second) },
+			"staging failed: " + errDeviceLost.Error() + " (not tried again: the Mac may still be staging it)"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			l := newLab(t, true)
+			l.baseline()
+			if c.timeout > 0 {
+				l.s.cfg.StageTimeout = c.timeout
+			}
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			var tries atomic.Int32
+			l.sim.FailStage(func(n int) error {
+				tries.Store(int32(n))
+				if n == 1 {
+					c.first(l, release)
+				}
+				return nil
+			})
+			j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-slow behavior=ok")})
+			l.expect(j, api.OutcomeStageFailed)
+			// (a Mac still quiet fails the restore's cleanup too, which the summary adds)
+			if want := c.want + ". Retry with `lab retry " + j.ID + "`"; !strings.HasPrefix(j.Summary, want) {
+				t.Fatalf("summary %q, want %q", j.Summary, want)
+			}
+			if ev := stageEvents(j); len(ev) != 0 || tries.Load() != 1 {
+				t.Fatalf("%d staging attempts, events %q", tries.Load(), ev)
+			}
+		})
+	}
+}
+
+// A Mac that rebooted under a staging attempt ended it: it is cleaned up and
+// tried again.
+func TestStageRetryAfterReboot(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	gone := make(chan struct{})
+	t.Cleanup(func() { close(gone) })
+	l.sim.FailStage(func(n int) error {
+		if n == 1 {
+			l.sim.PowerCycle()
+			<-gone // the attempt died with its boot
+		}
+		return nil
+	})
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-reboot behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	if ev := stageEvents(j); len(ev) != 1 || ev[0] != "staging attempt 1 of 3 failed: "+errDeviceLost.Error() {
+		t.Fatalf("staging events: %q", ev)
+	}
+}
+
+// Retrying a finished job queues a new one with the same spec.
+func TestRetryJob(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.FailStage(func(int) error { return errors.New("bad package") })
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-retry behavior=ok"), Cmdline: "extra=1", CmdlineStrip: []string{"quiet"},
+		Tests: []api.TestSpec{{Name: "gui-smoke", Builtin: "gui-smoke"}}, Holder: "first"})
+	l.expect(j, api.OutcomeStageFailed)
+	l.sim.FailStage(nil)
+
+	resp, body := l.post("/api/jobs/"+j.ID+"/retry?holder=second", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("retry: %d %s", resp.StatusCode, body)
+	}
+	var n api.Job
+	json.Unmarshal([]byte(body), &n)
+	want := j.Spec
+	want.Holder = "second"
+	if n.ID == j.ID || !reflect.DeepEqual(n.Spec, want) || n.Events[0].Msg != "queued: a retry of job "+j.ID {
+		t.Fatalf("retry of %s: %s %+v %v", j.ID, n.ID, n.Spec, n.Events)
+	}
+	l.expect(l.wait(n.ID, 60*time.Second), api.OutcomePass)
+	if resp, _ := l.post("/api/jobs/nope/retry", nil); resp.StatusCode != 404 {
+		t.Fatalf("retry of no job: %d", resp.StatusCode)
+	}
+
+	// An unfinished job can't be retried yet.
+	q, _, err := l.s.Submit(api.JobSpec{Device: l.name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := l.post("/api/jobs/"+q.ID+"/retry", nil); resp.StatusCode != 409 {
+		t.Fatalf("retry of a queued job: %d %s", resp.StatusCode, body)
+	}
+	l.wait(q.ID, 60*time.Second)
+
+	// A source job's retry boots the kernel the first one built, without the
+	// config it was built with: that may be gone by then.
+	art := l.artifact("krel=7.2-built behavior=ok")
+	gc := strings.Repeat("c", 64) // a config artifact collected since
+	src := &api.Job{ID: "jsrc", Spec: api.JobSpec{Device: l.name, Source: "https://github.com/o/r/tree/b", Kernel: art, Build: "b1", Config: gc},
+		State: api.JobDone, Outcome: api.OutcomeStageFailed}
+	if err := l.s.store.saveJob(src); err != nil {
+		t.Fatal(err)
+	}
+	r, _, err := l.s.Retry(src.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Spec.Kernel != art || r.Spec.Build != "b1" || r.Spec.Source != src.Spec.Source {
+		t.Fatalf("source retry spec: %+v", r.Spec)
+	}
+	l.expect(l.wait(r.ID, 60*time.Second), api.OutcomePass)
+
+	// Once its kernel is collected too, it would build again, which needs the config.
+	src.ID, src.Spec.Kernel = "jsrc2", strings.Repeat("d", 64)
+	if err := l.s.store.saveJob(src); err != nil {
+		t.Fatal(err)
+	}
+	if _, code, err := l.s.Retry(src.ID, ""); code != 400 || err == nil || !strings.Contains(err.Error(), "config artifact "+gc) {
+		t.Fatalf("retry needing a collected config: %d %v", code, err)
 	}
 }
 

@@ -525,7 +525,7 @@ function paintJobs() {
   put('sub-detail', `${esc(j.id)} · ${esc(j.spec.device)} · ${new Date(j.created).toLocaleString()}`);
   $('#desk')?.classList.toggle('sel', !!S.params.arg);
   put('tools-detail', `<button class="btn sm ghost mob-back" onclick="go('#/jobs')">${I.chev} Jobs</button>` + (j.state !== 'done' ? `<button class="btn sm ghost danger" onclick="cancelJob('${esc(j.id)}')">${ic('stop')} Cancel</button>` :
-    `<button class="btn sm ghost" onclick="rerun('${esc(j.id)}')">${ic('restart')} Run again</button>`));
+    `<button class="btn sm ghost" onclick="retryJob('${esc(j.id)}')">${ic('restart')} Retry</button>`));
   put('detail', jobDetail(j));
   bindDetail(j);
 }
@@ -1590,10 +1590,9 @@ async function cancelJob(id) {
   try { toast('Canceling', await post(`/api/jobs/${encodeURIComponent(id)}/cancel`)); tick(); } catch (e) { toast('Could not cancel', e.message, true); }
 }
 
-async function rerun(id) {
-  const j = S.jobCache[id];
-  if (!j) return;
-  try { const n = await post('/api/jobs', { ...j.spec, holder: 'web' }); go('#/jobs/' + n.id); } catch (e) { toast('Could not re-run', e.message, true); }
+// retryJob queues a finished job again: same Mac, kernel, tests and cmdline.
+async function retryJob(id) {
+  try { const n = await post(`/api/jobs/${enc(id)}/retry?holder=web`); go('#/jobs/' + n.id); } catch (e) { toast('Could not retry', e.message, true); }
 }
 
 function viewer(src) {
