@@ -50,6 +50,14 @@ type dev struct {
 
 	asleep time.Time // when the agent said the Mac is going to sleep; zero while awake
 	awoke  time.Time // when it said it woke up: quietGrace counts from here
+
+	// heard is the last check-in from the Mac itself. LastSeen also moves when
+	// labd answers a held check-in, which a Mac that just died can't hear.
+	heard time.Time
+	// The last reboot labd saw: the boot that ended, the last check-in heard
+	// from it, and the first check-in of the boot after it.
+	endedBoot            string
+	endedHeard, nextSeen time.Time
 }
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
@@ -115,7 +123,10 @@ func (v *dev) heartbeat(ci api.Checkin) {
 	now := time.Now()
 	rebooted := v.d.BootID != "" && ci.BootID != v.d.BootID
 	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel
-	v.d.LastSeen = now
+	if rebooted {
+		v.endedBoot, v.endedHeard, v.nextSeen = v.d.BootID, v.heard, now
+	}
+	v.d.LastSeen, v.heard = now, now
 	// Checking in means awake, except for a poll that raced the sleep announcement.
 	if !v.asleep.IsZero() && now.Sub(v.asleep) > 5*time.Second {
 		v.asleep = time.Time{}
@@ -245,6 +256,17 @@ func (v *dev) addEventLocked(e api.KernelEvent) {
 		v.events = v.events[len(v.events)-1000:]
 	}
 	v.s.log.Printf("%s: kernel event %s (%s): %s", v.d.Name, e.Kind, e.Source, e.Line)
+}
+
+// silentFor is how long the Mac was out of touch when boot ended: from the
+// last check-in labd heard on it to the first one on the boot after it.
+func (v *dev) silentFor(boot string) (time.Duration, bool) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if boot == "" || v.endedBoot != boot || v.endedHeard.IsZero() {
+		return 0, false
+	}
+	return v.nextSeen.Sub(v.endedHeard), true
 }
 
 func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
