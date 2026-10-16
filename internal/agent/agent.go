@@ -21,6 +21,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 
@@ -382,7 +383,9 @@ func (a *Agent) reportLoop(ctx context.Context) {
 }
 
 // report sends finished results and new kernel events, then runs any action
-// (a reboot) that had to wait until its result reached labd.
+// (a reboot) that had to wait until its result reached labd. A report labd
+// refuses as too large (413) goes again one item at a time (sendEach), so
+// one oversized result can't hold up everything after it.
 func (a *Agent) report(ctx context.Context) error {
 	a.repMu.Lock()
 	defer a.repMu.Unlock()
@@ -392,12 +395,17 @@ func (a *Agent) report(ctx context.Context) error {
 	if len(rep.Results) == 0 && len(rep.Events) == 0 {
 		return nil
 	}
-	if err := postJSON(ctx, a.http, a.url("/api/agent/report"), a.cfg.Secret, rep, nil); err != nil {
+	err := a.post(ctx, rep)
+	switch {
+	case tooLarge(err):
+		err = a.sendEach(ctx, rep)
+	case err == nil:
+		a.reported(len(rep.Results), len(rep.Events))
+	}
+	if err != nil {
 		return err
 	}
 	a.mu.Lock()
-	a.results = a.results[len(rep.Results):]
-	a.events = a.events[len(rep.Events):]
 	var after []func()
 	if len(a.results) == 0 {
 		after, a.after = a.after, nil
@@ -407,6 +415,153 @@ func (a *Agent) report(ctx context.Context) error {
 		f()
 	}
 	return nil
+}
+
+func (a *Agent) post(ctx context.Context, rep api.Report) error {
+	return postJSON(ctx, a.http, a.url("/api/agent/report"), a.cfg.Secret, rep, nil)
+}
+
+// reported takes the first n results and m events off the queue: labd has
+// them. Only report, under repMu, takes any off, so they are the ones it sent.
+func (a *Agent) reported(n, m int) {
+	a.mu.Lock()
+	a.results, a.events = a.results[n:], a.events[m:]
+	a.mu.Unlock()
+}
+
+// reportFieldMax is how much of each long text in a result (a test's tail, a
+// command's output, a journal) is kept when labd refuses the result as too
+// large: its last reportFieldMax bytes. Tests shrink it.
+var reportFieldMax = 1 << 20
+
+// cutNote starts every text cut down to reportFieldMax.
+const cutNote = "[truncated by lab-agent: report too large]\n"
+
+// sendEach sends rep's results and events in reports of one each, after
+// labd refused rep as too large, taking each off the queue as labd takes
+// it. One still too large goes once more with its long texts cut down
+// (cutResult); if labd refuses that too, it is dropped. A dropped result
+// is replaced by a failed one that says why, so that what labd waits on (a
+// test) still ends.
+func (a *Agent) sendEach(ctx context.Context, rep api.Report) error {
+	alone := len(rep.Results)+len(rep.Events) == 1 // refused already, by itself
+	for _, r := range rep.Results {
+		if err := a.sendResult(ctx, r, alone); err != nil {
+			return err
+		}
+		a.reported(1, 0)
+	}
+	for _, e := range rep.Events {
+		if err := a.sendEvent(ctx, e, alone); err != nil {
+			return err
+		}
+		a.reported(0, 1)
+	}
+	return nil
+}
+
+// sendResult sends one result: as it is unless labd refused it as too large
+// already, then cut down, then as a failed result in its place. It returns
+// an error only for a send that may work if tried again.
+func (a *Agent) sendResult(ctx context.Context, r api.CommandResult, refused bool) error {
+	send := func(r api.CommandResult) error { return a.post(ctx, api.Report{Results: []api.CommandResult{r}}) }
+	if !refused {
+		if err := send(r); !tooLarge(err) {
+			return err
+		}
+	}
+	size := len(r.Output) + len(r.Error)
+	if c, ok := cutResult(r); ok {
+		a.log.Printf("report: labd refused the result of command %s (%d bytes) as too large; sending it with its long texts cut down", r.ID, size)
+		if err := send(c); !tooLarge(err) {
+			return err
+		}
+	}
+	a.log.Printf("report: error: labd refused the result of command %s (%d bytes) as too large even cut down; dropping it", r.ID, size)
+	err := send(api.CommandResult{ID: r.ID, Error: fmt.Sprintf("lab-agent dropped this command's result (%d bytes): labd refused it as too large, "+
+		"even with its long texts cut down to their last %d bytes", size, reportFieldMax)})
+	if tooLarge(err) {
+		return nil // nothing smaller to send
+	}
+	return err
+}
+
+// sendEvent sends one kernel event, as sendResult sends a result; labd needs
+// no word of one it doesn't get.
+func (a *Agent) sendEvent(ctx context.Context, e api.KernelEvent, refused bool) error {
+	send := func(e api.KernelEvent) error { return a.post(ctx, api.Report{Events: []api.KernelEvent{e}}) }
+	if !refused {
+		if err := send(e); !tooLarge(err) {
+			return err
+		}
+	}
+	if len(e.Line) > reportFieldMax {
+		c := e
+		c.Line = cutText(e.Line)
+		if err := send(c); !tooLarge(err) {
+			return err
+		}
+	}
+	a.log.Printf("report: error: labd refused a %s kernel event (%d bytes) as too large; dropping it", e.Kind, len(e.Line))
+	return nil
+}
+
+// cutResult is r with each text longer than reportFieldMax, its error and
+// any string in its output, cut down to its end, after cutNote. ok is false
+// when r has no such text.
+func cutResult(r api.CommandResult) (api.CommandResult, bool) {
+	cut := false
+	if len(r.Error) > reportFieldMax {
+		r.Error, cut = cutText(r.Error), true
+	}
+	if len(r.Output) > reportFieldMax {
+		d := json.NewDecoder(bytes.NewReader(r.Output))
+		d.UseNumber() // numbers go back as they came
+		var v any
+		if d.Decode(&v) == nil {
+			if v, ok := cutTexts(v); ok {
+				if b, err := json.Marshal(v); err == nil {
+					r.Output, cut = b, true
+				}
+			}
+		}
+	}
+	return r, cut
+}
+
+// cutTexts cuts down each string longer than reportFieldMax in v, decoded
+// JSON, and says whether there was one.
+func cutTexts(v any) (any, bool) {
+	cut := false
+	switch v := v.(type) {
+	case string:
+		if len(v) > reportFieldMax {
+			return cutText(v), true
+		}
+	case []any:
+		for i := range v {
+			var c bool
+			v[i], c = cutTexts(v[i])
+			cut = cut || c
+		}
+	case map[string]any:
+		for k := range v {
+			var c bool
+			v[k], c = cutTexts(v[k])
+			cut = cut || c
+		}
+	}
+	return v, cut
+}
+
+// cutText is cutNote and the last reportFieldMax bytes of s, from the start
+// of a character.
+func cutText(s string) string {
+	t := s[len(s)-reportFieldMax:]
+	for len(t) > 0 && !utf8.RuneStart(t[0]) {
+		t = t[1:]
+	}
+	return cutNote + t
 }
 
 func (a *Agent) start(ctx context.Context, c api.Command) {
@@ -735,10 +890,24 @@ func postJSON(ctx context.Context, c *http.Client, u, secret string, in, out any
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return &statusError{resp.StatusCode, fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
 	}
 	if out != nil {
 		return json.Unmarshal(body, out)
 	}
 	return nil
+}
+
+// statusError is labd answering with a status other than 200.
+type statusError struct {
+	code int
+	msg  string // the status and what labd said
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// tooLarge reports whether labd refused a request as too large (413).
+func tooLarge(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusRequestEntityTooLarge
 }
