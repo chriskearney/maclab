@@ -274,13 +274,18 @@ tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, s
 `left`, and from then on neither resets it nor asks for hands, as it otherwise would once the agent
 stops mid-job. If labd can't be reached, uninstall goes on, and says so and what to run on the
 controller instead (`lab cancel <job>`, then `lab forget <device>`). Then it stops the agent. If
-that fails, or uninstall is interrupted (Ctrl-C) before it, the agent runs on and nothing else is
-changed: uninstall tells labd the Mac stays after all, and labd puts it back in the pool (its
-canceled jobs stay canceled). If labd doesn't hear that, uninstall says so: `lab reset <device>` on
-the controller puts a Mac that left back in the lab, and runs the recovery ladder on it, out-of-band
-reset included, as for any Mac (a Mac that wedged mid-uninstall, say). Only labd's own recovery
-leaves a Mac that left alone; for one whose uninstall finished, use `lab forget`, as with no agent
-to check in a reset ends in a call for hands. Once the agent is stopped, uninstall removes it
+that fails, or uninstall is interrupted (Ctrl-C) before it, nothing else is changed, and while the
+agent runs on, uninstall tells labd the Mac stays after all: labd puts it back in the pool (its
+canceled jobs stay canceled). But `systemctl disable --now` can fail, or die of a Ctrl-C, while
+systemd goes on to stop the agent, so uninstall first asks systemd whether `lab-agent.service` is
+still active or enabled. If it is neither, there is no agent to keep the Mac in the lab: uninstall
+leaves it `left`, says so, and finishes when run again. If labd doesn't hear that the Mac stays,
+uninstall says so: `lab reset <device>` on the controller puts a Mac that left back in the lab, and
+runs the recovery ladder on it, out-of-band reset included, as for any Mac (a Mac that wedged
+mid-uninstall, say). Only labd's own recovery leaves a Mac that left alone. Don't `lab reset` a Mac
+whose uninstall finished: it brings back a Mac with no agent, which then goes through recovery,
+out-of-band resets and all, and ends in a call for hands. Use `lab forget` for it instead. Once the
+agent is stopped, uninstall removes it
 and its config (with the device secret), clears a lab one-shot, removes the
 maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
 the modules the lab installed, and the panic, watchdog, serial-getty and autologin settings, and

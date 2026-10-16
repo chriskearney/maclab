@@ -263,6 +263,30 @@ func (u *uninstaller) stayInLab(cfg *Config) {
 	u.say("told labd at %s that %s stays in the lab after all", cfg.Server, cfg.Name)
 }
 
+// stopFailed is stayInLab for a systemctl disable --now that failed. That
+// may be systemctl alone: interrupted (Ctrl-C) while it waits, it dies, and
+// PID 1 goes on to stop the agent all the same. A leave taken back then
+// would leave labd a silent idle Mac, which it starts recovering. So the
+// leave is taken back only if the agent will run on: its service is still
+// active, or still enabled to start at the next boot.
+func (u *uninstaller) stopFailed(cfg *Config, err error) {
+	if !u.asked || u.heard == "forgotten" {
+		return
+	}
+	if u.cmd("systemctl", "is-active", "--quiet", "lab-agent.service") == nil ||
+		u.cmd("systemctl", "is-enabled", "--quiet", "lab-agent.service") == nil {
+		u.stayInLab(cfg)
+		return
+	}
+	if u.heard != "told" {
+		u.say("systemctl failed (%v), but lab-agent.service is no longer active or enabled, and labd at %s wasn't told that %s is leaving the lab. "+
+			"Run uninstall again to finish, and on the controller run %s", err, cfg.Server, cfg.Name, u.todo)
+		return
+	}
+	u.say("systemctl failed (%v), but lab-agent.service is no longer active or enabled: labd at %s keeps %s as left, as it should with no agent. "+
+		"Run uninstall again to finish, then `lab forget %s` on the controller", err, cfg.Server, cfg.Name, cfg.Name)
+}
+
 // labdSteps is what to run on the controller when labd wasn't told.
 func labdSteps(name string, jobs []string) string {
 	cancel := fmt.Sprintf("`lab cancel <job>` for each job `lab jobs %s` lists as running or queued", name)
@@ -327,7 +351,7 @@ func (u *uninstaller) uninstall() error {
 	}
 	if err := u.service(); err != nil {
 		if !u.stopped {
-			u.stayInLab(cfg)
+			u.stopFailed(cfg, err)
 		}
 		return fmt.Errorf("%w; uninstall stopped there and left the rest: run it again once lab-agent.service is stopped", err)
 	}

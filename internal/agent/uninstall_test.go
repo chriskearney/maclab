@@ -690,44 +690,102 @@ func TestUninstallLabdUnreachable(t *testing.T) {
 	}
 }
 
+// With labd unreachable and the agent stopped by a disable --now whose
+// systemctl died, there is nothing to take back: uninstall says what to run
+// on the controller.
+func TestUninstallStopFailedLabdUnreachable(t *testing.T) {
+	f := newFakeLabd(t)
+	url := f.srv.URL
+	f.srv.Close()
+	m := labMacFor(t, url, nil)
+	record := m.u.cmd
+	m.u.cmd = func(name string, args ...string) error {
+		record(name, args...)
+		switch strings.Join(args, " ") {
+		case "disable --now lab-agent.service":
+			return errors.New("signal: interrupt")
+		case "is-active --quiet lab-agent.service", "is-enabled --quiet lab-agent.service":
+			return errors.New("exit status 3")
+		}
+		return nil
+	}
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "uninstall stopped there") {
+		t.Fatalf("uninstall: %v", err)
+	}
+	said := "systemctl failed (run systemctl disable --now lab-agent.service: signal: interrupt), but lab-agent.service is no longer active or enabled, " +
+		"and labd at " + url + " wasn't told that m1air is leaving the lab. Run uninstall again to finish, and on the controller run `lab cancel j1`, then `lab forget m1air`"
+	if !slices.Contains(m.out, said) {
+		t.Errorf("didn't say %q:\n%s", said, strings.Join(m.out, "\n"))
+	}
+	m.kept(t, ConfigPath, workDir)
+}
+
 // If uninstall stops after telling labd but before the agent is stopped (the
 // agent won't stop, or the person interrupts it), the agent runs on: uninstall
 // takes the leave back, so labd doesn't refuse its jobs for good. Once the
-// agent is stopped, a later failure leaves the Mac as left.
+// agent is stopped, a later failure leaves the Mac as left. So does a
+// systemctl disable --now interrupted (Ctrl-C) while PID 1 went on to stop
+// the agent: taking the leave back would leave labd a silent Mac to recover.
 func TestUninstallTakesBackItsLeave(t *testing.T) {
+	const (
+		stop     = "disable --now lab-agent.service"
+		active   = "is-active --quiet lab-agent.service"
+		enabled  = "is-enabled --quiet lab-agent.service"
+		failed   = "run systemctl disable --now lab-agent.service: exit status 1: Failed"
+		killed   = "run systemctl disable --now lab-agent.service: signal: interrupt"
+		stayed   = "told labd at <url> that m1air stays in the lab after all"
+		leftNote = "but lab-agent.service is no longer active or enabled: labd at <url> keeps m1air as left, as it should with no agent. " +
+			"Run uninstall again to finish, then `lab forget m1air` on the controller"
+	)
 	for _, c := range []struct {
 		name        string
-		fail        string // the systemctl command that fails
+		fail        string   // the systemctl command that fails
+		killed      bool     // ... by Ctrl-C
+		off         []string // systemctl checks that find the agent stopped or disabled
 		interrupted bool
 		old         bool // an older labd
 		undo        bool // took the leave back
 		err, said   string
 	}{
-		{"the agent won't stop", "disable --now lab-agent.service", false, false, true,
-			"uninstall stopped there", "told labd at <url> that m1air stays in the lab after all"},
-		{"interrupted", "", true, false, true,
-			"interrupted before lab-agent.service was stopped", "told labd at <url> that m1air stays in the lab after all"},
-		{"an older labd", "disable --now lab-agent.service", false, true, true,
+		{"the agent won't stop", stop, false, nil, false, false, true,
+			"uninstall stopped there", stayed},
+		{"interrupted", "", false, nil, true, false, true,
+			"interrupted before lab-agent.service was stopped", stayed},
+		{"an older labd", stop, false, nil, false, true, true,
 			"uninstall stopped there", "labd at <url> may still list m1air as left, refusing its jobs (this labd can't take a leave back): on the controller, run `lab reset m1air`"},
-		{"the agent stopped, then a step failed", "daemon-reload", false, false, false,
+		{"the agent stopped, then a step failed", "daemon-reload", false, nil, false, false, false,
 			"uninstall stopped there", "told labd at <url> that m1air is leaving the lab; it canceled j1"},
+		{"Ctrl-C killed systemctl, PID 1 stopped the agent", stop, true, []string{active, enabled}, true, false, false,
+			"uninstall stopped there", "systemctl failed (" + killed + "), " + leftNote},
+		{"systemctl failed, the agent stopped and disabled", stop, false, []string{active, enabled}, false, false, false,
+			"uninstall stopped there", "systemctl failed (" + failed + "), " + leftNote},
+		{"Ctrl-C killed systemctl, the agent still runs", stop, true, []string{enabled}, true, false, true,
+			"uninstall stopped there", stayed},
+		{"Ctrl-C killed systemctl, the agent stopped but starts at boot", stop, true, []string{active}, true, false, true,
+			"uninstall stopped there", stayed},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeLabd(t)
 			f.old = c.old
 			m := labMacFor(t, f.srv.URL, &f.stopped)
 			record := m.u.cmd
+			ctx, cancel := context.WithCancel(context.Background())
 			m.u.cmd = func(name string, args ...string) error {
 				if err := record(name, args...); err != nil {
 					return err
 				}
-				if strings.Join(args, " ") == c.fail {
+				switch a := strings.Join(args, " "); {
+				case a == c.fail && c.killed:
+					cancel() // the person's Ctrl-C: uninstall's and systemctl's
+					return errors.New("signal: interrupt")
+				case a == c.fail:
 					return errors.New("exit status 1: Failed")
+				case slices.Contains(c.off, a):
+					return errors.New("exit status 3")
 				}
 				return nil
 			}
-			ctx, cancel := context.WithCancel(context.Background())
-			if c.interrupted {
+			if c.interrupted && !c.killed {
 				cancel()
 			}
 			defer cancel()
