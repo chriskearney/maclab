@@ -69,11 +69,17 @@ type lab struct {
 
 func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "sim-mac") }
 
+// testKnobs shortens labd's timings for the tests. They're set once: an
+// earlier test's labd can still be reading them while the next test starts.
+var testKnobs sync.Once
+
 func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
-	aliveWindow = 1500 * time.Millisecond
-	panicGrace = 2 * time.Second
-	serialStall = 3 * time.Second
-	quietGrace = 3 * time.Second
+	testKnobs.Do(func() {
+		aliveWindow = 1500 * time.Millisecond
+		panicGrace = 2 * time.Second
+		serialStall = 3 * time.Second
+		quietGrace = 3 * time.Second
+	})
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &lab{t: t, cancel: cancel, name: name}
 	sim := agent.NewSim(t.TempDir())
