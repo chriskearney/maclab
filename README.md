@@ -338,6 +338,29 @@ simulated Mac (`internal/agent/sim.go`):
 
 `lab-agent sim --server .. --token ..` enrolls a simulated Mac against a real labd.
 
+## Volunteer a Mac
+
+On an Apple Silicon Mac running Omarchy, in a clone of this repo:
+
+```sh
+./volunteer          # join the lab
+./volunteer leave    # leave it again (sudo lab-agent uninstall)
+```
+
+`./volunteer` installs Tailscale and signs in if needed, finds labd among the
+tailnet's online machines (port 7770), asks it for an enrollment token, downloads
+labd's lab-agent and runs `sudo lab-agent setup --server .. --token .. --gui-user <you>`
+with them. `MACLAB_SERVER=http://<host>:7770 ./volunteer` skips the search.
+
+The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
+keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
+Then they share the labd machine with each volunteer's Tailscale account (admin
+console, Machines, Share), or invite them to the tailnet. Any tailnet peer labd
+lets look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
+name made from `<user>-<hostname>` and the volunteer's login as its label. Next
+comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
+`lab forget <name>`.
+
 ## Phones and the LAN
 
 `labd --trust 192.168.1.0/24,127.0.0.1` (or `MACLAB_TRUST`) lets browsers on

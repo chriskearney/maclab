@@ -1,0 +1,127 @@
+#!/bin/bash
+# volunteer: put this Mac in the maclab test lab, or take it out again.
+# Run it as yourself from a clone of this repo; it asks for your password.
+#
+#   ./volunteer          join the lab
+#   ./volunteer leave    leave it: undoes everything joining did
+#
+# Joining installs and signs into Tailscale if needed, finds labd on the
+# tailnet, asks it for an enrollment token for this Mac, downloads labd's
+# lab-agent and runs `lab-agent setup` with them. MACLAB_SERVER=http://<host>:7770
+# skips the search.
+set -euo pipefail
+
+usage="Usage: ./volunteer          join the lab
+       ./volunteer leave    leave it"
+
+say() { printf '\n%s\n' "$*"; }
+die() {
+	printf '\n%s\n' "$*" >&2
+	exit 1
+}
+
+# find_labs prints the URL of every labd on the tailnet that lets this Mac in.
+find_labs() {
+	local ip
+	for ip in $(tailscale status --json | jq -r '.Peer[]? | select(.Online) | .TailscaleIPs[]? | select(startswith("100."))'); do
+		(curl -fsm 3 "http://$ip:7770/api/auth" 2>/dev/null | jq -e '.role == "viewer" or .role == "admin"' >/dev/null 2>&1 &&
+			echo "http://$ip:7770") &
+	done
+	wait
+}
+
+join() {
+	if systemctl is-enabled --quiet lab-agent.service 2>/dev/null; then
+		say "This Mac is already in the lab. To leave it: ./volunteer leave"
+		exit 0
+	fi
+	local model
+	model=$(cat /proc/device-tree/model 2>/dev/null | tr -d '\0' || true)
+	[[ $model == Apple* ]] || die "This isn't a Mac running Linux: the lab only tests Apple Silicon Macs."
+
+	say "This puts your Mac in the Omarchy Mac test lab. When the lab tests a new
+kernel, it reboots this Mac into it, runs some checks and boots it back into
+your own kernel. Your files are left alone. ./volunteer leave undoes it all.
+
+Enter your password to go ahead, or press Ctrl-C to stop."
+	sudo true
+
+	local out fresh=""
+	if ! command -v tailscale >/dev/null; then
+		say "Installing Tailscale, which connects this Mac to the lab..."
+		sudo pacman -S --needed --noconfirm tailscale
+	fi
+	if ! systemctl is-active --quiet tailscaled.service; then
+		out=$(sudo systemctl enable --now tailscaled.service 2>&1) || die "Tailscale didn't start: $out"
+	fi
+	if [[ $(tailscale status --json 2>/dev/null | jq -r .BackendState) != Running ]]; then
+		say "Sign in to Tailscale: open the link below and use the account the lab's maintainer shared the lab with."
+		sudo tailscale up
+		fresh=1
+	fi
+
+	local server=${MACLAB_SERVER:-} labs=""
+	if [[ -z $server ]]; then
+		say "Looking for the lab on your tailnet..."
+		# Right after signing in, peers take a moment to show up.
+		for _ in {1..10}; do
+			labs=$(find_labs)
+			[[ -n $labs || -z $fresh ]] && break
+			sleep 3
+		done
+		# shellcheck disable=SC2086 # one URL per word
+		set -- $labs
+		case $# in
+		0) die "No lab found on your tailnet. Ask the lab's maintainer to share the lab machine
+with your Tailscale account, accept the share, and run ./volunteer again." ;;
+		1) server=$1 ;;
+		*) die "More than one lab is on your tailnet: $*
+Pick one: MACLAB_SERVER=<one of them> ./volunteer" ;;
+		esac
+	fi
+
+	say "Found the lab at $server. Signing this Mac up..."
+	local kind=desktop body resp name token
+	[[ $model == *MacBook* ]] && kind=laptop
+	body=$(jq -nc --arg name "$(id -un)-$(uname -n)" --arg model "$kind" '{name: $name, model: $model}')
+	resp=$(curl -sS --fail-with-body -m 30 -H 'Content-Type: application/json' -d "$body" "$server/api/volunteer") ||
+		die "The lab turned this Mac away: $resp"
+	name=$(jq -r .name <<<"$resp")
+	token=$(jq -r .token <<<"$resp")
+
+	say "Downloading the lab's agent..."
+	tmp=$(mktemp -d)
+	trap 'rm -rf "$tmp"' EXIT
+	curl -S --fail-with-body --progress-bar -m 600 -o "$tmp/lab-agent" "$server/api/volunteer/lab-agent" ||
+		die "Couldn't download the lab's agent: $(head -c 300 "$tmp/lab-agent" 2>/dev/null)"
+	chmod +x "$tmp/lab-agent"
+
+	say "Setting this Mac up:"
+	sudo "$tmp/lab-agent" setup --server "$server" --token "$token" --gui-user "$(id -un)" ||
+		die "Setup stopped: the reason is above."
+
+	say "Done: this Mac is in the lab as $name.
+Keep it plugged in and online. The lab's maintainer starts with a check that
+reboots it twice; after that, kernel tests come and go by themselves.
+To leave the lab: ./volunteer leave"
+}
+
+leave() {
+	if [[ ! -x /usr/local/bin/lab-agent ]]; then
+		say "This Mac isn't in the lab."
+		exit 0
+	fi
+	say "Taking this Mac out of the lab:"
+	sudo /usr/local/bin/lab-agent uninstall || die "Leaving stopped: the reason is above."
+	say "Done: this Mac has left the lab. Let the lab's maintainer know, so they drop it from the lab's list."
+}
+
+[[ $EUID -ne 0 ]] || die "Run it as yourself, without sudo: ./volunteer"
+case ${1:-join} in
+join) join ;;
+leave) leave ;;
+*)
+	echo "$usage" >&2
+	exit 2
+	;;
+esac

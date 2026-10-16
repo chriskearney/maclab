@@ -415,6 +415,7 @@ type EnrollTokenRequest struct {
 }
 
 type EnrollTokenResponse struct {
+	Name    string    `json:"name"`
 	Token   string    `json:"token"`
 	Expires time.Time `json:"expires"`
 }
