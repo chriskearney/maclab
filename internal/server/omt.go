@@ -48,6 +48,7 @@ type omtReport struct {
 	Inventory struct {
 		Unclaimed []struct {
 			Compatible string `json:"compatible"`
+			Outcome    string `json:"outcome"`
 		} `json:"unclaimed"`
 	} `json:"inventory"`
 	Checks []struct {
@@ -62,11 +63,12 @@ type omtReport struct {
 
 // omtBaseline is the known-good report a Mac's other runs are compared with.
 type omtBaseline struct {
-	Job    string            `json:"job"`
-	Time   time.Time         `json:"time"`
-	Kernel string            `json:"kernel"`
-	Tool   string            `json:"tool"`
-	Status map[string]string `json:"status"` // check id -> pass, fail or skip
+	Job       string            `json:"job"`
+	Time      time.Time         `json:"time"`
+	Kernel    string            `json:"kernel"`
+	Tool      string            `json:"tool"`
+	Status    map[string]string `json:"status"`              // check id -> pass, fail or skip
+	Unclaimed []string          `json:"unclaimed,omitempty"` // compatibles of the device-tree nodes no driver claimed
 }
 
 func (s *Server) omtBaselinePath(device string) string {
@@ -135,6 +137,11 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 			res.Skip++
 		}
 	}
+	var unclaimed []string
+	for _, u := range rep.Inventory.Unclaimed {
+		unclaimed = append(unclaimed, u.Compatible)
+	}
+	sort.Strings(unclaimed)
 	if r.ir != nil {
 		// an installed run is judged against the frozen pre-install report and
 		// never becomes a reference
@@ -150,12 +157,16 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		res.ComparedTo = "this is the known-good run: later runs are compared with it"
 		if base != nil {
 			res.Regressions, res.Fixed = omtDiff(base.Status, status, byID)
+			nr, nf := omtNodes(base, status, rep)
+			res.Regressions, res.Fixed = append(res.Regressions, nr...), append(res.Fixed, nf...)
 			res.ComparedTo = "the previous known-good run " + base.Job
 		}
 	case base == nil:
 		res.ComparedTo = "no known-good run of omarchy-m-test on this Mac yet (lab baseline makes one)"
 	default:
 		res.Regressions, res.Fixed = omtDiff(base.Status, status, byID)
+		nr, nf := omtNodes(base, status, rep)
+		res.Regressions, res.Fixed = append(res.Regressions, nr...), append(res.Fixed, nf...)
 		kept := res.Regressions[:0]
 		for _, c := range res.Regressions {
 			if omtPackagingChecks[c.ID] {
@@ -174,6 +185,16 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 	r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
 	r.ev("omarchy-m-test %s: %d pass, %d fail, %d skipped; %d regressed, %d fixed vs %s",
 		res.Tool, res.Pass, res.Fail, res.Skip, len(res.Regressions), len(res.Fixed), res.ComparedTo)
+	var changed []string
+	for _, c := range res.Regressions {
+		changed = append(changed, c.ID+" regressed")
+	}
+	for _, c := range res.Fixed {
+		changed = append(changed, c.ID+" fixed")
+	}
+	if len(changed) > 0 {
+		r.ev("omarchy-m-test: %s", strings.Join(changed, ", "))
+	}
 	if res.KnownGood {
 		// A known-good kernel can't regress against itself in a way that blames
 		// the kernel, so the test isn't failed. But a pass that turned into a
@@ -183,34 +204,40 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		switch {
 		case j.Spec.Baseline:
 			// lab baseline is how a person sets the references on purpose
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status}, "", "  ")
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status, Unclaimed: unclaimed}, "", "  ")
 			res.Reference = "a baseline: becomes the reference if it passes"
 		case len(res.Regressions) > 0:
-			res.Reference = fmt.Sprintf("kept %s: %d checks passed there and fail here", base.Job, len(res.Regressions))
+			res.Reference = fmt.Sprintf("kept %s: %s regressed since", base.Job, strings.Join(omtIDs(res.Regressions), ", "))
 		case kg == "" || res.Kernel != kg:
 			res.Reference = fmt.Sprintf("not a reference: ran on %s, the known-good kernel is %q", res.Kernel, kg)
 		case j.Spec.Cmdline != "" || len(j.Spec.CmdlineStrip) > 0 || (j.Spec.CmdlineBase != "" && j.Spec.CmdlineBase != "known-good"):
 			res.Reference = "not a reference: the job changed the known-good cmdline"
 		default:
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status}, "", "  ")
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status, Unclaimed: unclaimed}, "", "  ")
 			res.Reference = "becomes the reference if the job passes"
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
 		return
 	}
 	if len(res.Regressions) > 0 {
-		ids := make([]string, len(res.Regressions))
-		for i, c := range res.Regressions {
-			ids[i] = c.ID
-		}
 		tr.Passed = false
-		tr.Error = fmt.Sprintf("%d checks pass on the known-good kernel and fail on this one: %s", len(ids), strings.Join(ids, ", "))
+		tr.Error = fmt.Sprintf("%d regressed from the known-good kernel: %s", len(res.Regressions), strings.Join(omtIDs(res.Regressions), ", "))
 	}
+}
+
+// omtIDs lists the ids of the checks.
+func omtIDs(cs []api.OMTCheck) []string {
+	ids := make([]string, len(cs))
+	for i, c := range cs {
+		ids[i] = c.ID
+	}
+	return ids
 }
 
 // omtAllowed moves the regressions a job said to expect out of the way. A
 // plain check id allows that check; "hardware.drivers:<compatible>" allows the
-// driver check only when every node left unbound is one of the named ones.
+// driver check only when every node left unbound is one of the named ones, and
+// allows that node's own regression (omtNodes).
 func omtAllowed(regressed []api.OMTCheck, allow []string, rep omtReport) (kept, allowed []api.OMTCheck) {
 	ids, compat := map[string]bool{}, map[string]bool{}
 	for _, a := range allow {
@@ -222,7 +249,9 @@ func omtAllowed(regressed []api.OMTCheck, allow []string, rep omtReport) (kept, 
 	}
 	for _, c := range regressed {
 		ok := ids[c.ID]
-		if !ok && c.ID == "hardware.drivers" && len(compat) > 0 && len(rep.Inventory.Unclaimed) > 0 {
+		if node, isNode := strings.CutPrefix(c.ID, "hardware.drivers:"); isNode {
+			ok = ids["hardware.drivers"] || compat[node]
+		} else if !ok && c.ID == "hardware.drivers" && len(compat) > 0 && len(rep.Inventory.Unclaimed) > 0 {
 			ok = true
 			for _, u := range rep.Inventory.Unclaimed {
 				ok = ok && compat[u.Compatible]
@@ -254,6 +283,49 @@ func omtDiff(before, after map[string]string, byID map[string]api.OMTCheck) (reg
 		}
 	}
 	return
+}
+
+// omtNodes compares the device-tree nodes no driver claims, node by node, when
+// hardware.drivers fails on both runs and omtDiff sees no change: a compatible
+// unclaimed now but claimed on the known-good run regresses as
+// "hardware.drivers:<compatible>", and one claimed now but not then is fixed.
+func omtNodes(base *omtBaseline, status map[string]string, rep omtReport) (regressed, fixed []api.OMTCheck) {
+	if base.Status["hardware.drivers"] != "fail" || status["hardware.drivers"] != "fail" ||
+		len(base.Unclaimed) == 0 || len(rep.Inventory.Unclaimed) == 0 {
+		return nil, nil
+	}
+	var evidence []string
+	for _, c := range rep.Checks {
+		if c.ID == "hardware.drivers" {
+			evidence = c.Evidence
+		}
+	}
+	before, now := map[string]bool{}, map[string]bool{}
+	for _, c := range base.Unclaimed {
+		before[c] = true
+	}
+	for _, u := range rep.Inventory.Unclaimed {
+		if now[u.Compatible] {
+			continue
+		}
+		now[u.Compatible] = true
+		if before[u.Compatible] {
+			continue
+		}
+		chk := api.OMTCheck{ID: "hardware.drivers:" + u.Compatible, Outcome: u.Outcome}
+		for _, e := range evidence {
+			if strings.HasPrefix(e, "unclaimed: "+u.Compatible+" ") {
+				chk.Evidence = e
+			}
+		}
+		regressed = append(regressed, chk)
+	}
+	for _, c := range base.Unclaimed {
+		if !now[c] {
+			fixed = append(fixed, api.OMTCheck{ID: "hardware.drivers:" + c, Evidence: "claimed by a driver now"})
+		}
+	}
+	return regressed, fixed
 }
 
 // publishOMT uploads a job's report to omarchy-m-testing.org, the way

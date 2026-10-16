@@ -229,7 +229,10 @@ answered yes. The run takes 1 to 3 minutes.
   kernel that isn't an installed package. A kernel that lacks a feature on
   purpose names what it's expected to fail: `--omt-allow system.failed-units`,
   or `--omt-allow hardware.drivers:<compatible>` for one device-tree node, which
-  still fails the job if any other node stops binding.
+  still fails the job if any other node stops binding. When `hardware.drivers`
+  fails on both kernels, the unclaimed nodes are compared one by one: a node a
+  driver claims on the known-good kernel and not on the test kernel regresses as
+  `hardware.drivers:<compatible>`.
 - **Publishing:** `lab run <mac> --publish`, `lab publish <job>`, or the job page's
   Publish button uploads the signed report to omarchy-m-testing.org. Only
   known-good runs qualify, because the site names a report's build from the

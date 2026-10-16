@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -747,6 +748,87 @@ func TestOmarchyMTest(t *testing.T) {
 	if now, _ := os.ReadFile(l.s.omtBaselinePath("sim-mac")); !strings.Contains(string(now), j.ID) || j.Result.OMT.Reference != "became the reference" {
 		t.Fatalf("a clean known-good job did not become the reference (%s)", j.Result.OMT.Reference)
 	}
+}
+
+// omtDriversReport is cut down from two real MacBook Air (M1) reports, where
+// hardware.drivers fails on every kernel: the known-good kernel leaves the SEP
+// unclaimed, and a lab kernel that lost the Neural Engine's driver leaves that
+// instead. Both leave the fingerprint reader unclaimed.
+func omtDriversReport(kernel string, nodes ...string) []byte {
+	unclaimed := map[string][2]string{ // compatible -> inventory entry, evidence line
+		"apple,mesa-fingerprint": {`{"compatible":"apple,mesa-fingerprint","count":1,"outcome":"unknown-hardware"}`,
+			"unclaimed: apple,mesa-fingerprint (1 node): unknown hardware"},
+		"apple,sep": {`{"compatible":"apple,sep","count":1,"outcome":"not-in-asahi","feature":"sep","layer":"asahi"}`,
+			"unclaimed: apple,sep (1 node): not yet supported by Asahi (Secure enclave (SEP))"},
+		"apple,t8103-ane": {`{"compatible":"apple,t8103-ane","count":1,"outcome":"not-in-asahi","feature":"neural-engine","layer":"asahi"}`,
+			"unclaimed: apple,t8103-ane (1 node): not yet supported by Asahi (Neural engine)"},
+	}
+	var inv, ev []string
+	for _, n := range nodes {
+		inv, ev = append(inv, unclaimed[n][0]), append(ev, strconv.Quote(unclaimed[n][1]))
+	}
+	return fmt.Appendf(nil, `{"schema_version":1,"tool":{"name":"omarchy-m-test","version":"0.1.13"},"catalogue_version":14,
+"machine":{"model":"Apple MacBook Air (M1, 2020)","soc":"t8103","kernel":%q},"inventory":{"unclaimed":[%s]},
+"checks":[{"id":"system.identity","kind":"automatic","status":"pass","evidence":["chip: M1 (t8103)"],"classification":{"outcome":"works"}},
+{"id":"hardware.drivers","kind":"automatic","status":"fail","evidence":["279 hardware nodes: %d unclaimed",%s],"classification":{"outcome":"not-in-aurora"}}]}`,
+		kernel, strings.Join(inv, ","), len(nodes), strings.Join(ev, ","))
+}
+
+func TestOmarchyMTestDriverNodes(t *testing.T) {
+	l := newLab(t, true)
+	l.s.cfg.OMT = true
+	l.sim.OMTReport = func(kernel string) []byte {
+		if strings.HasPrefix(kernel, "7.2-ane") {
+			return omtDriversReport(kernel, "apple,mesa-fingerprint", "apple,t8103-ane")
+		}
+		return omtDriversReport(kernel, "apple,mesa-fingerprint", "apple,sep")
+	}
+	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
+	l.baseline()
+	var ref omtBaseline
+	if b, _ := os.ReadFile(l.s.omtBaselinePath("sim-mac")); json.Unmarshal(b, &ref) != nil || strings.Join(ref.Unclaimed, " ") != "apple,mesa-fingerprint apple,sep" {
+		t.Fatalf("reference %+v", ref)
+	}
+
+	// The same nodes unclaimed: nothing changed, though the check fails on both.
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	if o := j.Result.OMT; len(o.Regressions) != 0 || len(o.Fixed) != 0 {
+		t.Fatalf("same nodes omt %+v", o)
+	}
+
+	// The Neural Engine lost its driver: hardware.drivers fails on both kernels,
+	// but the node regressed, and the SEP gained one.
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ane behavior=ok")})
+	l.expect(j, api.OutcomeTestsFailed)
+	o := j.Result.OMT
+	if len(o.Regressions) != 1 || o.Regressions[0].ID != "hardware.drivers:apple,t8103-ane" || o.Regressions[0].Outcome != "not-in-asahi" ||
+		!strings.Contains(o.Regressions[0].Evidence, "Neural engine") || len(o.Fixed) != 1 || o.Fixed[0].ID != "hardware.drivers:apple,sep" {
+		t.Fatalf("lost driver omt %+v", o)
+	}
+	named := false
+	for _, e := range j.Events {
+		named = named || strings.Contains(e.Msg, "hardware.drivers:apple,t8103-ane regressed, hardware.drivers:apple,sep fixed")
+	}
+	if !named || !strings.Contains(j.Result.Tests[len(j.Result.Tests)-1].Error, "hardware.drivers:apple,t8103-ane") {
+		t.Fatalf("the events don't name the node: %+v %+v", j.Events, j.Result.Tests)
+	}
+
+	// --omt-allow names the node to expect; another node's name doesn't cover it.
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ane2 behavior=ok"), OMTAllow: []string{"hardware.drivers:apple,t8103-ane"}})
+	l.expect(j, api.OutcomePass)
+	if o := j.Result.OMT; len(o.Allowed) != 1 || len(o.Regressions) != 0 {
+		t.Fatalf("allowed omt %+v", o)
+	}
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ane3 behavior=ok"), OMTAllow: []string{"hardware.drivers:apple,other"}})
+	l.expect(j, api.OutcomeTestsFailed)
+
+	// A reference recorded before the lab kept its unclaimed nodes compares as before.
+	ref.Unclaimed = nil
+	b, _ := json.Marshal(ref)
+	os.WriteFile(l.s.omtBaselinePath("sim-mac"), b, 0o644)
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ane4 behavior=ok")})
+	l.expect(j, api.OutcomePass)
 }
 
 func TestCmdlineBaseAndStrip(t *testing.T) {
