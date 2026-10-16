@@ -32,6 +32,13 @@ AI agents get the same operations over MCP (`lab mcp`).
      the ESP): a unified kernel image in `<esp>/maclab/<job>/uki.efi`, listed in
      a marked block at the end of `limine.conf`. Limine reads only FAT, so the
      ESP needs about 120 MB free.
+
+   A failed staging is tried again, up to 3 attempts, 30 s and then 2 min
+   apart, with the failed attempt's leftovers removed first. Only an attempt
+   that is over is tried again: one the agent reported failed, or one the Mac
+   rebooted under. One that outlasts labd's 20-minute wait, or whose Mac goes
+   quiet, may still be staging, so the job fails instead. The same error
+   twice in a row looks permanent and ends it early.
 2. **Boot once.** The agent arms a one-shot and reboots. The bootloader
    **clears it before booting the entry**, so any reset afterwards, for any
    reason, lands on the known-good kernel.
@@ -102,6 +109,13 @@ It then climbs a ladder:
 When the Mac checks in again, the alert clears, leftover staged kernels are
 removed, and queued jobs continue. `lab status` shows the same instruction
 while it's outstanding.
+
+A job that couldn't stage its kernel ends `stage_failed`, with the reason and
+`lab retry <job>` in its summary. `lab retry` (or Retry on a finished job's page)
+runs any finished job again as a new job: the same Mac, kernel, tests and cmdline.
+A source job whose built kernel has since been collected builds again from its
+source, which may have moved. `lab retry` holds the new job as you, and the web UI's
+Retry as `web`.
 
 Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
 1 = + hardware watchdog (`apple_wdt`, armed through systemd),
@@ -389,7 +403,7 @@ claude mcp add maclab -- lab mcp
 
 Tools: `lab_devices`, `lab_device`, `lab_run`, `lab_wait`, `lab_job`, `lab_jobs`,
 `lab_log`, `lab_screenshot`, `lab_baseline`, `lab_crashtest`, `lab_lease`,
-`lab_release`, `lab_reset`, `lab_serial`, `lab_exec`, `lab_cancel`, `lab_build`,
+`lab_release`, `lab_reset`, `lab_serial`, `lab_exec`, `lab_cancel`, `lab_retry`, `lab_build`,
 `lab_build_status`, `lab_package`, `lab_publish` and `lab_gate`. A device in `needs_hands` is waiting for a
 person. Tell the user; don't retry.
 

@@ -43,6 +43,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
   lab gate <kernel> [--families m1,m2] [--evidence file]
                                       did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not
+  lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel, tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
   lab forget <device>                 take a Mac out of the lab (after lab-agent uninstall); its jobs stay
@@ -463,6 +464,22 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		fmt.Println(url)
 		return nil
+
+	case "retry":
+		noWait := fs.Bool("no-wait", false, "queue and return")
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab retry <job>"); err != nil {
+			return err
+		}
+		j, err := c.Retry(ctx, pos[0], holder())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("job %s queued on %s (a retry of %s)\n", j.ID, j.Spec.Device, pos[0])
+		if *noWait {
+			return nil
+		}
+		return follow(ctx, c, j.ID)
 
 	case "cancel":
 		pos := parse(fs, args)

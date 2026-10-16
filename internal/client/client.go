@@ -207,6 +207,12 @@ func (c *Client) Cancel(ctx context.Context, id string) (string, error) {
 	return out, c.do(ctx, "POST", "/api/jobs/"+url.PathEscape(id)+"/cancel", nil, &out)
 }
 
+// Retry queues a finished job again as a new job, held by holder.
+func (c *Client) Retry(ctx context.Context, id, holder string) (*api.Job, error) {
+	var out api.Job
+	return &out, c.do(ctx, "POST", "/api/jobs/"+url.PathEscape(id)+"/retry?holder="+url.QueryEscape(holder), nil, &out)
+}
+
 func (c *Client) File(ctx context.Context, id, name string) ([]byte, error) {
 	var out string
 	err := c.do(ctx, "GET", "/api/jobs/"+url.PathEscape(id)+"/files/"+name, nil, &out)

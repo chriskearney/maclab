@@ -19,6 +19,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,6 +56,9 @@ type Config struct {
 	OMTPublish bool
 	// OMTEvery re-runs omarchy-m-test on each idle Mac's known-good kernel this often; 0 never.
 	OMTEvery time.Duration
+	// StageTimeout is how long labd waits for one staging attempt (default 20
+	// minutes). Tests shorten it.
+	StageTimeout time.Duration
 }
 
 type Server struct {
@@ -82,6 +86,9 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	if cfg.BootTimeout == 0 {
 		cfg.BootTimeout = 4 * time.Minute
+	}
+	if cfg.StageTimeout == 0 {
+		cfg.StageTimeout = 20 * time.Minute
 	}
 	if cfg.OfflineAfter == 0 {
 		cfg.OfflineAfter = time.Minute
@@ -368,6 +375,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/jobs/{id}", s.admin(s.hJob))
 	m.HandleFunc("GET /api/jobs/{id}/wait", s.admin(s.hWait))
 	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
+	m.HandleFunc("POST /api/jobs/{id}/retry", s.admin(s.hRetry))
 	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
 	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.admin(s.hJobFile))
 	m.HandleFunc("GET /api/gate/{kernel}", s.admin(s.hGate))
@@ -887,7 +895,38 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 }
 
 // Submit validates and queues a job.
-func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
+func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit(spec, "") }
+
+// Retry queues a finished job again as a new job: the same Mac, kernel,
+// tests and cmdline. holder, if given, replaces the first job's, so a lease
+// is checked against whoever retries it.
+func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
+	old, err := s.store.job(id)
+	if err != nil {
+		return nil, 404, fmt.Errorf("no job %s", id)
+	}
+	if old.State != api.JobDone {
+		return nil, 409, fmt.Errorf("job %s is still %s; only a finished job can be retried", id, old.State)
+	}
+	spec := old.Spec
+	spec.Tests = slices.Clone(spec.Tests)
+	spec.CmdlineStrip = slices.Clone(spec.CmdlineStrip)
+	spec.OMTAllow = slices.Clone(spec.OMTAllow)
+	if holder != "" {
+		spec.Holder = holder
+	}
+	if spec.Source != "" && spec.Kernel != "" {
+		// boot the kernel the first job built, unless it has been collected
+		if _, err := os.Stat(s.artifactPath(spec.Kernel)); err != nil {
+			spec.Kernel, spec.Build = "", ""
+		}
+	}
+	return s.submit(spec, old.ID)
+}
+
+// submit queues a job; retryOf names the job it retries, whose source may
+// come with the kernel already built from it.
+func (s *Server) submit(spec api.JobSpec, retryOf string) (*api.Job, int, error) {
 	v := s.dev(spec.Device)
 	if v == nil {
 		return nil, 404, fmt.Errorf("no device %q", spec.Device)
@@ -899,12 +938,13 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
 		if !reSHA.MatchString(spec.Config) {
 			return nil, 400, errors.New("config must be an artifact sha256 (upload it first)")
 		}
-		if _, err := os.Stat(s.artifactPath(spec.Config)); err != nil {
+		// a retry that boots the kernel its first job built doesn't build again
+		if _, err := os.Stat(s.artifactPath(spec.Config)); err != nil && spec.Kernel == "" {
 			return nil, 400, fmt.Errorf("config artifact %s not uploaded", spec.Config)
 		}
 	}
 	if spec.Source != "" {
-		if spec.Kernel != "" {
+		if spec.Kernel != "" && retryOf == "" {
 			return nil, 400, errors.New("give a kernel artifact or a source to build, not both")
 		}
 		if spec.Baseline || spec.Crash != "" {
@@ -981,8 +1021,12 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
 		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 	}
 	now := time.Now()
+	msg := "queued"
+	if retryOf != "" {
+		msg = "queued: a retry of job " + retryOf
+	}
 	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
-		Events: []api.JobEvent{{Time: now, Msg: "queued"}}}
+		Events: []api.JobEvent{{Time: now, Msg: msg}}}
 	if err := s.store.saveJob(j); err != nil {
 		return nil, 500, err
 	}
@@ -1000,6 +1044,16 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
 	}
 	v.queue <- j.ID
 	return j, 200, nil
+}
+
+// hRetry submits a finished job again; ?holder= names who retries it.
+func (s *Server) hRetry(w http.ResponseWriter, r *http.Request) {
+	j, code, err := s.Retry(r.PathValue("id"), r.URL.Query().Get("holder"))
+	if err != nil {
+		httpErr(w, code, "%v", err)
+		return
+	}
+	writeJSON(w, j)
 }
 
 func (s *Server) hJobs(w http.ResponseWriter, r *http.Request) {

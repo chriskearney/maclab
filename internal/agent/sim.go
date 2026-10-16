@@ -66,9 +66,15 @@ type Sim struct {
 	CollectHook func(boot, outDir string) error
 	// PackagedKernels are releases installed as packages (installed-mode jobs).
 	PackagedKernels []string
+
+	stageFail  func(attempt int) error
+	stageTries int
 }
 
-type simEntry struct{ krel, behavior, cmdline string }
+type simEntry struct {
+	krel, behavior, cmdline string
+	half                    bool // a failed staging's leftovers
+}
 
 // InstalledObs, when set, answers installed-mode identity tests: it returns
 // the collector's observation for a phase on the given running boot.
@@ -136,7 +142,39 @@ func (s *Sim) WatchKernel(ctx context.Context, fn func(string)) {
 	}
 }
 
+// FailStage makes each staging from now on ask f first, with its number
+// (from 1): an error fails that attempt and leaves the job half staged, as a
+// dropped download or a full ESP would. A half-staged job stages again only
+// after a cleanup. f runs outside the Sim's lock, so it may also take its
+// time, or reboot or quiet the Sim, as staging on a real Mac can.
+func (s *Sim) FailStage(f func(attempt int) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stageFail, s.stageTries = f, 0
+}
+
+// Quiet makes the machine unreachable for d on the same boot, as a network
+// outage would: no check-ins, no reports, and whatever runs carries on.
+func (s *Sim) Quiet(d time.Duration) { s.suspend(d, false) }
+
 func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetcher) (api.StageResult, error) {
+	s.mu.Lock()
+	if s.staged[job].half {
+		s.mu.Unlock()
+		return api.StageResult{}, fmt.Errorf("leftovers of an earlier attempt at %s are in the way", job)
+	}
+	fail := s.stageFail
+	s.stageTries++
+	n := s.stageTries
+	s.mu.Unlock()
+	if fail != nil {
+		if err := fail(n); err != nil {
+			s.mu.Lock()
+			s.staged[job] = simEntry{half: true}
+			s.mu.Unlock()
+			return api.StageResult{}, err
+		}
+	}
 	if in := a.Installed; in != nil {
 		if in.Path == "" || in.UKISHA256 == "" || in.Cmdline == "" {
 			return api.StageResult{}, fmt.Errorf("installed stage needs path, uki_sha256 and cmdline")

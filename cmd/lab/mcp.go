@@ -163,6 +163,18 @@ func serveMCP(ctx context.Context) error {
 			out, err := c.Cancel(ctx, a.JobID)
 			return text(out), nil, err
 		})
+	type retryArg struct {
+		JobID   string `json:"job_id"`
+		WaitSec int    `json:"wait_sec,omitempty" jsonschema:"wait up to this long for the result (max 900); 0 returns once queued"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_retry", Description: "Run a finished job again as a new job: same Mac, kernel, tests and cmdline. A stage_failed job's summary says why, and whether labd already tried it again (up to 3 attempts); retry it once that cause is fixed. Returns the new job; use lab_wait for the result."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, a retryArg) (*mcp.CallToolResult, any, error) {
+			j, err := c.Retry(ctx, a.JobID, who)
+			if err != nil {
+				return nil, nil, err
+			}
+			return waitJob(ctx, c, j, a.WaitSec, text)
+		})
 	type jobsArg struct {
 		Device string `json:"device,omitempty"`
 	}
@@ -350,6 +362,12 @@ func submitAndWait(ctx context.Context, c *client.Client, spec api.JobSpec, wait
 	if err != nil {
 		return nil, nil, err
 	}
+	return waitJob(ctx, c, j, waitSec, text)
+}
+
+// waitJob waits up to waitSec (at most 900) for a job to finish, and returns it.
+func waitJob(ctx context.Context, c *client.Client, j *api.Job, waitSec int, text func(any) *mcp.CallToolResult) (*mcp.CallToolResult, any, error) {
+	var err error
 	if waitSec > 0 {
 		if waitSec > 900 {
 			waitSec = 900

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -218,7 +219,6 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	}
 
 	r.state(api.JobStaging)
-	var sr api.StageResult
 	what := "current kernel"
 	if j.Spec.Kernel != "" {
 		what = "kernel " + short(j.Spec.Kernel)
@@ -233,8 +233,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	if r.ir != nil {
 		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
 	}
-	if err := v.call(ctx, api.CmdStage, j.ID, args, 20*time.Minute, &sr); err != nil {
-		return api.OutcomeStageFailed, "staging failed: " + err.Error()
+	sr, why := r.stage(ctx, args)
+	if why != "" {
+		return api.OutcomeStageFailed, why
 	}
 	v.mu.Lock()
 	v.dirty = true
@@ -413,6 +414,66 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		sum += fmt.Sprintf(", %d new kernel warning/error lines vs baseline", len(newLines))
 	}
 	return api.OutcomePass, sum
+}
+
+// stageBackoff is the pause before each further staging attempt.
+var stageBackoff = []time.Duration{30 * time.Second, 2 * time.Minute}
+
+// stage stages the job's kernel, or says why it couldn't. A failure may be a
+// passing lab problem (a dropped download, a held ESP lock, leftovers filling
+// the ESP), so it tries again after a pause, once the agent has removed what
+// the failed attempt left half staged. That needs the attempt to be over: the
+// agent answered with an error, or the Mac rebooted under it. After labd's
+// timeout, or with the Mac quiet on the same boot, the agent may still be
+// staging, and a cleanup and a second attempt would race it over the job's
+// files, modules and boot entry; the job fails instead. The same error twice
+// in a row looks permanent (a broken package, a refused cmdline) and ends it
+// early.
+func (r *jobRun) stage(ctx context.Context, args api.StageArgs) (api.StageResult, string) {
+	attempts := len(stageBackoff) + 1
+	how := fmt.Sprintf(". Retry with `lab retry %s`", r.j.ID)
+	last := ""
+	for n := 1; ; n++ {
+		var sr api.StageResult
+		boot := r.v.snapshot().BootID
+		err := r.v.call(ctx, api.CmdStage, r.j.ID, args, r.s.cfg.StageTimeout, &sr)
+		if err == nil {
+			return sr, ""
+		}
+		if ctx.Err() != nil {
+			return sr, "staging failed: " + err.Error()
+		}
+		reason := strings.TrimPrefix(err.Error(), api.CmdStage+": ")
+		if !errors.Is(err, errAgentRefused) && r.v.snapshot().BootID == boot {
+			return sr, "staging failed: " + reason + " (not tried again: the Mac may still be staging it)" + how
+		}
+		r.ev("staging attempt %d of %d failed: %s", n, attempts, reason)
+		if errText(reason) == last {
+			return sr, "couldn't stage: " + reason + " (the same error twice: looks permanent, not retrying)" + how
+		}
+		if n == attempts {
+			return sr, fmt.Sprintf("couldn't stage: %s (%d attempts failed)%s", reason, attempts, how)
+		}
+		last = errText(reason)
+		// what the failed attempt left behind may be what is in the way
+		if err := r.v.call(ctx, api.CmdCleanup, r.j.ID, api.CleanupArgs{}, 2*time.Minute, nil); err != nil {
+			r.ev("cleanup after the failed attempt: %v", err)
+		}
+		r.ev("staging again in %s", stageBackoff[n-1])
+		select {
+		case <-ctx.Done():
+			return sr, "canceled between staging attempts"
+		case <-time.After(stageBackoff[n-1]):
+		}
+	}
+}
+
+var reDigits = regexp.MustCompile(`[0-9]+`)
+
+// errText is an error's text with case, spacing and numbers (byte counts,
+// free space, temporary names) evened out, to tell one error from another.
+func errText(msg string) string {
+	return reDigits.ReplaceAllString(strings.ToLower(strings.Join(strings.Fields(msg), " ")), "#")
 }
 
 // runTest runs one test outside the job's test list (identity-before).
