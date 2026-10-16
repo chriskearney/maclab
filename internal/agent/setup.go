@@ -47,7 +47,11 @@ type SetupOptions struct {
 	Token     string
 	GUIUser   string
 	Autologin bool // log GUIUser into the desktop on boot, with idle lock off
-	Log       func(format string, args ...any)
+	// TailscaleAuthKey, a one-off key a maintainer made by hand, joins the
+	// lab's tailnet before anything else. It is never printed or stored.
+	TailscaleAuthKey  string
+	TailscaleHostname string // default maclab-<device name>, else this machine's hostname
+	Log               func(format string, args ...any)
 }
 
 // Setup makes this Mac a lab device. Every step is idempotent, and every
@@ -60,6 +64,23 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	l := &Linux{WorkDir: workDir, GUIUser: o.GUIUser}
 	if err := os.MkdirAll(l.WorkDir, 0o755); err != nil {
 		return err
+	}
+
+	cfg, _ := LoadConfig(ConfigPath)
+	if o.TailscaleAuthKey != "" {
+		server := o.Server
+		if server == "" && cfg != nil {
+			server = cfg.Server
+		}
+		host := o.TailscaleHostname
+		if host == "" {
+			host = tailnetHostname(cfg)
+		}
+		if err := newTailnet(say).join(ctx, o.TailscaleAuthKey, host, server); err != nil {
+			return err
+		}
+	} else if o.TailscaleHostname != "" {
+		return fmt.Errorf("--tailscale-hostname needs --tailscale-authkey")
 	}
 
 	b, err := detectBootloader()
@@ -129,7 +150,6 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		say("desktop autologin for %s, idle lock and screensaver off (Omarchy stay-awake)", o.GUIUser)
 	}
 
-	cfg, _ := LoadConfig(ConfigPath)
 	if o.Token != "" {
 		if o.Server == "" {
 			return fmt.Errorf("--token needs --server")

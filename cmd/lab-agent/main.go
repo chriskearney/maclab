@@ -18,6 +18,7 @@ import (
 const usage = `lab-agent: the Mac side of the test lab
 
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin]
+        [--tailscale-authkey tskey-auth-... [--tailscale-hostname name]]
   sudo lab-agent uninstall [--dry-run] [--force]   undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
@@ -41,8 +42,11 @@ func main() {
 		token := fs.String("token", "", "one-time enrollment token from `lab enroll`")
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
+		tsKey := fs.String("tailscale-authkey", "", "join the lab's tailnet first with this one-off auth key (tagged tag:maclab, Tailscale SSH on); never stored")
+		tsHost := fs.String("tailscale-hostname", "", "name on the tailnet (default maclab-<device name>, else this machine's hostname)")
 		fs.Parse(os.Args[2:])
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto,
+			TailscaleAuthKey: *tsKey, TailscaleHostname: *tsHost,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "uninstall":
 		dry := fs.Bool("dry-run", false, "print each action without taking it")
