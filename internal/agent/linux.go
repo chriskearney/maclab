@@ -110,7 +110,7 @@ func (l *Linux) Facts() api.Facts {
 	v := strings.TrimSpace(string(out))
 	f.WatchdogArmed = f.Watchdog && v != "" && v != "0" && v != "infinity"
 	f.PanicTimeout, _ = strconv.Atoi(readTrim("/proc/sys/kernel/panic"))
-	f.Problems = l.Preflight()
+	f.Problems, f.Warnings = l.Preflight()
 	f.PreflightOK = len(f.Problems) == 0
 	if b, err := detectBootloader(); err == nil {
 		f.Bootloader = b.name()
@@ -129,8 +129,9 @@ func charsToString(ca []int8) string {
 	return string(b)
 }
 
-// Preflight lists everything that makes this Mac unsafe to hand to the lab.
-func (l *Linux) Preflight() []string {
+// Preflight lists everything that makes this Mac unsafe to hand to the lab,
+// and, as warnings, what only loses evidence.
+func (l *Linux) Preflight() (problems, warnings []string) {
 	var p []string
 	if os.Geteuid() != 0 {
 		p = append(p, "lab-agent is not running as root")
@@ -150,6 +151,8 @@ func (l *Linux) Preflight() []string {
 			minFree = limineMinFree
 		}
 	}
+	hard, warnings := unattended(b)
+	p = append(p, hard...)
 	for _, bin := range bins {
 		if _, err := exec.LookPath(bin); err != nil {
 			p = append(p, "missing "+bin)
@@ -180,7 +183,7 @@ func (l *Linux) Preflight() []string {
 	if syscall.Statfs(probe, &st) == nil && st.Bavail*uint64(st.Bsize)+dirSize(stage) < minFree {
 		p = append(p, fmt.Sprintf("less than %d MB free where test kernels are staged (%s)", minFree>>20, stage))
 	}
-	return p
+	return p, warnings
 }
 
 // WatchKernel reads /dev/kmsg from the start of this boot and follows it.

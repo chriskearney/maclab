@@ -17,7 +17,7 @@ import (
 
 const usage = `lab-agent: the Mac side of the test lab
 
-  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin]
+  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin] [--volatile-journal]
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)
@@ -40,18 +40,24 @@ func main() {
 		token := fs.String("token", "", "one-time enrollment token from `lab enroll`")
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
+		volatile := fs.Bool("volatile-journal", false, "leave journald alone: a failed lab boot's journal is lost")
 		fs.Parse(os.Args[2:])
-		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto,
+		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, VolatileJournal: *volatile,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "preflight":
 		l := &agent.Linux{WorkDir: "/var/lib/maclab"}
-		p := l.Preflight()
+		p, w := l.Preflight()
 		if len(p) == 0 {
 			fmt.Println("preflight OK")
-			return
+		} else {
+			fmt.Println("preflight problems:\n  - " + strings.Join(p, "\n  - "))
 		}
-		fmt.Println("preflight problems:\n  - " + strings.Join(p, "\n  - "))
-		os.Exit(1)
+		if len(w) > 0 {
+			fmt.Println("preflight warnings:\n  - " + strings.Join(w, "\n  - "))
+		}
+		if len(p) > 0 {
+			os.Exit(1)
+		}
 	case "known-good":
 		var out string
 		if out, err = agent.DescribeKnownGood(); err == nil {

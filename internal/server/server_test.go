@@ -235,6 +235,26 @@ func TestBaselineAndGoodKernel(t *testing.T) {
 	}
 }
 
+// Preflight warnings (a volatile journal) cost evidence, not the Mac: jobs
+// still run. Problems hold them back.
+func TestPreflightWarningsDontBlockJobs(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	setFacts := func(problems, warnings []string) {
+		v := l.s.dev(l.name)
+		v.mu.Lock()
+		v.d.Facts.PreflightOK, v.d.Facts.Problems, v.d.Facts.Warnings = len(problems) == 0, problems, warnings
+		v.mu.Unlock()
+	}
+	setFacts(nil, []string{"the journal is not kept across reboots (no /var/log/journal)"})
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-rc1 behavior=ok")}), api.OutcomePass)
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady })
+	setFacts([]string{"the disk is encrypted (/ is on dm-crypt)"}, nil)
+	if _, code, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-rc2 behavior=ok")}); code != 409 || err == nil || !strings.Contains(err.Error(), "fails preflight") {
+		t.Fatalf("a preflight problem: %d %v", code, err)
+	}
+}
+
 func TestPanicAtBootFallsBack(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()

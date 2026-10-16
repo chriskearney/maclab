@@ -803,6 +803,12 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 			fmt.Printf("    - %s\n", p)
 		}
 	}
+	if len(d.Facts.Warnings) > 0 {
+		fmt.Printf("  preflight warnings:\n")
+		for _, w := range d.Facts.Warnings {
+			fmt.Printf("    - %s\n", w)
+		}
+	}
 	if len(d.Events) > 0 {
 		fmt.Printf("  kernel events (24h):\n")
 		for _, e := range d.Events[max(0, len(d.Events)-8):] {
