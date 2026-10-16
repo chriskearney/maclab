@@ -676,10 +676,16 @@ The key goes to tailscale in a root-only temporary file, removed as soon as
 `--force-reauth`, without which tailscale ignores the new key, so a rerun
 with a key from another tailnet really moves the Mac. If tailscale won't
 run without naming the Mac's other settings (an exit node, routes), setup
-runs it again with `--reset` and lists what went back to its default. Then
+lists the settings that go back to their defaults, then runs it again with
+`--reset`. It keeps `--shields-up` if the Mac had it, and says so: that
+blocks every connection into the Mac, Tailscale SSH included. Then
 it checks that the Mac has a new login, is tagged `tag:maclab`, and is on
 the tailnet labd is on (when `--server` is a tailnet address or a `ts.net`
-name), and that labd answers. It never prints or stores the key.
+name). If it isn't, setup logs the Mac out (`tailscale logout`)
+rather than leave it on the wrong tailnet, or untagged, with Tailscale SSH
+on, and says so; make a new key and run setup again. Last, it checks that
+labd answers. It never prints or stores the key, and removes the key file
+when stopped by Ctrl-C, SIGTERM or a dropped SSH session (SIGHUP).
 Re-joining can cut a Tailscale SSH session, and tailscale may refuse to do
 it from one; run setup from the console or over plain SSH then.
 

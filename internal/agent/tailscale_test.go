@@ -25,9 +25,11 @@ type fakeOut struct {
 type fakeTailnet struct {
 	cmds     [][]string
 	said     []string
+	steps    []string // commands run and lines said, in order
 	reached  []string
 	statuses []fakeOut // tailscale status --json
 	ups      []fakeOut // tailscale up
+	logout   fakeOut   // tailscale logout
 	keys     []string  // what each --auth-key=file: held when tailscale ran
 	reach    error
 	tmp      string
@@ -46,10 +48,16 @@ func (f *fakeTailnet) tailnet() tailnet {
 	return tailnet{
 		run: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			f.cmds = append(f.cmds, append([]string{name}, args...))
+			f.steps = append(f.steps, "run: "+name+" "+args[0])
 			if name != "tailscale" {
 				return nil, nil
 			}
 			switch args[0] {
+			case "logout":
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+				return []byte(f.logout.out), f.logout.err
 			case "status":
 				o := next(f.statuses, nStatus)
 				nStatus++
@@ -75,8 +83,11 @@ func (f *fakeTailnet) tailnet() tailnet {
 			return nil, fmt.Errorf("unexpected tailscale %q", args)
 		},
 		reach: func(ctx context.Context, url string) error { f.reached = append(f.reached, url); return f.reach },
-		say:   func(format string, a ...any) { f.said = append(f.said, fmt.Sprintf(format, a...)) },
-		tmp:   f.tmp,
+		say: func(format string, a ...any) {
+			f.said = append(f.said, fmt.Sprintf(format, a...))
+			f.steps = append(f.steps, "say: "+f.said[len(f.said)-1])
+		},
+		tmp: f.tmp,
 	}
 }
 
@@ -226,17 +237,20 @@ func TestTailnetRejoinForcesReauth(t *testing.T) {
 	}
 }
 
-// tailscale up refuses to drop settings the command doesn't name; join runs
-// it again with --reset and says what went back to its default.
+// refusal is tailscale up refusing to drop the settings in cmd silently.
+func refusal(cmd string) fakeOut {
+	return fakeOut{out: "Error: changing settings via 'tailscale up' requires mentioning all\n" +
+		"non-default flags. To proceed, either re-run your command with --reset or\n" +
+		"use the command below to explicitly mention the current value of\n" +
+		"all non-default settings:\n\n\t" + cmd + "\n\n", err: errors.New("exit status 1")}
+}
+
+// tailscale up refuses to drop settings the command doesn't name; join says
+// which ones --reset will drop, then runs it again with --reset.
 func TestTailnetJoinResetsUnnamedSettings(t *testing.T) {
 	f := newFake(t)
 	f.statuses = outs(otherNet, labNet)
-	refusal := "Error: changing settings via 'tailscale up' requires mentioning all\n" +
-		"non-default flags. To proceed, either re-run your command with --reset or\n" +
-		"use the command below to explicitly mention the current value of\n" +
-		"all non-default settings:\n\n" +
-		"\ttailscale up --accept-routes --advertise-tags=tag:maclab --auth-key=file:/tmp/maclab-tskey-1 --exit-node=100.90.0.1 --hostname=h --ssh\n\n"
-	f.ups = []fakeOut{{out: refusal, err: errors.New("exit status 1")}, {}}
+	f.ups = []fakeOut{refusal("tailscale up --accept-routes --advertise-tags=tag:maclab --auth-key=file:/tmp/maclab-tskey-1 --exit-node=100.90.0.1 --hostname=h --ssh"), {}}
 	err := f.tailnet().join(context.Background(), testKey, "h", "")
 	if err != nil {
 		t.Fatal(err)
@@ -249,10 +263,59 @@ func TestTailnetJoinResetsUnnamedSettings(t *testing.T) {
 		t.Errorf("the retry read %q from the key file", f.keys)
 	}
 	said := strings.Join(f.said, "\n")
-	if !strings.Contains(said, "went back to their defaults: --accept-routes --exit-node=100.90.0.1") || strings.Contains(said, "auth-key") {
+	if !strings.Contains(said, "back to their defaults: --accept-routes --exit-node=100.90.0.1") || strings.Contains(said, "auth-key") ||
+		strings.Contains(said, "shields-up") {
 		t.Errorf("said %q", f.said)
 	}
+	// Said before the settings go, not after.
+	steps := strings.Join(f.steps, "\n")
+	if i, j := strings.Index(steps, "back to their defaults"), strings.LastIndex(steps, "run: tailscale up"); i < 0 || i > j {
+		t.Errorf("told what --reset drops only after running it:\n%s", steps)
+	}
 	noKey(t, f, err)
+
+	// tailscale named nothing it can parse: say --reset drops whatever there is.
+	f = newFake(t)
+	f.statuses = outs(otherNet, labNet)
+	f.ups = []fakeOut{refusal(""), {}}
+	if err := f.tailnet().join(context.Background(), testKey, "h", ""); err != nil {
+		t.Fatal(err)
+	}
+	if said := strings.Join(f.said, "\n"); !strings.Contains(said, "every setting this setup doesn't name back to its default") {
+		t.Errorf("said %q", f.said)
+	}
+}
+
+// --shields-up only ever closes the Mac: --reset never drops it, and join
+// says it kept it.
+func TestTailnetJoinKeepsShieldsUp(t *testing.T) {
+	for _, flag := range []string{"--shields-up", "--shields-up=true"} {
+		f := newFake(t)
+		f.statuses = outs(otherNet, labNet)
+		f.ups = []fakeOut{refusal("tailscale up --advertise-tags=tag:maclab --exit-node=100.90.0.1 --hostname=h " + flag + " --ssh"), {}}
+		err := f.tailnet().join(context.Background(), testKey, "h", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		up := f.upCmds()
+		if len(up) != 2 || !slices.Contains(up[1], "--reset") || !slices.Contains(up[1], "--shields-up") {
+			t.Errorf("%s: tailscale up %q", flag, up)
+		}
+		said := strings.Join(f.said, "\n")
+		if !strings.Contains(said, "back to their defaults: --exit-node=100.90.0.1\n") || !strings.Contains(said, "keeping --shields-up") {
+			t.Errorf("%s: said %q", flag, f.said)
+		}
+		noKey(t, f, err)
+	}
+	f := newFake(t)
+	f.statuses = outs(otherNet, labNet)
+	f.ups = []fakeOut{refusal("tailscale up --exit-node=100.90.0.1 --shields-up=false"), {}}
+	if err := f.tailnet().join(context.Background(), testKey, "h", ""); err != nil {
+		t.Fatal(err)
+	}
+	if up := f.upCmds(); len(up) != 2 || slices.Contains(up[1], "--shields-up") {
+		t.Errorf("shields down: tailscale up %q", up)
+	}
 }
 
 func TestTailnetJoinVerifies(t *testing.T) {
@@ -284,7 +347,50 @@ func TestTailnetJoinVerifies(t *testing.T) {
 		if len(f.reached) != 0 {
 			t.Errorf("%s: checked labd after a bad join", c.name)
 		}
+		// A Mac that fails the check doesn't stay on that tailnet with
+		// Tailscale SSH on.
+		if cmds := f.commands(); !reflect.DeepEqual(cmds[len(cmds)-1], []string{"tailscale", "logout"}) {
+			t.Errorf("%s: not logged out after a bad join: %q", c.name, cmds)
+		}
+		if err == nil || !strings.Contains(err.Error(), "now logged out of that tailnet") {
+			t.Errorf("%s: the error doesn't say the Mac was logged out: %v", c.name, err)
+		}
 		noKey(t, f, err)
+	}
+
+	// tailscale status fails after the join: log out all the same.
+	f := newFake(t)
+	f.statuses = []fakeOut{{out: loggedOut.json()}, {out: "failed to connect to local tailscaled", err: errors.New("exit status 1")}}
+	err := f.tailnet().join(context.Background(), testKey, "h", "")
+	if err == nil || !strings.Contains(err.Error(), "check the join") || !strings.Contains(err.Error(), "now logged out of that tailnet") {
+		t.Errorf("no status after the join: %v", err)
+	}
+
+	// The logout fails too: say so, and how to do it by hand.
+	f = newFake(t)
+	f.statuses = outs(loggedOut, untagged)
+	f.logout = fakeOut{out: "tailscaled not responding", err: errors.New("exit status 1")}
+	err = f.tailnet().join(context.Background(), testKey, "h", "")
+	if err == nil || !strings.Contains(err.Error(), "make the auth key tagged") || !strings.Contains(err.Error(), "sudo tailscale logout") {
+		t.Errorf("logout failed: %v", err)
+	}
+
+	// The check failed because setup was stopped (a dropped SSH session):
+	// the logout still runs.
+	f = newFake(t)
+	f.statuses = outs(loggedOut)
+	ctx, cancel := context.WithCancel(context.Background())
+	tn := f.tailnet()
+	run := tn.run
+	tn.run = func(c context.Context, name string, args ...string) ([]byte, error) {
+		if name == "tailscale" && args[0] == "status" && len(f.upCmds()) > 0 {
+			cancel()
+			return nil, c.Err()
+		}
+		return run(c, name, args...)
+	}
+	if err := tn.join(ctx, testKey, "h", ""); err == nil || !strings.Contains(err.Error(), "now logged out of that tailnet") {
+		t.Errorf("stopped during the check: %v", err)
 	}
 
 	for _, server := range []string{"http://labd.tail1234.ts.net:7770", "http://10.1.1.5:7770", "http://labd:7770", "http://[fd7a:115c:a1e0::5]:7770"} {
@@ -308,6 +414,9 @@ func TestTailnetJoinFailuresHideKey(t *testing.T) {
 	if len(f.reached) != 0 {
 		t.Error("checked labd after a failed join")
 	}
+	if strings.Contains(err.Error(), "logged out") {
+		t.Errorf("a failed tailscale up changed nothing, yet the Mac was logged out: %v", err)
+	}
 	noKey(t, f, err)
 
 	f = newFake(t)
@@ -324,6 +433,12 @@ func TestTailnetJoinFailuresHideKey(t *testing.T) {
 	err = f.tailnet().join(context.Background(), testKey, "h", "http://labd:7770")
 	if err == nil || !strings.Contains(err.Error(), "not reachable") {
 		t.Errorf("unreachable labd: %v", err)
+	}
+	// The Mac joined as it should: labd may only be slow to answer.
+	for _, c := range f.commands() {
+		if slices.Equal(c, []string{"tailscale", "logout"}) {
+			t.Errorf("logged out after a good join that couldn't reach labd: %q", f.commands())
+		}
 	}
 
 	f = newFake(t)

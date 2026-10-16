@@ -40,9 +40,10 @@ const labTag = "tag:maclab"
 
 // join runs `tailscale up` with a hand-made auth key, tagged tag:maclab with
 // Tailscale SSH on, checks the Mac really is on labd's tailnet with that
-// tag, then checks labd answers at server over the tailnet. The key reaches
-// tailscale in a file only root can read, never in argv, and is never
-// printed or stored: the tailnet remembers the Mac.
+// tag, then checks labd answers at server over the tailnet. A Mac that fails
+// the check is logged out (see leave). The key reaches tailscale in a
+// file only root can read, never in argv, and is never printed or stored:
+// the tailnet remembers the Mac.
 func (t tailnet) join(ctx context.Context, key, hostname, server string) error {
 	hide := func(b []byte) string { return strings.TrimSpace(strings.ReplaceAll(string(b), key, "<auth key>")) }
 	if out, err := t.run(ctx, "systemctl", "enable", "--now", "tailscaled.service"); err != nil {
@@ -66,10 +67,10 @@ func (t tailnet) join(ctx context.Context, key, hostname, server string) error {
 
 	after, err := t.status(ctx)
 	if err != nil {
-		return fmt.Errorf("check the join: %w", err)
+		return t.leave(ctx, fmt.Errorf("check the join: %w", err))
 	}
 	if err := checkJoined(before, after, server); err != nil {
-		return err
+		return t.leave(ctx, err)
 	}
 	if before != nil && before.loggedIn() && before.tailnetName() != after.tailnetName() {
 		t.say("joined tailnet %s as %s (tag:maclab, Tailscale SSH on), leaving tailnet %s", after.tailnetName(), hostname, before.tailnetName())
@@ -86,11 +87,27 @@ func (t tailnet) join(ctx context.Context, key, hostname, server string) error {
 	return nil
 }
 
+// leave logs the Mac out after tailscale up succeeded and the check after it
+// failed. Whatever tailnet the Mac is on then, untagged, the wrong one, or
+// its old one with the new settings, it would stay there with Tailscale SSH
+// on. It runs even when ctx has ended (a dropped SSH session), and returns
+// why, saying what became of the Mac.
+func (t tailnet) leave(ctx context.Context, why error) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+	if out, err := t.run(ctx, "tailscale", "logout"); err != nil {
+		return fmt.Errorf("%w. Logging this Mac out of that tailnet failed too (tailscale logout: %v: %s), so it may still be on it "+
+			"with Tailscale SSH on: run `sudo tailscale logout`", why, err, bytes.TrimSpace(out))
+	}
+	return fmt.Errorf("%w. So that it isn't left there half set up, this Mac is now logged out of that tailnet (tailscale logout)", why)
+}
+
 // up runs tailscale up, handing it the key in a file only root can read,
 // which is gone again when up returns. When tailscale refuses because the
 // Mac has other settings this join doesn't name, up runs it again with
 // --reset: setup owns the Mac's tailnet settings, and an old tailnet's exit
-// node or routes mean nothing on a new one.
+// node or routes mean nothing on a new one. It says first which settings
+// that drops, and keeps --shields-up, which only ever closes the Mac.
 func (t tailnet) up(ctx context.Context, key, hostname string, reauth bool) ([]byte, error) {
 	f, err := os.CreateTemp(t.tmp, "maclab-tskey-*") // mode 0600
 	if err != nil {
@@ -112,16 +129,20 @@ func (t tailnet) up(ctx context.Context, key, hostname string, reauth bool) ([]b
 	if err == nil || !strings.Contains(string(out), "requires mentioning all") {
 		return out, err
 	}
-	reset := resetSettings(string(out))
-	if out, err = t.run(ctx, "tailscale", append(args, "--reset")...); err == nil {
-		if len(reset) == 0 {
-			t.say("tailscale settings this setup doesn't name went back to their defaults")
-		} else {
-			t.say("tailscale settings this setup doesn't name went back to their defaults: %s",
-				strings.ReplaceAll(strings.Join(reset, " "), key, "<auth key>"))
-		}
+	reset, shieldsUp := resetSettings(string(out))
+	retry := append(slices.Clone(args), "--reset")
+	if len(reset) == 0 {
+		t.say("tailscale up wants this Mac's other settings named; running it again with --reset, " +
+			"which puts every setting this setup doesn't name back to its default (tailscale didn't list them)")
+	} else {
+		t.say("tailscale up wants this Mac's other settings named; running it again with --reset, which puts these back to their defaults: %s",
+			strings.ReplaceAll(strings.Join(reset, " "), key, "<auth key>"))
 	}
-	return out, err
+	if shieldsUp {
+		retry = append(retry, "--shields-up")
+		t.say("keeping --shields-up: tailscale still refuses every connection into this Mac, Tailscale SSH included")
+	}
+	return t.run(ctx, "tailscale", retry...)
 }
 
 // tsStatus is the part of `tailscale status --json` join looks at.
@@ -186,7 +207,7 @@ func (s *tsStatus) tailnetName() string {
 // or on a tailnet labd isn't on.
 func checkJoined(before, after *tsStatus, server string) error {
 	if after.BackendState != "Running" {
-		return fmt.Errorf("tailscale is %s after joining, not Running (a key that isn't pre-approved needs the Mac approved in the admin console)", after.BackendState)
+		return fmt.Errorf("tailscale is %s after joining, not Running (a key that isn't pre-approved leaves the Mac waiting for approval in the admin console: make a pre-approved one)", after.BackendState)
 	}
 	if after.Self == nil {
 		return fmt.Errorf("tailscale status names no node for this Mac")
@@ -248,8 +269,9 @@ func inTailnetRange(ip netip.Addr) bool {
 }
 
 // resetSettings picks the settings tailscale up named in its refusal to
-// drop them silently, leaving out the ones join passes itself.
-func resetSettings(out string) []string {
+// drop them silently, leaving out the ones join passes itself and
+// --shields-up, which shieldsUp reports instead.
+func resetSettings(out string) (reset []string, shieldsUp bool) {
 	ours := map[string]bool{"auth-key": true, "advertise-tags": true, "ssh": true, "hostname": true,
 		"timeout": true, "force-reauth": true, "reset": true, "accept-risk": true}
 	for l := range strings.SplitSeq(out, "\n") {
@@ -257,16 +279,19 @@ func resetSettings(out string) []string {
 		if len(f) < 2 || f[0] != "tailscale" || f[1] != "up" {
 			continue
 		}
-		var reset []string
 		for _, a := range f[2:] {
-			name, _, _ := strings.Cut(strings.TrimPrefix(a, "--"), "=")
-			if strings.HasPrefix(a, "--") && !ours[name] {
+			name, value, _ := strings.Cut(strings.TrimPrefix(a, "--"), "=")
+			switch {
+			case !strings.HasPrefix(a, "--") || ours[name]:
+			case name == "shields-up":
+				shieldsUp = value == "" || value == "true"
+			default:
 				reset = append(reset, a)
 			}
 		}
-		return reset
+		return reset, shieldsUp
 	}
-	return nil
+	return nil, false
 }
 
 // AuthKey is the Tailscale auth key setup joins with: the contents of file,
