@@ -1133,7 +1133,12 @@ func sameFiles(a, b string) error {
 
 // hInstalledStatus lists a release's frozen files and their pins.
 func (s *Server) hInstalledStatus(w http.ResponseWriter, r *http.Request) {
-	dir := s.frozenDir(r.PathValue("release"))
+	release := r.PathValue("release")
+	if !reRelease.MatchString(release) {
+		httpErr(w, 404, "bad release %q", release)
+		return
+	}
+	dir := s.frozenDir(release)
 	var files []string
 	filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
 		if err == nil && !info.IsDir() {

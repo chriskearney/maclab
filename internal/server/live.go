@@ -85,6 +85,10 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
+	// Serial lines carry the console (lab shell, serial lab exec), so only admins
+	// get them, as with the stored serial log.
+	a, _ := s.access(r)
+	serial := a == adminAccess
 	sb := s.hub.subscribe(r.URL.Query().Get("device"))
 	defer s.hub.unsubscribe(sb)
 	fmt.Fprint(w, ": maclab stream\n\n")
@@ -100,6 +104,9 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 		case <-keep.C:
 			fmt.Fprint(w, ": keepalive\n\n")
 		case e := <-sb.ch:
+			if e.kind == "serial" && !serial {
+				continue
+			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.kind, e.data)
 		}
 		fl.Flush()

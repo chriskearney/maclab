@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -79,6 +81,9 @@ func TestTailnetRoles(t *testing.T) {
 		{"trusted network still admin", "POST", "/api/jobs", "10.1.1.42:1", "", past},
 		{"token from anywhere", "POST", "/api/jobs", "192.168.7.3:5000", "adm_secret", past},
 		{"agents keep device secrets", "POST", "/api/agent/checkin", admin, "", 401},
+		{"viewer reads a release", "GET", "/api/installed/aurora-1", viewer, "", 200},
+		{"viewer can't leave the frozen stores", "GET", "/api/installed/..%2F..%2F..%2Fetc", viewer, "", 404},
+		{"nor can an admin", "GET", "/api/installed/..%2F..%2F..%2Fetc", admin, "", 404},
 	}
 	for _, c := range cases {
 		if got := try(c.method, c.path, c.remote, c.token); got != c.want {
@@ -120,6 +125,42 @@ func TestTailnetRoles(t *testing.T) {
 	}
 	if a := auth("192.168.7.3:5000"); !a.TokenRequired || a.Role != "" {
 		t.Errorf("outsider's /api/auth: %+v", a)
+	}
+
+	// The live stream leaves serial lines out for viewers: they carry the
+	// console, which only admins may see.
+	stream := func(remote string) string {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			r.RemoteAddr = remote
+			h.ServeHTTP(w, r)
+		}))
+		defer srv.Close()
+		res, err := http.Get(srv.URL + "/api/stream")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		rd := bufio.NewReader(res.Body)
+		if l, err := rd.ReadString('\n'); err != nil || !strings.HasPrefix(l, ": maclab stream") {
+			t.Fatalf("stream for %s opened with %q, %v", remote, l, err)
+		}
+		s.hub.publish("serial", "m", map[string]any{"device": "m", "line": "root@m:~# cat secret"})
+		s.hub.publish("job", "m", map[string]any{"device": "m", "id": "end"})
+		var got strings.Builder
+		for !strings.Contains(got.String(), `"end"`) {
+			l, err := rd.ReadString('\n')
+			if err != nil {
+				t.Fatalf("stream for %s: %v after %q", remote, err, got.String())
+			}
+			got.WriteString(l)
+		}
+		return got.String()
+	}
+	if got := stream(viewer); strings.Contains(got, "event: serial") || strings.Contains(got, "secret") {
+		t.Errorf("a viewer's stream carried a serial line:\n%s", got)
+	}
+	if got := stream(admin); !strings.Contains(got, "event: serial") {
+		t.Errorf("an admin's stream lost the serial line:\n%s", got)
 	}
 }
 
