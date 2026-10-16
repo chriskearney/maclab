@@ -260,6 +260,10 @@ func (g *grubLayout) arm(entry string) error {
 }
 
 func (g *grubLayout) armed() string {
+	// grub-editenv list creates a missing env file, which uninstall removes.
+	if _, err := os.Stat(g.EnvFile); os.IsNotExist(err) {
+		return ""
+	}
 	out, _ := exec.Command("grub-editenv", g.EnvFile, "list").Output()
 	for _, l := range strings.Split(string(out), "\n") {
 		if v, ok := strings.CutPrefix(l, envVar+"="); ok {

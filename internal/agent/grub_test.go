@@ -2,6 +2,7 @@ package agent
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -105,5 +106,23 @@ menuentry 'M3 main' --id m3-main {
 		if !strings.Contains(e, want) {
 			t.Errorf("entry lacks %q:\n%s", want, e)
 		}
+	}
+}
+
+// grub-editenv list creates the env file it is given (as on Ubuntu), so a
+// missing one must not be listed: uninstall would leave it behind.
+func TestGrubArmedLeavesMissingEnvFile(t *testing.T) {
+	bin := t.TempDir()
+	os.WriteFile(filepath.Join(bin, "grub-editenv"), []byte("#!/bin/sh\n: >\"$1\"\n"), 0o755)
+	t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+	g := &grubLayout{EnvFile: filepath.Join(t.TempDir(), envName)}
+	if got := g.armed(); got != "" {
+		t.Errorf("armed: %q", got)
+	}
+	if err := g.disarm(); err != nil {
+		t.Error(err)
+	}
+	if exists(g.EnvFile) {
+		t.Error("the env file was created")
 	}
 }
