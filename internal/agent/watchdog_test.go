@@ -83,11 +83,11 @@ func TestLabWatchdogBudgets(t *testing.T) {
 	fed(false, "11 minutes after the last check-in")
 
 	d.idle()
-	done := d.test(2 * time.Minute) // the test's budget replaces the idle one
+	done := d.test(clock.now(), 2*time.Minute) // the test's budget replaces the idle one
 	clock.add(time.Minute)
 	fed(true, "a minute into a 2-minute test")
 	d.idle() // check-ins carry on while the test hangs
-	second := d.test(time.Hour)
+	second := d.test(clock.now(), time.Hour)
 	clock.add(90 * time.Second)
 	fed(false, "past the test's budget, after a check-in and another test started")
 	second()
@@ -127,7 +127,7 @@ func TestLabWatchdogPID1(t *testing.T) {
 	clock.add(15 * time.Second)
 	answers(d, false)
 	fed(false, "PID 1 silent for 35 s, inside the idle budget")
-	done := d.test(time.Hour)
+	done := d.test(clock.now(), time.Hour)
 	fed(false, "PID 1 silent, inside a test's budget")
 	answers(d, true)
 	fed(true, "PID 1 answers again")
@@ -174,12 +174,12 @@ func TestTestBudget(t *testing.T) {
 func TestLabWatchdogNil(t *testing.T) {
 	var d *labWatchdog // a boot without the watchdog: no-ops, no panic
 	d.idle()
-	d.test(time.Minute)()
+	d.test(time.Now(), time.Minute)()
 }
 
 // wdSystem is a Sim whose watchdog the test sees, whose tests and execs run
 // until the test lets them finish, and whose script tests fetch the script
-// first, as on a real Mac.
+// first, as on a real Mac: not a builtin one, even if it names a script too.
 type wdSystem struct {
 	*Sim
 	dev      wdDevice
@@ -212,7 +212,7 @@ func (s *wdSystem) Facts() api.Facts {
 }
 
 func (s *wdSystem) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
-	if t.Script != "" {
+	if t.Builtin == "" && t.Script != "" {
 		if err := fetch(ctx, t.Script, filepath.Join(s.Sim.WorkDir, t.Name+".sh")); err != nil {
 			return api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}
 		}
@@ -435,17 +435,31 @@ type wdHarness struct {
 }
 
 func newWDHarness(t *testing.T) *wdHarness {
+	h := unheldWDHarness(t)
+	h.open()
+	return h
+}
+
+// unheldWDHarness is a wdHarness whose agent has yet to open the watchdog.
+func unheldWDHarness(t *testing.T) *wdHarness {
 	lab := &wdLabd{}
 	a, sys := wdAgent(t, labBoot, lab)
 	h := &wdHarness{t: t, a: a, sys: sys, lab: lab, clock: &wdClock{t: time.Unix(1_000_000, 0)}}
-	a.wd.Store(newLabWatchdog(&sys.dev, h.clock.now))
+	a.now = h.clock.now
 	return h
+}
+
+// open has the agent open the watchdog now.
+func (h *wdHarness) open() {
+	h.a.armWatchdog(newLabWatchdog(&h.sys.dev, h.clock.now))
 }
 
 // at moves the clock on by d, with PID 1 answering then.
 func (h *wdHarness) at(d time.Duration) {
 	h.clock.add(d)
-	answers(h.a.wd.Load(), true)
+	if wd := h.a.wd.Load(); wd != nil {
+		answers(wd, true)
+	}
 }
 
 func (h *wdHarness) fed(want bool, when string) {
@@ -580,6 +594,79 @@ func TestWatchdogBudgetAfterDownload(t *testing.T) {
 	h.at(70 * time.Second)
 	h.fed(true, "70 s into a test with an 80 s budget, after a 5-minute download")
 	h.at(15 * time.Second)
+	h.fed(false, "85 s into a test with an 80 s budget")
+	h.sys.finish <- struct{}{}
+	h.finished(test)
+}
+
+// A builtin test downloads nothing, even one that names a script too
+// (Builtin wins): its budget starts with it.
+func TestWatchdogBudgetBuiltinWithScript(t *testing.T) {
+	h := newWDHarness(t)
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "both", Builtin: "x", Script: strings.Repeat("0", 64), TimeoutSec: 60})
+	<-h.sys.running
+	h.at(70 * time.Second)
+	h.fed(true, "70 s into a builtin test with an 80 s budget")
+	h.at(15 * time.Second)
+	h.checkin()
+	h.fed(false, "85 s into a builtin test with an 80 s budget, after a check-in")
+	h.sys.finish <- struct{}{}
+	h.finished(test)
+	h.fed(true, "after the test ended")
+}
+
+// A test already running when the agent opens the watchdog (the first open
+// failed, a retry worked) is held to its budget, counted from when it
+// started: one past it is reset at once, however often the agent checks in.
+func TestWatchdogOpenedMidTest(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		into time.Duration // how long the test has run when the watchdog opens
+	}{
+		{"30 minutes into a 60 s test", 30 * time.Minute},
+		{"30 s into a 60 s test", 30 * time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := unheldWDHarness(t)
+			test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Builtin: "x", TimeoutSec: 60})
+			<-h.sys.running
+			h.at(c.into)
+			h.open()
+			h.checkin()
+			left := 80*time.Second - c.into
+			if left > 0 {
+				h.fed(true, "inside the budget, after a check-in")
+				h.at(left - time.Second)
+				h.checkin()
+				h.fed(true, "a second inside the budget, after a check-in")
+				h.at(2 * time.Second)
+			}
+			h.fed(false, "past the test's budget")
+			h.checkin()
+			h.fed(false, "past the test's budget, after a check-in")
+			h.sys.finish <- struct{}{}
+			h.finished(test)
+			h.fed(true, "after the test ended")
+		})
+	}
+}
+
+// A script still downloading when the agent opens the watchdog starts its
+// budget once it is in place, as it would have with the watchdog held.
+func TestWatchdogOpenedMidDownload(t *testing.T) {
+	h := unheldWDHarness(t)
+	h.lab.art = []byte("echo ok\n")
+	sum := sha256.Sum256(h.lab.art)
+	h.lab.onFetch = func() {
+		h.open()
+		h.at(5 * time.Minute)
+	}
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Script: hex.EncodeToString(sum[:]), TimeoutSec: 60})
+	<-h.sys.running
+	h.at(70 * time.Second)
+	h.fed(true, "70 s into a test with an 80 s budget, after a 5-minute download")
+	h.at(15 * time.Second)
+	h.checkin()
 	h.fed(false, "85 s into a test with an 80 s budget")
 	h.sys.finish <- struct{}{}
 	h.finished(test)

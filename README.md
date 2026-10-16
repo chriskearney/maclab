@@ -187,9 +187,11 @@ Mac still shows tier 1) and feeds it only while:
   wedged, which lab-agent logs.
 - A test runs within its timeout plus 20 s (2 minutes more for a GUI test, as waiting for
   the desktop session can outlast a short timeout), counted, like the timeout, from when
-  its script has downloaded. Nothing else extends that: a test that hangs where its timeout
-  can't reach it ends in a reset although lab-agent keeps checking in, while labd still
-  waits for it.
+  its script has downloaded (a builtin test downloads nothing, even one that names a script
+  too). Nothing else extends that: a test that hangs where its timeout can't reach it ends
+  in a reset although lab-agent keeps checking in, while labd still waits for it. A test
+  already running when lab-agent opens the watchdog late (on a retry) gets the same budget,
+  counted from when it started, so one already past it is reset at once.
 - Outside tests, the last check-in that reached labd, or the last command starting or
   ending, was less than 10 minutes ago. A test boot stays up for as long as labd is in
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and

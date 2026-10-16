@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -77,8 +78,20 @@ type Agent struct {
 	wake              chan struct{}
 	life              context.Context // commands outlive the poll that delivered them
 	// wd is the watchdog, held on a test boot; nil otherwise, and until the
-	// agent has opened it.
+	// agent has opened it. It is set under mu, with the running tests'
+	// budgets (armWatchdog).
 	wd atomic.Pointer[labWatchdog]
+	// tests are the tests running, under mu, so that a watchdog the agent
+	// opens while one runs still holds it to its budget.
+	tests []*testRun
+	now   func() time.Time // the watchdog's clock; tests stand in for it
+}
+
+// testRun is a running test's watchdog budget.
+type testRun struct {
+	budget time.Duration
+	start  time.Time // when its budget started; zero until then
+	done   func()    // ends it on the watchdog; nil while the agent holds none
 }
 
 func New(cfg *Config, sys System, logger *log.Logger) *Agent {
@@ -93,6 +106,7 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 		seen:    map[string]bool{},
 		running: map[string]bool{},
 		wake:    make(chan struct{}, 1),
+		now:     time.Now,
 	}
 }
 
@@ -199,15 +213,68 @@ func (a *Agent) holdWatchdog(ctx context.Context) {
 
 // feedWatchdog holds the opened watchdog w until ctx ends.
 func (a *Agent) feedWatchdog(ctx context.Context, w io.Writer) {
-	d := newLabWatchdog(w, time.Now)
+	d := newLabWatchdog(w, a.now)
 	d.logf = a.log.Printf
-	a.wd.Store(d)
-	a.mu.Lock()
-	a.factsRevision++ // labd learns at the next check-in that the agent holds it
-	a.mu.Unlock()
+	a.armWatchdog(d)
 	go d.feed(ctx)
 	go d.watchPID1(ctx, a.sys.PingInit)
 	a.log.Printf("test boot: holding the hardware watchdog, fed while PID 1 answers and each step is within its budget")
+}
+
+// armWatchdog has budgets fed from d from now on. A test already running,
+// because the agent opened the watchdog late, gets its budget counted from
+// when it started, as it would have had with the watchdog held all along:
+// its own timeout counts from then too, so a test past that budget is hung
+// where its timeout can't reach it, and the Mac resets at once (within
+// watchdogTimeout), while labd still waits for that test and blames it.
+// Counting from now would give a hung test a whole budget more, and let
+// check-ins carry it past labd's wait. A test whose script is still
+// downloading starts its budget once it is in place, as usual.
+func (a *Agent) armWatchdog(d *labWatchdog) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.wd.Store(d)
+	for _, tr := range a.tests {
+		if !tr.start.IsZero() {
+			tr.done = d.test(tr.start, tr.budget)
+			a.log.Printf("test boot: a test was running for %s: it has what is left of its %s budget", a.now().Sub(tr.start).Round(time.Second), tr.budget)
+		}
+	}
+	a.factsRevision++ // labd learns at the next check-in that the agent holds it
+}
+
+// beginTest notes a test starting, with its budget yet to start.
+func (a *Agent) beginTest(budget time.Duration) *testRun {
+	tr := &testRun{budget: budget}
+	a.mu.Lock()
+	a.tests = append(a.tests, tr)
+	a.mu.Unlock()
+	return tr
+}
+
+// startBudget starts tr's budget now, once: on the watchdog if the agent
+// holds it, else on the one it opens later (armWatchdog).
+func (a *Agent) startBudget(tr *testRun) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if !tr.start.IsZero() {
+		return
+	}
+	tr.start = a.now()
+	if d := a.wd.Load(); d != nil {
+		tr.done = d.test(tr.start, tr.budget)
+	}
+}
+
+// endTest ends tr and its budget.
+func (a *Agent) endTest(tr *testRun) {
+	a.mu.Lock()
+	a.tests = slices.DeleteFunc(a.tests, func(o *testRun) bool { return o == tr })
+	done := tr.done
+	a.mu.Unlock()
+	if done != nil {
+		done()
+	}
 }
 
 // quiet tells labd that this boot is about to go off the network for up to
@@ -417,19 +484,17 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 			return nil, nil, err
 		}
 		// The test's budget starts once its script is in place, as its own
-		// timeout does: until then the download runs on the idle budget.
-		done := func() {}
-		var started sync.Once
-		start := func() { started.Do(func() { done = a.wd.Load().test(testBudget(t)) }) }
-		if t.Script == "" {
-			start()
+		// timeout does: until then the download runs on the idle budget. A
+		// builtin downloads nothing, Script or not: Builtin wins.
+		tr := a.beginTest(testBudget(t))
+		if t.Builtin != "" || t.Script == "" {
+			a.startBudget(tr)
 		}
 		res := a.sys.RunTest(ctx, c.JobID, t, func(ctx context.Context, sha, dst string) error {
-			defer start()
+			defer a.startBudget(tr)
 			return fetch(ctx, sha, dst)
 		}, a.quiet, dir)
-		start()
-		done()
+		a.endTest(tr)
 		res.Files = a.uploadDir(ctx, c.JobID, "test-"+t.Name, dir)
 		return res, nil, nil
 	case api.CmdCollect:

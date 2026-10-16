@@ -210,18 +210,18 @@ func (d *labWatchdog) idleLocked() {
 // pid1Locked is whether PID 1 answered within pid1Silence. d.mu is held.
 func (d *labWatchdog) pid1Locked() bool { return d.now().Sub(d.pid1At) < pid1Silence }
 
-// test feeds the watchdog for a test's budget and returns the func that ends
-// the test. labd runs one test at a time, so a test that starts while another
-// still runs (one labd gave up waiting for) gets no time of its own: the stuck
-// one still ends in a reset.
-func (d *labWatchdog) test(budget time.Duration) (done func()) {
+// test feeds the watchdog for a test's budget, counted from start, and
+// returns the func that ends the test. labd runs one test at a time, so a
+// test that starts while another still runs (one labd gave up waiting for)
+// gets no time of its own: the stuck one still ends in a reset.
+func (d *labWatchdog) test(start time.Time, budget time.Duration) (done func()) {
 	if d == nil {
 		return func() {}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.tests == 0 {
-		d.until = d.now().Add(budget)
+		d.until = start.Add(budget)
 	}
 	d.tests++
 	return func() {
