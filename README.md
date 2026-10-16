@@ -515,6 +515,65 @@ network you'd hand a root shell to. A token still works from anywhere. On a
 phone the UI switches to a bottom tab bar and can be added to the home
 screen.
 
+## Tailscale
+
+Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while
+developing, and a separate tailnet for the Omarchy project before anyone else
+joins. Nothing in maclab holds a Tailscale API key; a maintainer does the
+tailnet side by hand.
+
+```sh
+labd --listen <labd tailnet IP>:7770 --tailscale --admins alice@github,bob@github
+```
+
+With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
+(`tailscale whois`, cached for a minute). Logins in `--admins` get admin
+access with no token. Every other peer, tagged devices included, may only
+look: the dashboard, Macs, jobs, builds, logs and saved screens, including
+the console output in the live view and in each job's logs. Anything that
+changes the lab, the console itself (`lab shell`), the Mac's stored serial
+log and new screenshots answer 403, and device views never carry the
+controller's token. Peers off the tailnet still need the admin token, which
+keeps working everywhere for `lab` and scripts. `--trust` works as before.
+
+To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
+Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short
+expiry. Then on the Mac:
+
+```sh
+sudo ./lab-agent setup --server http://<labd tailnet IP>:7770 --token enr_... --tailscale-authkey tskey-auth-...
+```
+
+Before anything else, setup runs `tailscale up --auth-key=... --advertise-tags=tag:maclab
+--ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup
+uses the machine's hostname, since the lab name only arrives with enrollment)
+and checks that labd answers. It never prints or stores the key.
+
+A minimal policy: Macs reach only labd, admins reach labd and SSH into the
+Macs as root, and the rest of the tailnet may view labd.
+
+```hujson
+{
+  "groups": {"group:maclab-admins": ["alice@github", "bob@github"]},
+  "tagOwners": {
+    "tag:maclab":            ["group:maclab-admins"],
+    "tag:maclab-controller": ["group:maclab-admins"], // the labd host
+  },
+  "grants": [
+    {"src": ["tag:maclab"], "dst": ["tag:maclab-controller"], "ip": ["tcp:7770"]},
+    {"src": ["autogroup:member"], "dst": ["tag:maclab-controller"], "ip": ["tcp:7770"]},
+    {"src": ["group:maclab-admins"], "dst": ["tag:maclab"], "ip": ["tcp:22"]},
+  ],
+  "ssh": [
+    {"action": "accept", "src": ["group:maclab-admins"], "dst": ["tag:maclab"], "users": ["root"]},
+  ],
+}
+```
+
+Use `"action": "check"` to make admins re-authenticate before SSH. Tailscale's
+free Personal plan may limit Tailscale SSH (unconfirmed; check the plan before
+counting on it).
+
 ## License
 
 MIT; see [LICENSE](LICENSE). The web UI bundles third-party files under their own
