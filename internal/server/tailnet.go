@@ -45,11 +45,24 @@ func inTailnet(ip netip.Addr) bool {
 }
 
 // whoisTTL keeps labd from running the tailscale CLI on every request.
-const whoisTTL = time.Minute
+// whoisFailTTL is much shorter: a failed lookup (tailscaled restarting, a
+// timeout) must not lock a real admin out for long.
+const (
+	whoisTTL     = time.Minute
+	whoisFailTTL = 5 * time.Second
+)
 
 type whoisEntry struct {
-	p  *TailnetPeer
-	at time.Time
+	p   *TailnetPeer
+	at  time.Time
+	ttl time.Duration
+}
+
+// whoisCall is a lookup in flight; requests from the same address wait for it
+// instead of starting their own.
+type whoisCall struct {
+	done chan struct{}
+	p    *TailnetPeer
 }
 
 // access decides what a request may do. The admin token and a trusted network
@@ -132,7 +145,8 @@ func warnTrustedNetworks(cfg Config, logger *log.Logger) {
 }
 
 // tailnetPeer asks tailscaled who connected, by the TCP peer address only.
-// Answers, including "nobody", are cached for whoisTTL.
+// Answers are cached for whoisTTL, failures ("nobody") for whoisFailTTL, and
+// concurrent requests from one address share one lookup.
 func (s *Server) tailnetPeer(r *http.Request) *TailnetPeer {
 	ap, err := netip.ParseAddrPort(r.RemoteAddr)
 	if err != nil || s.cfg.WhoIs == nil {
@@ -143,25 +157,43 @@ func (s *Server) tailnetPeer(r *http.Request) *TailnetPeer {
 		return nil
 	}
 	s.whoMu.Lock()
-	e, ok := s.whoCache[ip]
-	s.whoMu.Unlock()
-	if ok && time.Since(e.at) < whoisTTL {
+	if e, ok := s.whoCache[ip]; ok && time.Since(e.at) < e.ttl {
+		s.whoMu.Unlock()
 		return e.p
 	}
-	// Not the request's context: a client hanging up must not cache "nobody".
+	if c, ok := s.whoCalls[ip]; ok {
+		s.whoMu.Unlock()
+		<-c.done
+		return c.p
+	}
+	c := &whoisCall{done: make(chan struct{})}
+	if s.whoCalls == nil {
+		s.whoCalls = map[netip.Addr]*whoisCall{}
+	}
+	s.whoCalls[ip] = c
+	s.whoMu.Unlock()
+
+	ttl := whoisTTL
+	defer func() {
+		s.whoMu.Lock()
+		if s.whoCache == nil {
+			s.whoCache = map[netip.Addr]whoisEntry{}
+		}
+		s.whoCache[ip] = whoisEntry{c.p, time.Now(), ttl}
+		delete(s.whoCalls, ip)
+		s.whoMu.Unlock()
+		close(c.done)
+	}()
+	// Not the request's context: a client hanging up must not fail the lookup
+	// for everyone waiting on it.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	p, err := s.cfg.WhoIs(ctx, ip.String())
 	if err != nil {
 		s.log.Printf("tailscale whois %s: %v", ip, err)
-		p = nil
+		p, ttl = nil, whoisFailTTL
 	}
-	s.whoMu.Lock()
-	if s.whoCache == nil {
-		s.whoCache = map[netip.Addr]whoisEntry{}
-	}
-	s.whoCache[ip] = whoisEntry{p, time.Now()}
-	s.whoMu.Unlock()
+	c.p = p
 	return p
 }
 

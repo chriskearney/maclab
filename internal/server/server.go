@@ -91,6 +91,7 @@ type Server struct {
 	serialMu    sync.Mutex
 	whoMu       sync.Mutex
 	whoCache    map[netip.Addr]whoisEntry
+	whoCalls    map[netip.Addr]*whoisCall
 }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {

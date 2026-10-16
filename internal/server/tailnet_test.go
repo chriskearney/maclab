@@ -9,10 +9,14 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -374,5 +378,76 @@ func TestTrustYieldsToTailnet(t *testing.T) {
 	}
 	if strings.Contains(quiet, "warning") {
 		t.Errorf("warned without --tailscale:\n%s", quiet)
+	}
+}
+
+func TestWhoisFailuresExpireSoon(t *testing.T) {
+	calls, up := 0, false
+	s := &Server{log: log.New(io.Discard, "", 0), cfg: Config{Tailscale: true, WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+		calls++
+		if !up {
+			return nil, fmt.Errorf("Failed to connect to local Tailscale daemon")
+		}
+		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+	}}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "100.64.0.1:1"
+	ip := netip.MustParseAddr("100.64.0.1")
+	age := func(d time.Duration) {
+		e := s.whoCache[ip]
+		e.at = e.at.Add(-d)
+		s.whoCache[ip] = e
+	}
+	if p := s.tailnetPeer(r); p != nil || calls != 1 {
+		t.Fatalf("tailscaled down: %+v after %d calls", p, calls)
+	}
+	if s.tailnetPeer(r); calls != 1 {
+		t.Errorf("a failure right away asked again: %d calls", calls)
+	}
+	up = true
+	age(whoisFailTTL + time.Second)
+	if p := s.tailnetPeer(r); p == nil || calls != 2 {
+		t.Fatalf("tailscaled back %v later: %+v after %d calls", whoisFailTTL+time.Second, p, calls)
+	}
+	age(whoisFailTTL + time.Second)
+	if s.tailnetPeer(r); calls != 2 {
+		t.Errorf("an answer was not kept: %d calls", calls)
+	}
+	age(whoisTTL)
+	if s.tailnetPeer(r); calls != 3 {
+		t.Errorf("an answer was kept past %v: %d calls", whoisTTL, calls)
+	}
+}
+
+func TestWhoisSingleFlight(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	s := &Server{log: log.New(io.Discard, "", 0), cfg: Config{Tailscale: true, WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+		calls.Add(1)
+		<-release
+		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+	}}}
+	var wg sync.WaitGroup
+	got := make([]*TailnetPeer, 20)
+	for i := range got {
+		wg.Go(func() {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = "100.64.0.1:" + fmt.Sprint(40000+i)
+			got[i] = s.tailnetPeer(r)
+		})
+	}
+	time.Sleep(50 * time.Millisecond) // let the burst pile up on the first lookup
+	close(release)
+	wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Errorf("a burst of %d requests ran %d lookups", len(got), n)
+	}
+	for i, p := range got {
+		if p == nil || p.Login != "admin@github" {
+			t.Errorf("request %d got %+v", i, p)
+		}
+	}
+	if len(s.whoCalls) != 0 {
+		t.Errorf("lookups left in flight: %v", s.whoCalls)
 	}
 }

@@ -550,7 +550,8 @@ labd --listen <labd tailnet IP>:7770 --tailscale --admins alice@github,bob@githu
 ```
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
-(`tailscale whois`, cached for a minute). Logins in `--admins` get admin
+(`tailscale whois`; answers are cached for a minute, failed lookups for 5
+seconds). Logins in `--admins` get admin
 access with no token. Every other peer, tagged devices included, may only
 look: the dashboard, Macs, jobs, builds, logs and saved screens, including
 the console output in the live view and in each job's logs. Anything that
