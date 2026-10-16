@@ -36,7 +36,7 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	defer stop()
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	var err error
@@ -48,7 +48,7 @@ func main() {
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
 		volatile := fs.Bool("volatile-journal", false, "leave journald alone: a failed lab boot's journal is lost")
 		tsKeyFile := fs.String("tailscale-authkey-file", "", "join the lab's tailnet first with the one-off auth key in this file (tagged tag:maclab, Tailscale SSH on); never stored")
-		tsKey := fs.String("tailscale-authkey", "", "the one-off auth key, or - to read it from stdin; a key given here shows in the process list and sudo's journal")
+		tsKey := fs.String("tailscale-authkey", "", "- to read the one-off auth key from stdin; the key itself is refused here, since the process list and sudo's journal show it")
 		tsHost := fs.String("tailscale-hostname", "", "name on the tailnet (default maclab-<device name>, else this machine's hostname)")
 		fs.Parse(os.Args[2:])
 		var stdin io.Reader = os.Stdin
@@ -61,13 +61,10 @@ func main() {
 			}
 			stdin = bytes.NewReader(b)
 		}
-		key, warning, e := agent.AuthKey(*tsKey, *tsKeyFile, stdin)
+		key, e := agent.AuthKey(*tsKey, *tsKeyFile, stdin)
 		if e != nil {
 			err = e
 			break
-		}
-		if warning != "" {
-			fmt.Fprintln(os.Stderr, "lab-agent: warning:", warning)
 		}
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, VolatileJournal: *volatile,
 			TailscaleAuthKey: key, TailscaleHostname: *tsHost,
@@ -130,4 +127,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lab-agent:", err)
 		os.Exit(1)
 	}
+}
+
+// signalContext ends when lab-agent is told to stop: Ctrl-C, systemd, or
+// the terminal going away (SIGHUP, as when the SSH session that runs setup
+// drops). Each ends ctx instead of killing the process, so what setup has
+// to undo, such as the Tailscale key file, gets undone.
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 }

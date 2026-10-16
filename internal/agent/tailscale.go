@@ -270,39 +270,55 @@ func resetSettings(out string) []string {
 }
 
 // AuthKey is the Tailscale auth key setup joins with: the contents of file,
-// a line read from stdin when arg is "-", else arg itself. A key given as
-// arg comes with a warning: ps, /proc and sudo's journal entry show it.
-func AuthKey(arg, file string, stdin io.Reader) (key, warning string, err error) {
+// or a line read from stdin when arg is "-". A key given as arg itself is
+// refused: by then ps, /proc and sudo's journal entry show it. So is a file
+// other users may read.
+func AuthKey(arg, file string, stdin io.Reader) (string, error) {
+	var key string
 	from := file
 	switch {
 	case arg != "" && file != "":
-		return "", "", fmt.Errorf("give --tailscale-authkey or --tailscale-authkey-file, not both")
+		return "", fmt.Errorf("give --tailscale-authkey - or --tailscale-authkey-file, not both")
 	case file != "":
-		b, err := os.ReadFile(file)
+		f, err := os.Open(file)
 		if err != nil {
-			return "", "", fmt.Errorf("read the auth key: %w", err)
+			return "", fmt.Errorf("read the auth key: %w", err)
+		}
+		defer f.Close()
+		fi, err := f.Stat()
+		if err != nil {
+			return "", fmt.Errorf("read the auth key: %w", err)
+		}
+		if perm := fi.Mode().Perm(); perm&0o044 != 0 {
+			return "", fmt.Errorf("%s can be read by other users (mode %04o), and so can the key in it: make a new key, revoke this one "+
+				"in the Tailscale admin console (Settings, Keys), and put the new one in a file only you can read (`(umask 077; cat > %s)`)", file, perm, file)
+		}
+		b, err := io.ReadAll(f)
+		if err != nil {
+			return "", fmt.Errorf("read the auth key: %w", err)
 		}
 		key = string(b)
 	case arg == "-":
 		from = "stdin"
 		l, err := bufio.NewReader(stdin).ReadString('\n')
 		if err != nil && err != io.EOF {
-			return "", "", fmt.Errorf("read the auth key from stdin: %w", err)
+			return "", fmt.Errorf("read the auth key from stdin: %w", err)
 		}
 		key = l
 	case arg != "":
-		return arg, "--tailscale-authkey with a key shows it in the process list and in sudo's journal entry, " +
-			"which tailnet viewers of labd can read; next time use --tailscale-authkey-file <path> or --tailscale-authkey - (stdin)", nil
+		return "", fmt.Errorf("--tailscale-authkey takes - (the key on stdin), not the key itself: a key on the command line shows in the " +
+			"process list and in sudo's journal entry, which tailnet viewers of labd can read, and this one may be there already. " +
+			"Revoke it in the Tailscale admin console (Settings, Keys), make a new one and pass it with --tailscale-authkey-file <file> or --tailscale-authkey -")
 	default:
-		return "", "", nil
+		return "", nil
 	}
 	if key = strings.TrimSpace(key); key == "" {
-		return "", "", fmt.Errorf("no auth key in %s", from)
+		return "", fmt.Errorf("no auth key in %s", from)
 	}
 	if strings.ContainsAny(key, " \t\r\n") {
-		return "", "", fmt.Errorf("the auth key in %s is more than one word", from)
+		return "", fmt.Errorf("the auth key in %s is more than one word", from)
 	}
-	return key, "", nil
+	return key, nil
 }
 
 // reachable waits up to 30 seconds for labd to answer at all: routes to a

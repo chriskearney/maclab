@@ -652,17 +652,21 @@ network. labd logs a warning at startup for each trusted network. With
 
 To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
 Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short
-expiry. Put it in a file only you can read (`(umask 077; cat > tskey)`), then
-on the Mac:
+expiry. On the Mac, put it in a file only you can read, run setup with it,
+and remove the file:
 
 ```sh
+(umask 077; cat > tskey)    # paste the key, Enter, then Ctrl-D
 sudo ./lab-agent setup --server http://<labd tailnet IP>:7770 --token enr_... --tailscale-authkey-file tskey
+shred -u tskey
 ```
 
-`--tailscale-authkey -` reads the key from stdin instead, and asks for it when
-stdin is a terminal. A key given straight to `--tailscale-authkey` still
-works, with a warning: the process list and sudo's journal entry show it,
-and tailnet viewers can read that journal through labd.
+Setup refuses a key file that group or others may read: make a new key
+then, since anyone could have read that one. `--tailscale-authkey -` reads
+the key from stdin instead, and asks for it when stdin is a terminal. A key
+given straight to `--tailscale-authkey` is refused: by the time setup sees
+it, the process list and sudo's journal entry show it, and tailnet viewers
+can read that journal through labd. Revoke such a key and make a new one.
 
 Before anything else, setup runs `tailscale up --auth-key=file:... --advertise-tags=tag:maclab
 --ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup

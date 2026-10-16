@@ -346,21 +346,39 @@ func TestAuthKey(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "key")
 	os.WriteFile(file, []byte(testKey+"\n"), 0o600)
-	if k, w, err := AuthKey("", file, nil); k != testKey || w != "" || err != nil {
-		t.Errorf("from a file: %q, %q, %v", k, w, err)
+	if k, err := AuthKey("", file, nil); k != testKey || err != nil {
+		t.Errorf("from a file: %q, %v", k, err)
 	}
-	if k, w, err := AuthKey("-", "", strings.NewReader("  "+testKey+"\nmore\n")); k != testKey || w != "" || err != nil {
-		t.Errorf("from stdin: %q, %q, %v", k, w, err)
+	if k, err := AuthKey("-", "", strings.NewReader("  "+testKey+"\nmore\n")); k != testKey || err != nil {
+		t.Errorf("from stdin: %q, %v", k, err)
 	}
-	if k, w, err := AuthKey("-", "", strings.NewReader(testKey)); k != testKey || err != nil {
-		t.Errorf("from stdin with no newline: %q, %q, %v", k, w, err)
+	if k, err := AuthKey("-", "", strings.NewReader(testKey)); k != testKey || err != nil {
+		t.Errorf("from stdin with no newline: %q, %v", k, err)
 	}
-	k, w, err := AuthKey(testKey, "", nil)
-	if k != testKey || err != nil || !strings.Contains(w, "process list") || strings.Contains(w, "SECRET") {
-		t.Errorf("on the command line: %q, %q, %v", k, w, err)
+	if k, err := AuthKey("", "", nil); k != "" || err != nil {
+		t.Errorf("no key: %q, %v", k, err)
 	}
-	if k, w, err := AuthKey("", "", nil); k != "" || w != "" || err != nil {
-		t.Errorf("no key: %q, %q, %v", k, w, err)
+	// A key on the command line is in ps and sudo's journal by now.
+	if k, err := AuthKey(testKey, "", nil); k != "" || err == nil || !strings.Contains(err.Error(), "process list") ||
+		!strings.Contains(err.Error(), "--tailscale-authkey-file") || !strings.Contains(err.Error(), "Revoke it") {
+		t.Errorf("on the command line: %q, %v", k, err)
+	}
+	// So is one in a file other users may read.
+	for _, mode := range []os.FileMode{0o644, 0o640, 0o604} {
+		open := filepath.Join(dir, fmt.Sprintf("key-%o", mode))
+		os.WriteFile(open, []byte(testKey+"\n"), 0o600)
+		os.Chmod(open, mode)
+		if k, err := AuthKey("", open, nil); k != "" || err == nil || !strings.Contains(err.Error(), "can be read by other users") {
+			t.Errorf("a key file with mode %04o: %q, %v", mode, k, err)
+		}
+	}
+	for _, mode := range []os.FileMode{0o400, 0o600, 0o620} {
+		closed := filepath.Join(dir, fmt.Sprintf("key-%o", mode))
+		os.WriteFile(closed, []byte(testKey+"\n"), 0o600)
+		os.Chmod(closed, mode)
+		if k, err := AuthKey("", closed, nil); k != testKey || err != nil {
+			t.Errorf("a key file with mode %04o: %q, %v", mode, k, err)
+		}
 	}
 	empty := filepath.Join(dir, "empty")
 	os.WriteFile(empty, []byte("\n"), 0o600)
@@ -370,13 +388,15 @@ func TestAuthKey(t *testing.T) {
 		arg, file string
 		stdin     string
 	}{
-		"both":             {testKey, file, ""},
+		"both":             {"-", file, ""},
+		"key and file":     {testKey, file, ""},
 		"empty file":       {"", empty, ""},
 		"two words":        {"", two, ""},
 		"missing file":     {"", filepath.Join(dir, "nope"), ""},
 		"nothing on stdin": {"-", "", ""},
+		"on the cmdline":   {testKey, "", ""},
 	} {
-		k, _, err := AuthKey(c.arg, c.file, strings.NewReader(c.stdin))
+		k, err := AuthKey(c.arg, c.file, strings.NewReader(c.stdin))
 		if err == nil || k != "" {
 			t.Errorf("%s: %q, %v", name, k, err)
 		} else if strings.Contains(err.Error(), "SECRET") {

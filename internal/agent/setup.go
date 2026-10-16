@@ -85,7 +85,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 			return err
 		}
 	} else if o.TailscaleHostname != "" {
-		return fmt.Errorf("--tailscale-hostname needs --tailscale-authkey-file or --tailscale-authkey")
+		return fmt.Errorf("--tailscale-hostname needs --tailscale-authkey-file or --tailscale-authkey -")
 	}
 
 	b, err := detectBootloader()
