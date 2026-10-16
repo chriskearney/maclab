@@ -20,7 +20,7 @@ func TestStageCmdlineDefaultBase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "root=UUID=4f4d5801-524f-4f54-8000-000000000001 rw rootflags=subvol=@ zswap.enabled=0 rootfstype=btrfs loglevel=7 panic=10 console=ttySAC0,115200 console=tty0 foo=1 maclab.job=j1"
+	want := "root=UUID=4f4d5801-524f-4f54-8000-000000000001 rw rootflags=subvol=@ zswap.enabled=0 rootfstype=btrfs loglevel=7 panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 console=ttySAC0,115200 console=tty0 foo=1 maclab.job=j1"
 	if got != want {
 		t.Fatalf("got  %s\nwant %s", got, want)
 	}

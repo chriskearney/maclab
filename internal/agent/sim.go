@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -225,6 +227,12 @@ func (s *Sim) BootOnce(entry string) error {
 }
 
 func (s *Sim) Reboot() error { s.boot("reboot: Restarting system"); return nil }
+
+// OpenWatchdog fails: the Sim has no hardware watchdog.
+func (s *Sim) OpenWatchdog() (io.Writer, error) { return nil, errors.New("no hardware watchdog") }
+
+// PingInit always answers.
+func (s *Sim) PingInit(ctx context.Context) error { return nil }
 
 func (s *Sim) Crash(mode string) error {
 	s.boot("Kernel panic - not syncing: sysrq triggered crash")

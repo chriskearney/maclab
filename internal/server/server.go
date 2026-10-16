@@ -59,6 +59,10 @@ type Config struct {
 	// StageTimeout is how long labd waits for one staging attempt (default 20
 	// minutes). Tests shorten it.
 	StageTimeout time.Duration
+	// TestGrace is how long past a test's timeout labd waits for its result
+	// (default 2 minutes); GUIGrace is how much longer for a GUI test (default
+	// 2 minutes, see guiWait). Tests shorten them.
+	TestGrace, GUIGrace time.Duration
 }
 
 type Server struct {
@@ -89,6 +93,12 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	if cfg.StageTimeout == 0 {
 		cfg.StageTimeout = 20 * time.Minute
+	}
+	if cfg.TestGrace == 0 {
+		cfg.TestGrace = 2 * time.Minute
+	}
+	if cfg.GUIGrace == 0 {
+		cfg.GUIGrace = 2 * time.Minute
 	}
 	if cfg.OfflineAfter == 0 {
 		cfg.OfflineAfter = time.Minute

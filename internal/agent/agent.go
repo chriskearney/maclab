@@ -73,6 +73,7 @@ type Agent struct {
 	after             []func() // actions to run once pending results reach labd
 	wake              chan struct{}
 	life              context.Context // commands outlive the poll that delivered them
+	wd                *labWatchdog    // held on a test boot; nil otherwise
 }
 
 func New(cfg *Config, sys System, logger *log.Logger) *Agent {
@@ -102,6 +103,7 @@ func Enroll(ctx context.Context, server, token string, facts api.Facts) (*api.En
 // kernel events go out on their own request the moment they exist.
 func (a *Agent) Run(ctx context.Context) error {
 	a.life = ctx
+	a.holdWatchdog(ctx)
 	go a.sys.WatchKernel(ctx, func(line string) {
 		if k := detect.Classify(line); k != "" {
 			bootID, _, _ := a.sys.Identity()
@@ -146,6 +148,29 @@ func (a *Agent) Run(ctx context.Context) error {
 		}
 	}
 	return ctx.Err()
+}
+
+// holdWatchdog takes the hardware watchdog on a test boot and feeds it until
+// ctx ends, while PID 1 answers and each step is within its budget (see
+// watchdog.go).
+func (a *Agent) holdWatchdog(ctx context.Context) {
+	if _, _, cmdline := a.sys.Identity(); jobTag(cmdline) == "" {
+		return
+	}
+	w, err := a.sys.OpenWatchdog()
+	if err != nil {
+		sleepCtx(ctx, time.Second) // whatever has it may let go
+		w, err = a.sys.OpenWatchdog()
+	}
+	if err != nil {
+		a.log.Printf("test boot: can't open the hardware watchdog: %v. If it is running and nothing else feeds it, the Mac resets once watchdog.open_timeout=%d runs out", err, int(labBootDeadline/time.Second))
+		return
+	}
+	a.wd = newLabWatchdog(w, time.Now)
+	a.wd.logf = a.log.Printf
+	go a.wd.feed(ctx)
+	go a.wd.watchPID1(ctx, a.sys.PingInit)
+	a.log.Printf("test boot: holding the hardware watchdog, fed while PID 1 answers and each step is within its budget")
 }
 
 // sleeping tells labd the Mac is about to suspend, before it does, and that
@@ -198,6 +223,9 @@ func (a *Agent) poll(ctx context.Context) error {
 	if refreshFacts {
 		f := a.sys.Facts()
 		f.AgentVersion = Version
+		if a.wd != nil {
+			f.WatchdogArmed = true // systemd is off it on a test boot; the agent holds it
+		}
 		ci.Facts = &f
 	}
 
@@ -205,6 +233,7 @@ func (a *Agent) poll(ctx context.Context) error {
 	if err := postJSON(ctx, a.http, a.url("/api/agent/checkin?wait_ms=10000"), a.cfg.Secret, ci, &resp); err != nil {
 		return err
 	}
+	a.wd.idle() // labd is in touch
 	a.mu.Lock()
 	if ci.Facts != nil {
 		// Cleanup can finish while this request is in flight. Acknowledge
@@ -275,8 +304,10 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 	a.running[c.ID] = true
 	a.mu.Unlock()
 	a.log.Printf("command %s %s job=%s", c.ID, c.Kind, c.JobID)
+	a.wd.idle()
 	go func() {
 		out, after, err := a.exec(ctx, c)
+		a.wd.idle()
 		r := api.CommandResult{ID: c.ID, OK: err == nil}
 		if err != nil {
 			r.Error = err.Error()
@@ -338,7 +369,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		if err != nil {
 			return nil, nil, err
 		}
+		done := a.wd.test(testBudget(t))
 		res := a.sys.RunTest(ctx, c.JobID, t, fetch, dir)
+		done()
 		res.Files = a.uploadDir(ctx, c.JobID, "test-"+t.Name, dir)
 		return res, nil, nil
 	case api.CmdCollect:

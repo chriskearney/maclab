@@ -296,13 +296,13 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		tests = append(append([]api.TestSpec{r.ir.test(installed.PhaseBooted)}, tests...), r.ir.test(installed.PhaseAfter))
 	}
 	for _, t := range tests {
-		timeout := time.Duration(t.TimeoutSec)*time.Second + 2*time.Minute
+		timeout := time.Duration(t.TimeoutSec)*time.Second + r.s.cfg.TestGrace
 		if t.TimeoutSec == 0 {
 			timeout = 7 * time.Minute
 		}
 		r.ev("test %s: running", t.Name)
 		var tr api.TestResult
-		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, timeout, &tr, func(n string) { r.ev("%s", n) })
+		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, timeout+r.s.guiWait(t), &tr, func(n string) { r.ev("%s", n) })
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
 		}
@@ -485,6 +485,18 @@ func (r *jobRun) runTest(ctx context.Context, t api.TestSpec) api.TestResult {
 	}
 	r.ev("test %s: %s", t.Name, testVerdict(tr))
 	return tr
+}
+
+// guiWait is the extra time labd waits for test t: cfg.GUIGrace for a GUI
+// test. The agent may wait up to 2 minutes for the desktop session, which a
+// short timeout doesn't cut short, so its watchdog gives a GUI test that much
+// more; waiting as long means a GUI test hung past its timeout on a test boot
+// is reset while labd still waits for it, and the job blames it.
+func (s *Server) guiWait(t api.TestSpec) time.Duration {
+	if t.GUI {
+		return s.cfg.GUIGrace
+	}
+	return 0
 }
 
 func (r *jobRun) currentOMT() *api.OMTResult {
