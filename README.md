@@ -69,7 +69,12 @@ appends. The job records the staged and the booted command line. Test boots also
 keep `systemd-analyze` time, blame and critical-chain.
 
 Outcomes: `pass`, `tests_failed`, `booted_unhealthy`, `panicked`, `hung`,
-`boot_failed`, `stage_failed`, `infra_error`, `canceled`.
+`crashed_or_hung`, `boot_failed`, `stage_failed`, `infra_error`, `canceled`.
+`crashed_or_hung` means the Mac rebooted during a test with no kernel error
+captured (`panicked` needs one); its summary gives the seconds from the last
+check-in to the next boot's first, and back within about 90s reads as a crash
+(`panic=10` reboots in seconds), later as a watchdog reset after a hang, which is
+an inference, not a diagnosis.
 
 ## When things go wrong
 

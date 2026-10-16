@@ -281,13 +281,16 @@ const (
 	OutcomePass        = "pass"
 	OutcomeTestsFailed = "tests_failed"
 	OutcomeUnhealthy   = "booted_unhealthy" // booted, but kernel errors or degraded system
-	OutcomePanicked    = "panicked"
+	OutcomePanicked    = "panicked"         // a kernel panic or oops was captured
 	OutcomeHung        = "hung"
-	OutcomeBootFailed  = "boot_failed" // came back on the known-good kernel without a clear cause
-	OutcomeStageFailed = "stage_failed"
-	OutcomeBuildFailed = "build_failed"
-	OutcomeInfra       = "infra_error"
-	OutcomeCanceled    = "canceled"
+	// rebooted during a test with no kernel error captured; the summary says
+	// how long it was silent, which hints at a crash or a watchdog reset
+	OutcomeCrashedOrHung = "crashed_or_hung"
+	OutcomeBootFailed    = "boot_failed" // came back on the known-good kernel without a clear cause
+	OutcomeStageFailed   = "stage_failed"
+	OutcomeBuildFailed   = "build_failed"
+	OutcomeInfra         = "infra_error"
+	OutcomeCanceled      = "canceled"
 )
 
 type JobSpec struct {

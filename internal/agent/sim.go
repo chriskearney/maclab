@@ -21,7 +21,9 @@ import (
 // Sim is a pretend Mac. A kernel artifact for it is a text file such as
 // "krel=7.1-test behavior=panic"; behaviors are ok, omt-regress (boots, but
 // Wi-Fi fails in omarchy-m-test), panic (at boot),
-// hang (at boot), silent (hang with no serial output) and crash-in-test.
+// hang (at boot), silent (hang with no serial output), crash-in-test,
+// reboot-in-test (reboots with no kernel message) and hang-in-test (goes silent
+// for HangFor, then a watchdog resets it, again with no kernel message).
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
 // logind does; one named quiet-suspend-* sleeps without announcing it.
 type Sim struct {
@@ -31,6 +33,7 @@ type Sim struct {
 	Serial      func(line string) // wired to a fake OOB controller
 	WorkDir     string
 	SuspendFor  time.Duration
+	HangFor     time.Duration
 
 	mu           sync.Mutex
 	sleepFn      func(bool)
@@ -302,6 +305,17 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 		s.kmsg <- "Unable to handle kernel NULL pointer dereference at virtual address 0000000000000008"
 		time.Sleep(50 * time.Millisecond)
 		s.boot("Kernel panic - not syncing: Oops: Fatal exception")
+		<-ctx.Done()
+		return api.TestResult{Name: t.Name, Error: "machine went away"}
+	}
+	if b == "reboot-in-test" || b == "hang-in-test" {
+		if b == "hang-in-test" {
+			s.mu.Lock()
+			s.alive = false
+			s.mu.Unlock()
+			time.Sleep(s.HangFor)
+		}
+		s.boot("")
 		<-ctx.Done()
 		return api.TestResult{Name: t.Name, Error: "machine went away"}
 	}

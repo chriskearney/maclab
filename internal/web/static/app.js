@@ -143,7 +143,7 @@ const STATE = {
 const OUTCOME = {
   pass: ['c-ok', 'check', 'Passed'], tests_failed: ['c-warn', 'close', 'Tests failed'],
   booted_unhealthy: ['c-warn', 'alert', 'Booted, unhealthy'], panicked: ['c-bad', 'flash', 'Panicked'],
-  hung: ['c-bad', 'sand', 'Hung'], boot_failed: ['c-bad', 'power', 'Boot failed'], stage_failed: ['c-warn', 'pkg', 'Staging failed'],
+  hung: ['c-bad', 'sand', 'Hung'], crashed_or_hung: ['c-bad', 'bolt', 'Crashed or hung'], boot_failed: ['c-bad', 'power', 'Boot failed'], stage_failed: ['c-warn', 'pkg', 'Staging failed'],
   infra_error: ['c-warn', 'cog', 'Lab error'], build_failed: ['c-bad', 'hammer', 'Build failed'], canceled: ['c-dim', 'stop', 'Canceled'],
 };
 const pill = (cls, label) => `<span class="pill ${cls}">${esc(label)}</span>`;
@@ -351,7 +351,7 @@ function pulse() {
   if (!done.length) return `<div class="empty"><div class="big">${ic('pulse')}</div><div>Charts appear after the first jobs.</div></div>`;
   const day = done.filter(j => since(j.created) < 86400);
   const passed = done.filter(j => j.outcome === 'pass').length;
-  const crashes = done.filter(j => ['panicked', 'hung'].includes(j.outcome) || j.spec.crash).length;
+  const crashes = done.filter(j => ['panicked', 'hung', 'crashed_or_hung'].includes(j.outcome) || j.spec.crash).length;
   const res = j => (S.jobCache[j.id] || j).result || {};
   const boots = done.map(j => res(j).boot_seconds).filter(Boolean);
   const med = boots.length ? [...boots].sort((a, b) => a - b)[Math.floor(boots.length / 2)] : 0;
@@ -465,7 +465,7 @@ function pipeline(j) {
   let fail = -1;
   if (j.state === 'done' && j.outcome !== 'pass') {
     const booted = j.result?.booted;
-    fail = { stage_failed: 0, tests_failed: 2, booted_unhealthy: 3, panicked: booted ? 2 : 1, hung: booted ? 2 : 1, boot_failed: 1 }[j.outcome] ?? (booted ? names.length - 1 - off : 1);
+    fail = { stage_failed: 0, tests_failed: 2, booted_unhealthy: 3, panicked: booted ? 2 : 1, hung: booted ? 2 : 1, crashed_or_hung: 2, boot_failed: 1 }[j.outcome] ?? (booted ? names.length - 1 - off : 1);
     fail += off;
     if (j.outcome === 'build_failed') fail = 0;
     if (j.outcome === 'canceled') fail = -1;

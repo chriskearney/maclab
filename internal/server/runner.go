@@ -489,6 +489,16 @@ func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
 	return api.OutcomeBootFailed, "no kernel error was captured; see serial.log and prevboot/journal.txt"
 }
 
+// quickReboot splits a reboot during a test that left no kernel error by how
+// long the Mac was silent: from the last check-in labd heard on the test boot
+// to the first one on the next boot. Within it reads as a crash, beyond it as
+// a watchdog reset after a hang. It is an inference, not a diagnosis. On an M1
+// MacBook Air without serial, a sysrq crash (panic=10) was back ~67s after its
+// test started (10s to reboot, ~55s to boot). The hardware watchdog waits 60s
+// before it resets: a stopped lab-agent was back after ~114s, and a test stuck
+// in the kernel, reset once its time budget ran out, after ~233s.
+var quickReboot = 90 * time.Second
+
 func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, string) {
 	r.ev("lost the Mac during test %s; waiting for it to come back", test)
 	lost := time.Now()
@@ -497,7 +507,16 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	r.addRecovery(steps)
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {
-		o, cause = api.OutcomePanicked, "the Mac rebooted during the test with no kernel error captured"
+		// Nothing says panic: only how long it took to come back hints at what happened.
+		o, cause = api.OutcomeCrashedOrHung, "the Mac rebooted with no kernel error captured"
+		if gap, back := r.v.silentFor(r.bootID); back {
+			cause = fmt.Sprintf("back %.0f s after it went silent: ", gap.Seconds())
+			if gap <= quickReboot {
+				cause += "quick, like a kernel panic (panic=10 reboots in seconds)"
+			} else {
+				cause += "slow, like a watchdog reset after a hang (a crash usually comes back in about a minute)"
+			}
+		}
 	}
 	r.s.updateJob(r.j, func(j *api.Job) {
 		j.Result.Tests = append(j.Result.Tests, api.TestResult{Name: test, ExitCode: -1, Error: "the kernel went down during this test"})
@@ -505,6 +524,9 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	if err == nil && ok {
 		r.ev("back after %.0fs", time.Since(lost).Seconds())
 		r.collect(ctx, "-1")
+	}
+	if o == api.OutcomeCrashedOrHung {
+		return o, fmt.Sprintf("crashed or hung during test %s: %s", test, cause)
 	}
 	return o, fmt.Sprintf("during test %s: %s", test, cause)
 }

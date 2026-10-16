@@ -80,6 +80,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 		panicGrace = 2 * time.Second
 		serialStall = 3 * time.Second
 		quietGrace = 3 * time.Second
+		quickReboot = 3 * time.Second
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	l := &lab{t: t, cancel: cancel, name: name}
@@ -315,8 +316,33 @@ func TestCrashDuringTest(t *testing.T) {
 	l.baseline()
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-oops behavior=crash-in-test")})
 	l.expect(j, api.OutcomePanicked)
-	if !strings.Contains(j.Summary, "during test boot-health") {
+	if !strings.Contains(j.Summary, "during test boot-health: kernel crashed") {
 		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+// A reboot during a test that left no kernel error is not called a panic; how
+// soon the Mac was back says which it looks like.
+func TestRebootDuringTestWithNoKernelError(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-reset behavior=reboot-in-test")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "crashed or hung during test boot-health: back ") || !strings.Contains(j.Summary, "quick, like a kernel panic") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+func TestHangDuringTestResetByWatchdog(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.HangFor = 5 * time.Second // past quietGrace and quickReboot
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-stuck behavior=hang-in-test")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "slow, like a watchdog reset after a hang") || len(j.Result.Recovery) != 0 {
+		t.Fatalf("summary: %s; recovery %v", j.Summary, j.Result.Recovery)
 	}
 	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
 }
