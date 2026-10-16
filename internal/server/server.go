@@ -71,6 +71,8 @@ type Config struct {
 	// (default 2 minutes); GUIGrace is how much longer for a GUI test (default
 	// 2 minutes, see guiWait). Tests shorten them.
 	TestGrace, GUIGrace time.Duration
+	// AgentBinary is the linux/arm64 lab-agent that ./volunteer downloads.
+	AgentBinary string
 }
 
 type Server struct {
@@ -395,6 +397,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/devices/{name}/console/arm", s.admin(s.hConsoleArm))
 	m.HandleFunc("POST /api/agent/screen", s.agent(s.hAgentScreen))
 	m.HandleFunc("POST /api/enroll-tokens", s.admin(s.hEnrollToken))
+	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
+	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
 	m.HandleFunc("POST /api/artifacts", s.admin(s.hPutArtifact))
 	m.HandleFunc("POST /api/jobs", s.admin(s.hSubmit))
 	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
@@ -542,6 +546,11 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "device %s already enrolled", req.Name)
 		return
 	}
+	s.issueToken(w, req)
+}
+
+// issueToken answers with a one-use enrollment token for req, good for a day.
+func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest) {
 	if req.Model == "" {
 		req.Model = api.ModelLaptop
 	}
@@ -551,7 +560,69 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, "%v", err)
 		return
 	}
-	writeJSON(w, api.EnrollTokenResponse{Token: tok, Expires: exp})
+	writeJSON(w, api.EnrollTokenResponse{Name: req.Name, Token: tok, Expires: exp})
+}
+
+// hVolunteer gives anyone who may look at the lab, such as any tailnet peer
+// under --tailscale, a token to enroll their own Mac: ./volunteer runs
+// lab-agent setup with it. The Mac is named after what it sent, made into a
+// free device name, and labelled with the volunteer's tailnet login.
+func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
+	var req api.EnrollTokenRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpErr(w, 400, "%v", err)
+		return
+	}
+	_, who := s.access(r)
+	req.Label = who
+	if req.Model != api.ModelDesktop {
+		req.Model = api.ModelLaptop
+	}
+	if req.Name = s.freeName(req.Name); req.Name == "" {
+		httpErr(w, 409, "no free device name")
+		return
+	}
+	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, who)
+	s.issueToken(w, req)
+}
+
+var reNameRun = regexp.MustCompile(`[^a-z0-9]+`)
+
+// freeName turns raw into a device name no Mac has yet, adding -2, -3, ...
+// on a clash; "" when even those are taken.
+func (s *Server) freeName(raw string) string {
+	base := strings.Trim(reNameRun.ReplaceAllString(strings.ToLower(raw), "-"), "-")
+	if base == "" {
+		base = "mac"
+	}
+	base = strings.TrimRight(base[:min(len(base), 28)], "-") // room for -99
+	for i := 1; i < 100; i++ {
+		name := base
+		if i > 1 {
+			name = fmt.Sprintf("%s-%d", base, i)
+		}
+		if s.dev(name) == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// hVolunteerAgent hands out the lab-agent built with this labd.
+func (s *Server) hVolunteerAgent(w http.ResponseWriter, r *http.Request) {
+	f, err := os.Open(s.cfg.AgentBinary)
+	if err != nil {
+		httpErr(w, 404, "this lab has no lab-agent to hand out: build it with make, next to labd")
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		httpErr(w, 500, "%v", err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	http.ServeContent(w, r, "lab-agent", st.ModTime(), f)
 }
 
 func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {

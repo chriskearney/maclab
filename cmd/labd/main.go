@@ -74,11 +74,14 @@ func main() {
 	if *tailscale {
 		log.Printf("tailnet admins: %s; other tailnet peers may only look", strings.Join(server.ParseAdmins(*admins), ", "))
 	}
+	// ./volunteer downloads the lab-agent built alongside labd.
+	exe, _ := os.Executable()
 	s, err := server.New(ctx, server.Config{DataDir: *data, AdminToken: strings.TrimSpace(string(tok)), Trust: trusted,
 		Tailscale: *tailscale, Admins: server.ParseAdmins(*admins),
 		OMT: *omt, OMTSite: *omtSite, OMTPublish: *omtPublish, OMTEvery: *omtEvery,
 		BootTimeout: *bootTimeout, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
-		BuilderToken: strings.TrimSpace(string(btok)), ArtifactBudget: *artifactGB << 30}, nil)
+		BuilderToken: strings.TrimSpace(string(btok)), ArtifactBudget: *artifactGB << 30,
+		AgentBinary: filepath.Join(filepath.Dir(exe), "lab-agent-linux-arm64")}, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
