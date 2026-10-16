@@ -43,7 +43,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
   lab gate <kernel> [--families m1,m2] [--volunteers] [--evidence file]
-                                      did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not
+                                      did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not.
+                                      A family is pass, fail, flaky (passed and failed: not a pass), stage_failed or untested
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
@@ -768,15 +769,21 @@ func printGate(r *api.GateReport) {
 	}
 	// Runs that decide nothing, the volunteers' Macs' apart.
 	var other, vol []string
+	add := func(fam string, run api.GateRun) {
+		l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", fam, run.Device, run.Job, run.Outcome, run.NotCounted)
+		if run.Volunteer {
+			vol = append(vol, l)
+		} else {
+			other = append(other, l)
+		}
+	}
 	for _, f := range r.Families {
 		for _, run := range f.NotCounted {
-			l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", f.Family, run.Device, run.Job, run.Outcome, run.NotCounted)
-			if run.Volunteer {
-				vol = append(vol, l)
-			} else {
-				other = append(other, l)
-			}
+			add(f.Family, run)
 		}
+	}
+	for _, run := range r.NotCounted {
+		add("?", run) // no family known
 	}
 	section := func(title string, lines []string) {
 		if len(lines) == 0 {

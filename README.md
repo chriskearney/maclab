@@ -452,15 +452,29 @@ t6034). M3 Ultra and M4 and later are not covered: those Macs are listed as not 
 
 Only plain runs count: ones that boot the Mac's known-good cmdline (no `--cmdline`,
 `--cmdline-strip` or `--cmdline-base` other than `known-good`; `--verbose-boot` is fine), run at
-least the tests every job on that Mac runs (`boot-health`, and `omarchy-m-test` where labd runs it),
-and have no `--omt-allow`. A run with a changed cmdline boots something a release doesn't, so it
-counts neither way. A run that tested less counts when it failed, since it failed even so, but not
-when it passed. Canceled, `infra_error` and `build_failed` jobs say nothing about the kernel and are
-skipped, and so are crash tests, which crash it on purpose. So is a `tests_failed` job whose every
-failed test couldn't start at all (its shell exited 126 or 127, as `omarchy-m-test` does when the
-desktop user can't read the job's directory) and whose kernel logged nothing fatal; other trouble
+least the tests every job on that Mac runs (`boot-health`, and `omarchy-m-test` where labd runs it,
+each known by its builtin whatever the job named it), and have no `--omt-allow`. Where labd runs
+`omarchy-m-test`, a pass counts only if its report was compared with the Mac's known-good run of
+it: with nothing to compare with, nothing could regress, so such a pass is listed as not counted
+("no OMT reference"; `lab baseline` makes the reference). A run with a changed cmdline boots
+something a release doesn't, so it counts neither way. A run that tested less counts when it
+failed, since it failed even so, but not when it passed. Canceled, `infra_error` and `build_failed`
+jobs say nothing about the kernel and are skipped, and so are crash tests, which crash it on
+purpose. So is a `tests_failed` job whose every failed test never started, because bash couldn't
+open the test's script, and whose kernel logged nothing fatal: the last thing the test printed is
+bash's own error for its `test-<name>.sh`, exiting 126 for `Permission denied` (as for
+`omarchy-m-test` when the desktop user can't read the job's directory) or 127 for `No such file or
+directory`. A test that ran and exited 126 or 127 itself, say for a binary it couldn't execute
+(`Exec format error`) or a command it couldn't find, failed like any other, and other trouble
 running a test (a script that didn't download, no desktop session) looks like the kernel's in the
 job's record, so it still counts as a failure. Every other outcome but `pass` is a failure.
+
+Each job records its Mac as it was when the job was submitted: its chip family, whether it was a
+volunteer's, and whether labd ran `omarchy-m-test` in its jobs. The gate judges the job by that,
+so what the Mac became since (or another Mac enrolled under its name after `lab forget`) doesn't
+change the verdict; a job from before labd recorded it is judged by the Mac as it is now. A Mac
+labd no longer has (`lab forget`) doesn't count: its runs are listed as not counted, "device gone",
+under their family, or under the report when the job didn't record its family.
 
 Each Mac fails when it failed on the kernel and never passed, passes when it passed and never
 failed, and is **flaky** when it did both, in either order: a `lab retry` that passes doesn't hide
@@ -481,12 +495,18 @@ the lab doesn't control, so they count only with `--volunteers`; otherwise the r
 and their runs apart. A staging problem on one Mac doesn't hide a pass or a failure on another.
 The gate is open only when every required family passed. `lab gate` exits 3 when it is shut.
 
+Results are strings: a family's is `pass`, `fail`, `flaky`, `stage_failed` or `untested`, and a
+run's `pass`, `fail`, `flaky` or `stage_failed`. A script that looks for `"fail"` must treat
+`"flaky"` as not passing too. The report's own `result` is only ever `pass` (the gate is open) or
+`fail`.
+
 `--evidence` writes the report as one JSON evidence record:
 the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family its result and
 runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
 couldn't stage, or a flaky Mac's other result), and `not_counted`, the runs that decide nothing,
 each with its reason (`volunteer` marks a volunteer's Mac). Then `volunteers` names the volunteers'
-Macs, `volunteers_counted` says whether they counted, and the labd host. The API is
+Macs, `volunteers_counted` says whether they counted, `not_counted` holds the runs of forgotten
+Macs whose jobs didn't record their family, and the labd host. The API is
 `GET /api/gate/{kernel}?families=m1,m2&volunteers=1`; agents use `lab_gate`.
 
 ## Kernel artifacts

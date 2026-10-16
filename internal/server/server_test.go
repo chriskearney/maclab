@@ -1476,6 +1476,25 @@ func TestCancelWhileBootingRestoresKnownGood(t *testing.T) {
 	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-slow behavior=ok")}), api.OutcomePass)
 }
 
+// omarchy-m-test under another name in the job still runs as the builtin,
+// and its report is read from where that test's files went.
+func TestOmarchyMTestRenamed(t *testing.T) {
+	l := newLab(t, true)
+	l.s.cfg.OMT = true
+	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "omt", Builtin: omtTest}}})
+	l.expect(j, api.OutcomePass)
+	if o := j.Result.OMT; o == nil || o.Report != "test-omt/omt-report.json" || o.BaselineJob == "" || len(j.Result.Tests) != 2 {
+		t.Fatalf("omt %+v, tests %+v", j.Result.OMT, j.Result.Tests)
+	}
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-bad behavior=omt-regress"), Tests: []api.TestSpec{{Name: "omt", Builtin: omtTest}}})
+	l.expect(j, api.OutcomeTestsFailed)
+	if o := j.Result.OMT; o == nil || len(o.Regressions) != 1 || o.Regressions[0].ID != "wifi.connected" {
+		t.Fatalf("regressed omt %+v", j.Result.OMT)
+	}
+}
+
 func TestBaselinePublishesWhenKnownGoodChanges(t *testing.T) {
 	l := newLab(t, true)
 	site := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -408,6 +408,7 @@ type OMTResult struct {
 	LabBoot     []OMTCheck `json:"lab_boot,omitempty"`     // regressed only because a lab kernel isn't an installed package
 	Allowed     []OMTCheck `json:"allowed,omitempty"`      // regressed, but the job said this kernel is expected to (omt_allow)
 	ComparedTo  string     `json:"compared_to,omitempty"`  // the baseline job, or why there was no comparison
+	BaselineJob string     `json:"baseline_job,omitempty"` // the known-good run it was compared with; "" for none, and then Regressions says nothing
 	Published   string     `json:"published,omitempty"`    // the report's page on omarchy-m-testing.org
 	PublishNote string     `json:"publish_note,omitempty"` // why it wasn't published, or the site's error
 	Reference   string     `json:"reference,omitempty"`    // a known-good run: whether it became the reference, or why not
@@ -430,6 +431,18 @@ type Job struct {
 	Events   []JobEvent `json:"events"`
 	Result   JobResult  `json:"result"`
 	Canceled bool       `json:"canceled,omitempty"`
+	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
+	// Jobs from before labd kept it have none.
+	DeviceAtSubmit *DeviceSnapshot `json:"device_at_submit,omitempty"`
+}
+
+// DeviceSnapshot is what lab gate needs to know about a job's Mac, as it was
+// when the job was submitted: the gate judges an old job by the Mac it ran
+// on, not by the device record as it is now.
+type DeviceSnapshot struct {
+	Family    string `json:"family,omitempty"`    // chip family (m1, m1-pro, ...); "" for one lab gate doesn't cover
+	Volunteer bool   `json:"volunteer,omitempty"` // a volunteer's Mac (Device.Volunteer)
+	OMT       bool   `json:"omt,omitempty"`       // labd ran omarchy-m-test in every job on it
 }
 
 type EnrollRequest struct {
@@ -633,7 +646,8 @@ const (
 	// but the gate stays shut until a run gives a result.
 	GateStageFailed = "stage_failed"
 	// GateFlaky: a Mac both passed and failed on the kernel, e.g. a retry
-	// passed after a failure. It doesn't pass.
+	// passed after a failure. It doesn't pass: a script that looks for "fail"
+	// must treat it as not passing too.
 	GateFlaky = "flaky"
 )
 
@@ -664,11 +678,14 @@ type GateRun struct {
 }
 
 type GateFamily struct {
-	Family     string    `json:"family"`                // m1, m1-pro, ...
-	Name       string    `json:"name"`                  // M1 Pro/Max/Ultra
-	Result     string    `json:"result"`                // pass, fail, flaky, stage_failed or untested
-	Runs       []GateRun `json:"runs,omitempty"`        // the deciding run first
-	NotCounted []GateRun `json:"not_counted,omitempty"` // runs that decide nothing: volunteers' Macs, runs that weren't plain, tests that couldn't run
+	Family string    `json:"family"`         // m1, m1-pro, ...
+	Name   string    `json:"name"`           // M1 Pro/Max/Ultra
+	Result string    `json:"result"`         // pass, fail, flaky, stage_failed or untested
+	Runs   []GateRun `json:"runs,omitempty"` // the deciding run first
+	// NotCounted holds the runs that decide nothing: volunteers' Macs, Macs
+	// labd no longer has, runs that weren't plain, passes with no
+	// omarchy-m-test reference, tests that couldn't run.
+	NotCounted []GateRun `json:"not_counted,omitempty"`
 }
 
 // GateReport says whether a kernel passed on real hardware for every required
@@ -687,4 +704,7 @@ type GateReport struct {
 	// VolunteersCounted (?volunteers=1, lab gate --volunteers).
 	Volunteers        []string `json:"volunteers,omitempty"`
 	VolunteersCounted bool     `json:"volunteers_counted,omitempty"`
+	// NotCounted holds the runs no family can take: those of Macs labd no
+	// longer has (lab forget) from jobs that didn't record their chip family.
+	NotCounted []GateRun `json:"not_counted,omitempty"`
 }

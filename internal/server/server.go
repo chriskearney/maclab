@@ -1209,7 +1209,8 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 }
 
 // submit queues a job; retryOf names the job it retries, whose source may
-// come with the kernel already built from it.
+// come with the kernel already built from it. The job records what lab gate
+// needs to know about its Mac as it is now.
 func (s *Server) submit(spec api.JobSpec, retryOf string) (*api.Job, int, error) {
 	v := s.dev(spec.Device)
 	if v == nil {
@@ -1313,7 +1314,8 @@ func (s *Server) submit(spec api.JobSpec, retryOf string) (*api.Job, int, error)
 		msg = "queued: a retry of job " + retryOf
 	}
 	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
-		Events: []api.JobEvent{{Time: now, Msg: msg}}}
+		Events:         []api.JobEvent{{Time: now, Msg: msg}},
+		DeviceAtSubmit: &api.DeviceSnapshot{Family: family(d.Facts), Volunteer: d.Volunteer, OMT: s.omtWanted(d.Device, api.JobSpec{})}}
 	if err := s.store.saveJob(j); err != nil {
 		return nil, 500, err
 	}

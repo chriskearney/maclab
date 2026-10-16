@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"path"
 	"regexp"
 	"slices"
 	"strconv"
@@ -80,12 +81,11 @@ func gateResult(outcome string) string {
 }
 
 // runnerFailures says why a tests_failed job says nothing about its kernel:
-// every test that failed couldn't run at all, its shell exiting 126 or 127
-// (not executable, not found), as omarchy-m-test does when the desktop user
-// can't reach the job's directory, and the kernel logged nothing fatal. It
-// is "" when any failure may be the kernel's. Other trouble running a test
-// (a script that didn't download, no desktop session, a tool that didn't
-// install) is recorded just like a kernel's failure, so it still counts.
+// every test that failed couldn't run at all, because bash couldn't open its
+// script (scriptUnopened), and the kernel logged nothing fatal. It is "" when
+// any failure may be the kernel's. Other trouble running a test (a script
+// that didn't download, no desktop session, a tool that didn't install) is
+// recorded just like a kernel's failure, so it still counts.
 func runnerFailures(j *api.Job) string {
 	if j.Outcome != api.OutcomeTestsFailed {
 		return ""
@@ -97,15 +97,63 @@ func runnerFailures(j *api.Job) string {
 	}
 	var why []string
 	for _, t := range j.Result.Tests {
-		switch {
-		case t.Passed:
-		case !t.TimedOut && (t.ExitCode == 126 || t.ExitCode == 127):
-			why = append(why, fmt.Sprintf("test %s couldn't run (exit %d)", t.Name, t.ExitCode))
-		default:
+		if t.Passed {
+			continue
+		}
+		e := scriptUnopened(t)
+		if e == "" {
 			return ""
 		}
+		why = append(why, fmt.Sprintf("test %s couldn't run (exit %d: bash couldn't open its script: %s)", t.Name, t.ExitCode, e))
 	}
 	return strings.Join(why, ", ")
+}
+
+// scriptUnopened is bash's error when test t never ran because bash couldn't
+// open its script, or "". The agent runs every test as bash <job
+// dir>/test-<name>.sh, as the desktop user for a GUI test (omarchy-m-test
+// among them), who may not be able to reach the job's directory. Then bash's
+// own error for that path is the last thing the test printed, and it exited
+// 126 for "Permission denied" or 127 for "No such file or directory". A test
+// that ran and exited 126 or 127 itself, say for a binary it couldn't execute
+// (Exec format error) or a command it couldn't find, failed like any other.
+func scriptUnopened(t api.TestResult) string {
+	want := map[int]string{126: "Permission denied", 127: "No such file or directory"}[t.ExitCode]
+	if want == "" || t.TimedOut {
+		return ""
+	}
+	tail := strings.TrimSpace(t.Tail)
+	last := strings.TrimSpace(tail[strings.LastIndex(tail, "\n")+1:])
+	rest, ok := strings.CutPrefix(last, "bash: ")
+	if !ok {
+		return ""
+	}
+	if script, ok := strings.CutSuffix(rest, ": "+want); ok && path.Base(script) == "test-"+t.Name+".sh" {
+		return want
+	}
+	return ""
+}
+
+// builtinNames are the names job j ran builtin test b under: a test is the
+// builtin whatever the job called it.
+func builtinNames(j *api.Job, b string) []string {
+	var names []string
+	for _, t := range testsFor(j.Spec) {
+		if t.Builtin == b {
+			names = append(names, t.Name)
+		}
+	}
+	return names
+}
+
+// omtCompared says whether job j's omarchy-m-test run was compared with a
+// known-good run of it on the Mac. One with nothing to compare with checked
+// nothing about the kernel: it has no regressions because it had no
+// reference. A job from before labd recorded the reference's job has only
+// compared_to, which names it this way only after a comparison.
+func omtCompared(j *api.Job) bool {
+	o := j.Result.OMT
+	return o != nil && (o.BaselineJob != "" || strings.HasPrefix(o.ComparedTo, "known-good run "))
 }
 
 // customCmdline says how a job changed the Mac's known-good cmdline, or "".
@@ -127,7 +175,7 @@ func customCmdline(s api.JobSpec) string {
 
 // lessTested says how a job checked less than a plain run on its Mac, or "":
 // omarchy-m-test allowances, or a test that every job there runs (boot-health,
-// and omarchy-m-test when omt) missing.
+// and omarchy-m-test when omt) missing. Tests are known by their builtin.
 func lessTested(j *api.Job, omt bool) string {
 	var why []string
 	if len(j.Spec.OMTAllow) > 0 {
@@ -137,9 +185,10 @@ func lessTested(j *api.Job, omt bool) string {
 	if omt {
 		want = append(want, omtTest)
 	}
-	for _, w := range want {
-		if !slices.ContainsFunc(j.Result.Tests, func(t api.TestResult) bool { return t.Name == w && t.Passed }) {
-			why = append(why, w+" didn't run")
+	for _, b := range want {
+		names := builtinNames(j, b)
+		if !slices.ContainsFunc(j.Result.Tests, func(t api.TestResult) bool { return t.Passed && slices.Contains(names, t.Name) }) {
+			why = append(why, b+" didn't run")
 		}
 	}
 	return strings.Join(why, ", ")
@@ -156,8 +205,18 @@ type gateOpts struct {
 	// volunteers counts volunteers' Macs (enrolled with ./volunteer), whose
 	// agents the lab doesn't control. Otherwise their runs are not counted.
 	volunteers bool
-	// omt names the Macs whose jobs all run omarchy-m-test.
+	// omt names the Macs whose jobs all run omarchy-m-test now: it decides for
+	// jobs that didn't record whether theirs did.
 	omt map[string]bool
+}
+
+// gateMac is a Mac as the gate takes it for a job: what the job recorded of
+// it when it was submitted, or for an older job the Mac as labd has it now.
+// One name may be more than one Mac over time (lab forget, then enroll
+// again), and a job is judged by the one it ran on.
+type gateMac struct {
+	name, family string
+	volunteer    bool
 }
 
 // gateRun is job j's line in a gate report, with the result res.
@@ -178,12 +237,21 @@ func gateRun(j *api.Job, res string) api.GateRun {
 
 // rollUp judges a kernel from each Mac's plain runs on it (jobs come newest
 // first). A plain run boots the Mac's known-good cmdline and runs at least
-// the tests every job on that Mac runs, with no omarchy-m-test allowances. A
-// run with a changed cmdline boots something a release doesn't, so it
-// counts neither way. A run that tested less counts when it failed, since it
-// failed even so, but not when it passed. Canceled and infra_error jobs say
-// nothing about the kernel, nor do tests_failed jobs whose failed tests
-// couldn't run at all, nor crash tests, which crash it on purpose.
+// the tests every job on that Mac runs, with no omarchy-m-test allowances,
+// and its omarchy-m-test, where the Mac runs it, was compared with a
+// known-good run. A run with a changed cmdline boots something a release
+// doesn't, so it counts neither way. A run that tested less counts when it
+// failed, since it failed even so, but not when it passed. Canceled and
+// infra_error jobs say nothing about the kernel, nor do tests_failed jobs
+// whose failed tests couldn't run at all, nor crash tests, which crash it on
+// purpose.
+//
+// A job is judged by its Mac as it was when the job was submitted: its chip
+// family, whether it was a volunteer's and whether its jobs ran
+// omarchy-m-test. A job from before labd recorded that is judged by the Mac
+// as it is now. A Mac labd no longer has (lab forget) doesn't count: its runs
+// are listed as not counted under its family, or under the report when its
+// jobs didn't record their family.
 //
 // A Mac fails when it failed on the kernel and never passed, passes when it
 // passed and never failed, and is flaky when it did both: a retry's pass
@@ -193,19 +261,18 @@ func gateRun(j *api.Job, res string) api.GateRun {
 // is flaky when any is flaky, passes when at least one passed, is
 // stage_failed when its only results are Macs that couldn't stage the kernel,
 // and is untested when none of its Macs has a result. Volunteers' Macs count
-// only with o.volunteers. Runs that don't count are listed per family, with
-// the reason. The gate opens only when every required family passed.
+// only with o.volunteers, and Macs labd no longer has don't count. Runs that
+// don't count are listed per family, with the reason. The gate opens only
+// when every required family passed.
 func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []string, o gateOpts) api.GateReport {
 	rep := api.GateReport{Kernel: k, Required: required, VolunteersCounted: o.volunteers}
-	fam, vol := map[string]string{}, map[string]bool{}
+	cur := map[string]api.Device{}
 	for _, d := range devs {
-		if f := family(d.Facts); f != "" {
-			fam[d.Name] = f
-		} else {
+		cur[d.Name] = d
+		if family(d.Facts) == "" {
 			rep.Unclassified = append(rep.Unclassified, d.Name)
 		}
 		if d.Volunteer {
-			vol[d.Name] = true
 			rep.Volunteers = append(rep.Volunteers, d.Name)
 		}
 	}
@@ -213,8 +280,8 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		pass, fail, unstaged *api.Job      // its newest counted pass, failure and couldn't-stage run
 		skipped              []api.GateRun // its runs that don't count
 	}
-	macs := map[string]*mac{}
-	var order []string // the Mac with the newest run first
+	macs := map[gateMac]*mac{}
+	var order []gateMac // the Mac with the newest run first
 	for _, j := range jobs {
 		res, d := gateResult(j.Outcome), j.Spec.Device
 		if j.State != api.JobDone || res == "" || j.Spec.Crash != "" {
@@ -226,11 +293,17 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		if rep.Kernel.Release == "" && j.Result.Booted {
 			rep.Kernel.Release = j.Result.BootKernel
 		}
-		m := macs[d]
+		key, omt := gateMac{name: d}, false
+		if at := j.DeviceAtSubmit; at != nil {
+			key.family, key.volunteer, omt = at.Family, at.Volunteer, at.OMT
+		} else if now, ok := cur[d]; ok {
+			key.family, key.volunteer, omt = family(now.Facts), now.Volunteer, o.omt[d]
+		}
+		m := macs[key]
 		if m == nil {
 			m = &mac{}
-			macs[d] = m
-			order = append(order, d)
+			macs[key] = m
+			order = append(order, key)
 		}
 		why := ""
 		if res == api.GateFail {
@@ -239,8 +312,11 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		if c := customCmdline(j.Spec); why == "" && c != "" {
 			why = "custom cmdline: " + c
 		}
-		if l := lessTested(j, o.omt[d]); why == "" && res == api.GatePass && l != "" {
+		if l := lessTested(j, omt); why == "" && res == api.GatePass && l != "" {
 			why = "tested less than a plain run: " + l
+		}
+		if why == "" && res == api.GatePass && omt && !omtCompared(j) {
+			why = "no OMT reference: omarchy-m-test had no known-good run on " + d + " to compare with (lab baseline makes one)"
 		}
 		switch {
 		case why != "":
@@ -256,10 +332,15 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		}
 	}
 	runs, skipped := map[string][]api.GateRun{}, map[string][]api.GateRun{}
-	for _, d := range order {
-		m, f := macs[d], fam[d]
-		if f == "" {
-			continue // no supported family: listed as unclassified
+	for _, key := range order {
+		m, f := macs[key], key.family
+		_, here := cur[key.name]
+		if f == "" && here {
+			// no supported family: listed as unclassified
+			if !slices.Contains(rep.Unclassified, key.name) {
+				rep.Unclassified = append(rep.Unclassified, key.name)
+			}
+			continue
 		}
 		var counted []api.GateRun
 		switch {
@@ -275,20 +356,27 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		case m.unstaged != nil:
 			counted = []api.GateRun{gateRun(m.unstaged, api.GateStageFailed)}
 		}
-		if vol[d] {
-			for i := range counted {
-				counted[i].Volunteer = true
-				if !o.volunteers {
-					counted[i].NotCounted = "a volunteer's Mac"
-				}
-			}
-			for i := range m.skipped {
-				m.skipped[i].Volunteer = true
+		for i := range counted {
+			counted[i].Volunteer = key.volunteer
+			switch {
+			case !here:
+				counted[i].NotCounted = "device gone: labd no longer has " + key.name + " (lab forget)"
+			case key.volunteer && !o.volunteers:
+				counted[i].NotCounted = "a volunteer's Mac"
 			}
 		}
-		if vol[d] && !o.volunteers {
+		for i := range m.skipped {
+			m.skipped[i].Volunteer = key.volunteer
+		}
+		switch {
+		case f == "":
+			// gone, and no family to list its runs under
+			rep.NotCounted = append(rep.NotCounted, counted...)
+			rep.NotCounted = append(rep.NotCounted, m.skipped...)
+			continue
+		case !here || key.volunteer && !o.volunteers:
 			skipped[f] = append(skipped[f], counted...)
-		} else {
+		default:
 			runs[f] = append(runs[f], counted...)
 		}
 		skipped[f] = append(skipped[f], m.skipped...)

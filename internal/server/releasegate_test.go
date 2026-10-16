@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -322,7 +323,9 @@ func TestGatePlainRuns(t *testing.T) {
 	jobs[3].Spec.CmdlineStrip = []string{"asahi.*", "apple_dcp.*"}
 	jobs[5].Spec.VerboseBoot, jobs[5].Spec.CmdlineBase = true, "known-good"
 	jobs[6].Result.Tests = []api.TestResult{{Name: "gui-smoke", Passed: true}}
+	jobs[7].Spec.Tests, jobs[8].Spec.Tests = []api.TestSpec{omtSpec()}, []api.TestSpec{omtSpec()}
 	jobs[8].Result.Tests = append(jobs[8].Result.Tests, api.TestResult{Name: omtTest, Passed: true})
+	jobs[8].Result.OMT = &api.OMTResult{BaselineJob: "jbase"}
 	jobs[9].Spec.CmdlineBase = "default"
 	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, familyIDs(), gateOpts{omt: map[string]bool{"m3pro": true}})
 
@@ -361,21 +364,192 @@ func TestGatePlainRuns(t *testing.T) {
 
 // A tests_failed job whose failed tests never ran (exit 126: the desktop user
 // couldn't open the test script) says nothing about the kernel. One with a
-// real failure among them, or a fatal kernel event, still fails.
+// real failure among them, or a fatal kernel event, still fails, and so does
+// one whose test ran and exited 126 or 127 itself.
 func TestGateRunnerFailures(t *testing.T) {
-	jobs := gateJobs("m1air tests_failed", "m1air pass", "m2air tests_failed", "m2air pass", "m3air tests_failed", "m3air pass")
+	jobs := gateJobs("m1air tests_failed", "m1air pass", "m2air tests_failed", "m2air pass", "m3air tests_failed", "m3air pass",
+		"m1pro tests_failed", "m1pro pass", "m2pro tests_failed", "m2pro pass")
 	cant := api.TestResult{Name: omtTest, ExitCode: 126, Tail: "bash: /var/lib/maclab/jobs/j/test-omarchy-m-test.sh: Permission denied"}
 	jobs[0].Result.Tests = append(jobs[0].Result.Tests, cant)
 	jobs[2].Result.Tests = append(jobs[2].Result.Tests, cant, api.TestResult{Name: "gui-smoke", ExitCode: 1})
-	jobs[4].Result.Tests = append(jobs[4].Result.Tests, api.TestResult{Name: "gui-terminal", ExitCode: 127})
+	jobs[4].Result.Tests = append(jobs[4].Result.Tests, api.TestResult{Name: "gui-terminal", ExitCode: 127,
+		Tail: "bash: /var/lib/maclab/jobs/j/test-gui-terminal.sh: No such file or directory"})
 	jobs[4].Result.KernelEvents = []api.KernelEvent{{Kind: detect.Oops, Line: "Internal error: Oops: 96000004"}}
+	// a broken kernel: the test ran, and the binary it runs couldn't
+	jobs[6].Result.Tests = append(jobs[6].Result.Tests, api.TestResult{Name: "gpu-smoke", ExitCode: 126,
+		Tail: "running vkcube\n/var/lib/maclab/jobs/j/test-gpu-smoke.sh: line 4: ./vkcube: cannot execute binary file: Exec format error"})
+	// the test's own script missing would say nothing, but this is a command it runs
+	jobs[8].Result.Tests = append(jobs[8].Result.Tests, api.TestResult{Name: "gui-smoke", ExitCode: 127,
+		Tail: "/var/lib/maclab/jobs/j/test-gui-smoke.sh: line 9: grim: command not found"})
 	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, familyIDs(), gateOpts{})
-	if got := gateResults(r); got["m1"] != "pass" || got["m2"] != "flaky" || got["m3"] != "flaky" {
-		t.Fatalf("families %v", got)
+	want := map[string]string{"m1": "pass", "m1-pro": "flaky", "m2": "flaky", "m2-pro": "flaky", "m3": "flaky", "m3-pro": "untested"}
+	if got := gateResults(r); !maps.Equal(got, want) {
+		t.Fatalf("families %v, want %v", got, want)
 	}
 	nc := r.Families[0].NotCounted
-	if len(nc) != 1 || nc[0].Job != "jm1air-a" || nc[0].NotCounted != "test omarchy-m-test couldn't run (exit 126)" {
+	if len(nc) != 1 || nc[0].Job != "jm1air-a" || nc[0].NotCounted != "test omarchy-m-test couldn't run (exit 126: bash couldn't open its script: Permission denied)" {
 		t.Fatalf("m1 not counted %+v", nc)
+	}
+}
+
+// Only bash's own error for the test's script, as the last thing it printed,
+// says a test exiting 126 or 127 never ran.
+func TestScriptUnopened(t *testing.T) {
+	const dir = "/var/lib/maclab/jobs/j1016-120000-ab12/"
+	cases := []struct {
+		name string
+		code int
+		tail string
+		want string
+	}{
+		{"omarchy-m-test", 126, "bash: " + dir + "test-omarchy-m-test.sh: Permission denied", "Permission denied"},
+		{"omt", 126, "bash: " + dir + "test-omt.sh: Permission denied\n", "Permission denied"}, // omarchy-m-test under another name
+		{"gui-smoke", 127, "bash: " + dir + "test-gui-smoke.sh: No such file or directory", "No such file or directory"},
+		{"gui-smoke", 126, "runuser: warning: cannot change directory to /home/sim\nbash: " + dir + "test-gui-smoke.sh: Permission denied", "Permission denied"},
+		// the test ran
+		{"gpu-smoke", 126, dir + "test-gpu-smoke.sh: line 4: ./vkcube: cannot execute binary file: Exec format error", ""},
+		{"gui-smoke", 127, dir + "test-gui-smoke.sh: line 9: grim: command not found", ""},
+		{"gui-smoke", 126, "bash: " + dir + "test-gui-smoke.sh: Permission denied\nand then it printed more", ""},
+		{"gui-smoke", 126, "bash: /usr/local/bin/helper.sh: Permission denied", ""}, // another script
+		{"gui-smoke", 126, "bash: " + dir + "test-gui-smoke-2.sh: Permission denied", ""},
+		{"gui-smoke", 126, "", ""},
+		// bash's errors go with their exit codes
+		{"gui-smoke", 127, "bash: " + dir + "test-gui-smoke.sh: Permission denied", ""},
+		{"gui-smoke", 126, "bash: " + dir + "test-gui-smoke.sh: No such file or directory", ""},
+		{"gui-smoke", 1, "bash: " + dir + "test-gui-smoke.sh: Permission denied", ""},
+	}
+	for _, c := range cases {
+		if got := scriptUnopened(api.TestResult{Name: c.name, ExitCode: c.code, Tail: c.tail}); got != c.want {
+			t.Errorf("%s exit %d, tail %q: %q, want %q", c.name, c.code, c.tail, got, c.want)
+		}
+	}
+	if got := scriptUnopened(api.TestResult{Name: "omt", ExitCode: 126, TimedOut: true, Tail: "bash: " + dir + "test-omt.sh: Permission denied"}); got != "" {
+		t.Errorf("a timed-out test: %q", got)
+	}
+}
+
+// On a Mac that runs omarchy-m-test, a pass counts only once its run was
+// compared with a known-good run: with no reference, nothing it found could
+// have regressed. A job from before labd recorded the reference job has it
+// in compared_to.
+func TestGateNeedsOMTReference(t *testing.T) {
+	jobs := gateJobs("m1air pass", "m1air pass", "m2air pass", "m3air pass", "m3pro pass", "m1pro pass")
+	for _, j := range jobs {
+		j.Spec.Tests = []api.TestSpec{omtSpec()}
+		j.Result.Tests = append(j.Result.Tests, api.TestResult{Name: omtTest, Passed: true})
+	}
+	none := "no known-good run of omarchy-m-test on this Mac yet (lab baseline makes one)"
+	jobs[0].Result.OMT = &api.OMTResult{ComparedTo: none} // the newest m1air run: no reference
+	jobs[1].Result.OMT = &api.OMTResult{ComparedTo: "known-good run jbase on 7.1.12-good", BaselineJob: "jbase"}
+	jobs[2].Result.OMT = &api.OMTResult{ComparedTo: none}
+	jobs[3].Result.OMT = &api.OMTResult{ComparedTo: "known-good run jbase on 7.1.12-good"} // from before baseline_job
+	jobs[4].Result.OMT = nil
+	jobs[5].Result.OMT = &api.OMTResult{ComparedTo: none} // m1pro doesn't run omarchy-m-test
+	omt := map[string]bool{"m1air": true, "m2air": true, "m3air": true, "m3pro": true}
+	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, familyIDs(), gateOpts{omt: omt})
+	want := map[string]string{"m1": "pass", "m1-pro": "pass", "m2": "untested", "m2-pro": "untested", "m3": "pass", "m3-pro": "untested"}
+	if got := gateResults(r); !maps.Equal(got, want) {
+		t.Fatalf("families %v, want %v", got, want)
+	}
+	noRef := "no OMT reference: omarchy-m-test had no known-good run on %s to compare with (lab baseline makes one)"
+	for _, c := range []struct {
+		fam  int
+		job  string
+		want string
+	}{{0, "jm1air-a", fmt.Sprintf(noRef, "m1air")}, {2, "jm2air-c", fmt.Sprintf(noRef, "m2air")}, {5, "jm3pro-e", fmt.Sprintf(noRef, "m3pro")}} {
+		nc := r.Families[c.fam].NotCounted
+		if len(nc) != 1 || nc[0].Job != c.job || nc[0].NotCounted != c.want {
+			t.Errorf("%s not counted %+v, want %s: %s", r.Families[c.fam].Family, nc, c.job, c.want)
+		}
+	}
+	if run := r.Families[0].Runs[0]; run.Job != "jm1air-b" {
+		t.Errorf("m1: the compared run must decide: %+v", run)
+	}
+}
+
+// omarchy-m-test is known by its builtin, whatever the job named it.
+func TestGateRenamedOMT(t *testing.T) {
+	jobs := gateJobs("m1air pass", "m2air pass", "m3air pass")
+	for _, j := range jobs[:2] {
+		j.Spec.Tests = []api.TestSpec{{Name: "omt", Builtin: omtTest, GUI: true}}
+		j.Result.Tests = append(j.Result.Tests, api.TestResult{Name: "omt", Passed: true})
+		j.Result.OMT = &api.OMTResult{BaselineJob: "jbase"}
+	}
+	// a test named omarchy-m-test that isn't the builtin doesn't count for it
+	jobs[1].Spec.Tests = append(jobs[1].Spec.Tests, api.TestSpec{Name: "boot-check", Builtin: "boot-health"})
+	jobs[1].Result.Tests = []api.TestResult{{Name: "boot-check", Passed: true}, {Name: "omt", Passed: true}}
+	jobs[2].Spec.Tests = []api.TestSpec{{Name: omtTest, Script: strings.Repeat("a", 64)}}
+	jobs[2].Result.Tests = append(jobs[2].Result.Tests, api.TestResult{Name: omtTest, Passed: true})
+	jobs[2].Result.OMT = &api.OMTResult{BaselineJob: "jbase"}
+	omt := map[string]bool{"m1air": true, "m2air": true, "m3air": true}
+	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, []string{"m1", "m2", "m3"}, gateOpts{omt: omt})
+	if got := gateResults(r); got["m1"] != "pass" || got["m2"] != "pass" || got["m3"] != "untested" {
+		t.Fatalf("families %v: %s", got, r.Summary)
+	}
+	if nc := r.Families[4].NotCounted; len(nc) != 1 || nc[0].NotCounted != "tested less than a plain run: omarchy-m-test didn't run" {
+		t.Fatalf("m3 not counted %+v", nc)
+	}
+}
+
+// A job is judged by its Mac as the job recorded it when it was submitted,
+// not by the device as it is now; an older job by the device as it is now.
+// A Mac labd no longer has is listed as gone, not dropped.
+func TestGateDeviceAtSubmit(t *testing.T) {
+	jobs := gateJobs(
+		"m1air pass",       // a: submitted when m1air was an M2 (the name went to another Mac since)
+		"m1mini pass",      // b: submitted when m1mini was a volunteer's
+		"m2air pass",       // c: submitted when m2air ran omarchy-m-test, which it didn't
+		"m3air pass",       // d: submitted before m3air ran omarchy-m-test, which it does now
+		"m2pro pass",       // e: from before jobs recorded their Mac: m2pro as it is now
+		"m3pro pass",       // f: submitted when m3pro's family wasn't known
+		"old-m3 pass",      // g: a forgotten Mac, recorded as an M3 Pro
+		"old-mac panicked", // h: a forgotten Mac, from before jobs recorded it
+		"m2max pass",       // i: m2max is a volunteer's now, but wasn't then
+	)
+	jobs[0].DeviceAtSubmit = &api.DeviceSnapshot{Family: "m2"}
+	jobs[1].DeviceAtSubmit = &api.DeviceSnapshot{Family: "m1", Volunteer: true}
+	jobs[2].DeviceAtSubmit = &api.DeviceSnapshot{Family: "m2", OMT: true}
+	jobs[3].DeviceAtSubmit = &api.DeviceSnapshot{Family: "m3"}
+	jobs[5].DeviceAtSubmit = &api.DeviceSnapshot{}
+	jobs[6].DeviceAtSubmit = &api.DeviceSnapshot{Family: "m3-pro"}
+	jobs[8].DeviceAtSubmit = &api.DeviceSnapshot{Family: "m2-pro"}
+	fleet := gateFleet()
+	fleet[5].Volunteer = true // m2max
+	r := rollUp(api.GateKernel{SHA256: "k"}, fleet, jobs, familyIDs(), gateOpts{omt: map[string]bool{"m3air": true}})
+	want := map[string]string{"m1": "untested", "m1-pro": "untested", "m2": "pass", "m2-pro": "pass", "m3": "pass", "m3-pro": "untested"}
+	if got := gateResults(r); !maps.Equal(got, want) {
+		t.Fatalf("families %v, want %v", got, want)
+	}
+	runs := map[string][]string{}
+	notCounted := map[string][]string{}
+	for _, f := range r.Families {
+		for _, run := range f.Runs {
+			runs[f.Family] = append(runs[f.Family], run.Job)
+		}
+		for _, run := range f.NotCounted {
+			notCounted[f.Family] = append(notCounted[f.Family], run.Job+": "+run.NotCounted)
+		}
+	}
+	wantRuns := map[string][]string{"m2": {"jm1air-a"}, "m2-pro": {"jm2pro-e", "jm2max-i"}, "m3": {"jm3air-d"}}
+	if !maps.EqualFunc(runs, wantRuns, slices.Equal) {
+		t.Errorf("runs %q, want %q", runs, wantRuns)
+	}
+	wantNot := map[string][]string{
+		"m1":     {"jm1mini-b: a volunteer's Mac"},
+		"m2":     {"jm2air-c: tested less than a plain run: omarchy-m-test didn't run"},
+		"m3-pro": {"jold-m3-g: device gone: labd no longer has old-m3 (lab forget)"},
+	}
+	if !maps.EqualFunc(notCounted, wantNot, slices.Equal) {
+		t.Errorf("not counted %q,\nwant %q", notCounted, wantNot)
+	}
+	if nc := r.NotCounted; len(nc) != 1 || nc[0].Job != "jold-mac-h" || nc[0].Result != api.GateFail || nc[0].NotCounted != "device gone: labd no longer has old-mac (lab forget)" {
+		t.Errorf("report not counted %+v", nc)
+	}
+	if !slices.Contains(r.Unclassified, "m3pro") || r.Families[1].Runs != nil {
+		t.Errorf("unclassified %v", r.Unclassified)
+	}
+	if run := r.Families[3].Runs[1]; run.Volunteer {
+		t.Errorf("m2max wasn't a volunteer's when the job ran: %+v", run)
 	}
 }
 
@@ -489,11 +663,21 @@ func TestGateEndpoint(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
 	k := l.artifact("krel=7.2-gate behavior=ok")
-	l.expect(l.run(api.JobSpec{Kernel: k}), api.OutcomePass)
 	v := l.s.dev(l.name)
-	v.mu.Lock()
-	v.d.Facts.Compatible = []string{"apple,j313", "apple,t8103", "apple,arm-platform"}
-	v.mu.Unlock()
+	set := func(f func(d *api.Device)) {
+		v.mu.Lock()
+		f(&v.d)
+		v.mu.Unlock()
+	}
+	// The sim reports no chip family, and every reboot brings its own facts
+	// back: make it an M1 for the job's record before each run.
+	m1 := func(d *api.Device) { d.Facts.Compatible = []string{"apple,j313", "apple,t8103", "apple,arm-platform"} }
+	set(m1)
+	first := l.run(api.JobSpec{Kernel: k})
+	l.expect(first, api.OutcomePass)
+	if at := first.DeviceAtSubmit; at == nil || *at != (api.DeviceSnapshot{Family: "m1"}) {
+		t.Fatalf("device at submit %+v", first.DeviceAtSubmit)
+	}
 
 	gate := func(path string, code int) api.GateReport {
 		t.Helper()
@@ -517,36 +701,54 @@ func TestGateEndpoint(t *testing.T) {
 	if r := gate("/api/gate/"+k, 200); r.Result != api.GateFail || len(r.Untested) != 5 {
 		t.Fatalf("all families: %s, untested %v", r.Result, r.Untested)
 	}
-	// A volunteer's Mac counts only when asked.
-	v.mu.Lock()
-	v.d.Volunteer = true
-	v.mu.Unlock()
-	if r := gate("/api/gate/"+k[:12]+"?families=m1", 200); r.Result != api.GateFail || len(r.Families[0].NotCounted) != 1 || !slices.Equal(r.Volunteers, []string{l.name}) {
-		t.Fatalf("a volunteer's Mac: %+v", r)
+
+	// What the Mac is now doesn't change how the job is judged: it became a
+	// volunteer's and started running omarchy-m-test since.
+	set(func(d *api.Device) { d.Volunteer = true })
+	l.s.cfg.OMT = true
+	if r := gate("/api/gate/"+k[:12]+"?families=m1", 200); r.Result != api.GatePass || len(r.Families[0].NotCounted) != 0 || !slices.Equal(r.Volunteers, []string{l.name}) {
+		t.Fatalf("judged by the Mac as it is now: %+v", r)
 	}
 	if r := gate("/api/gate/"+k[:12]+"?families=m1&volunteers=1", 200); r.Result != api.GatePass || !r.VolunteersCounted {
 		t.Fatalf("counting volunteers: %+v", r)
 	}
 	gate("/api/gate/"+k[:12]+"?volunteers=maybe", 400)
-	v.mu.Lock()
-	v.d.Volunteer = false
-	v.mu.Unlock()
+	set(func(d *api.Device) { d.Volunteer = false })
 
-	// Once the lab runs omarchy-m-test on the Mac, a pass without it doesn't
-	// count; a run with it does.
-	l.s.cfg.OMT = true
-	r = gate("/api/gate/"+k[:12]+"?families=m1", 200)
-	if nc := r.Families[0].NotCounted; r.Result != api.GateFail || len(nc) != 1 || nc[0].NotCounted != "tested less than a plain run: omarchy-m-test didn't run" {
-		t.Fatalf("a pass without omarchy-m-test: %+v", r)
+	// Now its jobs run omarchy-m-test, and a pass with nothing to compare it
+	// with doesn't count.
+	set(m1)
+	noRef := l.run(api.JobSpec{Kernel: k})
+	l.expect(noRef, api.OutcomePass)
+	if at := noRef.DeviceAtSubmit; at == nil || !at.OMT || noRef.Result.OMT == nil || noRef.Result.OMT.BaselineJob != "" {
+		t.Fatalf("device at submit %+v, omt %+v", noRef.DeviceAtSubmit, noRef.Result.OMT)
 	}
-	l.expect(l.run(api.JobSpec{Kernel: k}), api.OutcomePass)
-	v.mu.Lock()
-	v.d.Facts.Compatible = []string{"apple,j313", "apple,t8103", "apple,arm-platform"} // the reboots brought the sim's own facts back
-	v.mu.Unlock()
-	if r := gate("/api/gate/"+k[:12]+"?families=m1", 200); r.Result != api.GatePass {
-		t.Fatalf("a pass with omarchy-m-test: %+v", r)
+	r = gate("/api/gate/"+k[:12]+"?families=m1", 200)
+	if nc := r.Families[0].NotCounted; r.Result != api.GatePass || len(nc) != 1 || nc[0].Job != noRef.ID || !strings.HasPrefix(nc[0].NotCounted, "no OMT reference: ") {
+		t.Fatalf("a pass with no omarchy-m-test reference: %+v", r)
+	}
+
+	// Once there is a reference, a pass compared with it counts.
+	l.baseline()
+	set(m1)
+	j := l.run(api.JobSpec{Kernel: k})
+	l.expect(j, api.OutcomePass)
+	if o := j.Result.OMT; o == nil || o.BaselineJob == "" {
+		t.Fatalf("omt %+v", j.Result.OMT)
+	}
+	if r := gate("/api/gate/"+k[:12]+"?families=m1", 200); r.Result != api.GatePass || r.Families[0].Runs[0].Job != j.ID {
+		t.Fatalf("a pass compared with a reference: %+v", r)
 	}
 	gate("/api/gate/"+k[:12]+"?families=m1,m4", 400)
 	gate("/api/gate/abcdef0123", 404)
 	gate("/api/gate/not-a-kernel", 400)
+
+	// A Mac labd no longer has is listed as gone, not dropped.
+	if _, err := l.s.forget(v, "", true); err != nil {
+		t.Fatal(err)
+	}
+	r = gate("/api/gate/"+k[:12]+"?families=m1", 200)
+	if nc := r.Families[0].NotCounted; r.Result != api.GateFail || len(nc) != 2 || nc[0].Job != j.ID || nc[0].NotCounted != "device gone: labd no longer has "+l.name+" (lab forget)" {
+		t.Fatalf("a forgotten Mac: %+v", r)
+	}
 }

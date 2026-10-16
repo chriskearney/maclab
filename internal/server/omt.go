@@ -32,9 +32,14 @@ var omtPackagingChecks = map[string]bool{"boot.files": true, "boot.kernel-packag
 
 const (
 	omtTest     = "omarchy-m-test"
-	omtFile     = "test-" + omtTest + "/omt-report.json"
-	omtMinAgent = "0.3.0" // first agent with the builtin test
+	omtFile     = "test-" + omtTest + "/omt-report.json" // omtReportFile(omtTest)
+	omtMinAgent = "0.3.0"                                // first agent with the builtin test
 )
+
+// omtReportFile is where a job keeps the report of its omarchy-m-test run
+// named name: the agent uploads a test's files under test-<name>/. The test
+// is the builtin omarchy-m-test whatever its name in the job.
+func omtReportFile(name string) string { return "test-" + name + "/omt-report.json" }
 
 // omtReport is the part of a report the lab reads; the file itself is kept whole.
 type omtReport struct {
@@ -106,7 +111,8 @@ func omtSpec() api.TestSpec {
 // baseline when this run was on the known-good kernel.
 func (r *jobRun) omtResult(tr *api.TestResult) {
 	j := r.j
-	path := filepath.Join(r.s.jobDir(j.ID), omtFile)
+	file := omtReportFile(tr.Name)
+	path := filepath.Join(r.s.jobDir(j.ID), file)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if tr.Passed {
@@ -119,7 +125,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		tr.Passed, tr.Error = false, "omarchy-m-test report is not JSON: "+err.Error()
 		return
 	}
-	res := &api.OMTResult{Report: omtFile, Tool: rep.Tool.Version, Catalogue: rep.Catalogue, Kernel: rep.Machine.Kernel,
+	res := &api.OMTResult{Report: file, Tool: rep.Tool.Version, Catalogue: rep.Catalogue, Kernel: rep.Machine.Kernel,
 		KnownGood: j.Spec.Kernel == "" && j.Spec.Source == ""}
 	status := map[string]string{}
 	byID := map[string]api.OMTCheck{}
@@ -164,7 +170,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 			res.Regressions, res.Fixed = omtDiff(base.Status, status, byID)
 			nr, nf := omtNodes(base, status, rep)
 			res.Regressions, res.Fixed = append(res.Regressions, nr...), append(res.Fixed, nf...)
-			res.ComparedTo = "the previous known-good run " + base.Job
+			res.ComparedTo, res.BaselineJob = "the previous known-good run "+base.Job, base.Job
 		}
 	case base == nil:
 		res.ComparedTo = "no known-good run of omarchy-m-test on this Mac yet (lab baseline makes one)"
@@ -182,7 +188,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		}
 		res.Regressions = kept
 		res.Regressions, res.Allowed = omtAllowed(res.Regressions, j.Spec.OMTAllow, rep)
-		res.ComparedTo = "known-good run " + base.Job + " on " + base.Kernel
+		res.ComparedTo, res.BaselineJob = "known-good run "+base.Job+" on "+base.Kernel, base.Job
 		if base.Tool != res.Tool {
 			res.ComparedTo += fmt.Sprintf(" (omarchy-m-test %s then, %s now)", base.Tool, res.Tool)
 		}
