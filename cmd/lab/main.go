@@ -42,9 +42,10 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab crashtest <device>              deliberately panic the Mac and check it recovers by itself
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
-  lab gate <kernel> [--families m1,m2] [--volunteers] [--evidence file]
+  lab gate <kernel> [--families m1,m2] [--volunteers] [--exclude job,..] [--evidence file]
                                       did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not.
-                                      A family is pass, fail, flaky (passed and failed: not a pass), stage_failed or untested
+                                      A family is pass, fail, flaky (passed and failed: not a pass), stage_failed or untested.
+                                      --exclude sets jobs aside for this report only, e.g. a failure the lab caused
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
@@ -434,15 +435,19 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		fams := fs.String("families", "", "chip families that must pass, comma-separated (default all: m1,m1-pro,m2,m2-pro,m3,m3-pro)")
 		evidence := fs.String("evidence", "", "write the report to this file as a JSON evidence record")
 		volunteers := fs.Bool("volunteers", false, "count volunteers' Macs (enrolled with ./volunteer) too; by default they're listed, not counted")
+		exclude := fs.String("exclude", "", "jobs to set aside for this report only, comma-separated, e.g. a failure the lab caused; they're listed as excluded")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--volunteers] [--evidence file]"); err != nil {
+		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--volunteers] [--exclude job,..] [--evidence file]"); err != nil {
 			return err
 		}
-		var list []string
+		var list, excluded []string
 		if *fams != "" {
 			list = strings.Split(*fams, ",")
 		}
-		rep, err := c.Gate(ctx, pos[0], list, *volunteers)
+		if *exclude != "" {
+			excluded = strings.Split(*exclude, ",")
+		}
+		rep, err := c.Gate(ctx, pos[0], list, *volunteers, excluded)
 		if err != nil {
 			return err
 		}
@@ -767,13 +772,16 @@ func printGate(r *api.GateReport) {
 	for _, l := range unstaged {
 		fmt.Println(l)
 	}
-	// Runs that decide nothing, the volunteers' Macs' apart.
-	var other, vol []string
+	// Runs that decide nothing, the excluded ones and the volunteers' Macs' apart.
+	var other, excluded, vol []string
 	add := func(fam string, run api.GateRun) {
 		l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", fam, run.Device, run.Job, run.Outcome, run.NotCounted)
-		if run.Volunteer {
+		switch {
+		case run.Excluded:
+			excluded = append(excluded, l)
+		case run.Volunteer:
 			vol = append(vol, l)
-		} else {
+		default:
 			other = append(other, l)
 		}
 	}
@@ -797,6 +805,10 @@ func printGate(r *api.GateReport) {
 		w.Flush()
 	}
 	section("not counted:", other)
+	if len(r.Excluded) > 0 {
+		fmt.Printf("excluded for this report (--exclude): %s\n", strings.Join(r.Excluded, ", "))
+	}
+	section("excluded runs, not counted:", excluded)
 	switch {
 	case len(r.Volunteers) == 0:
 	case r.VolunteersCounted:

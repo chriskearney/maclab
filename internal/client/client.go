@@ -235,12 +235,16 @@ func (c *Client) File(ctx context.Context, id, name string) ([]byte, error) {
 
 // Gate reports whether a kernel (build id or sha256 prefix) passed on every
 // required chip family; no families means all of them. volunteers counts
-// volunteers' Macs too.
-func (c *Client) Gate(ctx context.Context, kernel string, families []string, volunteers bool) (*api.GateReport, error) {
+// volunteers' Macs too, and exclude sets those jobs of the kernel aside for
+// this report only.
+func (c *Client) Gate(ctx context.Context, kernel string, families []string, volunteers bool, exclude []string) (*api.GateReport, error) {
 	var out api.GateReport
 	q := "?families=" + url.QueryEscape(strings.Join(families, ","))
 	if volunteers {
 		q += "&volunteers=1"
+	}
+	if len(exclude) > 0 {
+		q += "&exclude=" + url.QueryEscape(strings.Join(exclude, ","))
 	}
 	return &out, c.do(ctx, "GET", "/api/gate/"+url.PathEscape(kernel)+q, nil, &out)
 }

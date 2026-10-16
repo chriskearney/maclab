@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"path"
 	"regexp"
@@ -208,6 +209,9 @@ type gateOpts struct {
 	// omt names the Macs whose jobs all run omarchy-m-test now: it decides for
 	// jobs that didn't record whether theirs did.
 	omt map[string]bool
+	// exclude names jobs set aside for this query, say a failure the lab
+	// caused that reads as the kernel's: they are listed, not counted.
+	exclude map[string]bool
 }
 
 // gateMac is a Mac as the gate takes it for a job: what the job recorded of
@@ -244,7 +248,7 @@ func gateRun(j *api.Job, res string) api.GateRun {
 // failed, since it failed even so, but not when it passed. Canceled and
 // infra_error jobs say nothing about the kernel, nor do tests_failed jobs
 // whose failed tests couldn't run at all, nor crash tests, which crash it on
-// purpose.
+// purpose, nor the jobs o.exclude sets aside.
 //
 // A job is judged by its Mac as it was when the job was submitted: its chip
 // family, whether it was a volunteer's and whether its jobs ran
@@ -306,7 +310,10 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 			order = append(order, key)
 		}
 		why := ""
-		if res == api.GateFail {
+		if o.exclude[j.ID] {
+			why = "excluded (lab gate --exclude)"
+		}
+		if why == "" && res == api.GateFail {
 			why = runnerFailures(j)
 		}
 		if c := customCmdline(j.Spec); why == "" && c != "" {
@@ -321,7 +328,7 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		switch {
 		case why != "":
 			r := gateRun(j, res)
-			r.NotCounted = why
+			r.NotCounted, r.Excluded = why, o.exclude[j.ID]
 			m.skipped = append(m.skipped, r)
 		case res == api.GatePass && m.pass == nil:
 			m.pass = j
@@ -423,6 +430,10 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 	if o.volunteers && len(rep.Volunteers) > 0 {
 		rep.Summary += "; volunteers' Macs counted"
 	}
+	rep.Excluded = slices.Sorted(maps.Keys(o.exclude))
+	if len(rep.Excluded) > 0 {
+		rep.Summary += "; excluded " + strings.Join(rep.Excluded, ", ")
+	}
 	return rep
 }
 
@@ -474,8 +485,11 @@ func (s *Server) gateKernel(id string) (api.GateKernel, int, error) {
 }
 
 // hGate reports whether a kernel passed on every required chip family:
-// ?families=m1,m2 narrows the requirement from all of them, and
-// ?volunteers=1 counts volunteers' Macs.
+// ?families=m1,m2 narrows the requirement from all of them, ?volunteers=1
+// counts volunteers' Macs, and ?exclude=j1,j2 sets those jobs of the kernel
+// aside for this query, say a failure the lab caused (an access point that
+// went down mid-test reads as crashed_or_hung). Nothing is kept: the next
+// query without it counts them again.
 func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 	required := familyIDs()
 	if v := r.URL.Query().Get("families"); v != "" {
@@ -509,6 +523,19 @@ func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, 500, "%v", err)
 		return
+	}
+	if v := r.URL.Query().Get("exclude"); v != "" {
+		o.exclude = map[string]bool{}
+		for _, id := range strings.Split(v, ",") {
+			if id = strings.TrimSpace(id); id == "" {
+				continue
+			}
+			if !slices.ContainsFunc(jobs, func(j *api.Job) bool { return j.ID == id }) {
+				httpErr(w, 400, "can't exclude %s: it is no finished job of kernel %s", id, short(k.SHA256))
+				return
+			}
+			o.exclude[id] = true
+		}
 	}
 	var devs []api.Device
 	for _, v := range s.allDevs() {

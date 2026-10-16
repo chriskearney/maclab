@@ -675,6 +675,7 @@ type GateRun struct {
 	Tests      []GateTest `json:"tests,omitempty"`
 	Volunteer  bool       `json:"volunteer,omitempty"`   // the Mac is a volunteer's (Device.Volunteer)
 	NotCounted string     `json:"not_counted,omitempty"` // why the run doesn't count
+	Excluded   bool       `json:"excluded,omitempty"`    // the query set it aside (?exclude=, lab gate --exclude)
 }
 
 type GateFamily struct {
@@ -684,7 +685,7 @@ type GateFamily struct {
 	Runs   []GateRun `json:"runs,omitempty"` // the deciding run first
 	// NotCounted holds the runs that decide nothing: volunteers' Macs, Macs
 	// labd no longer has, runs that weren't plain, passes with no
-	// omarchy-m-test reference, tests that couldn't run.
+	// omarchy-m-test reference, tests that couldn't run, excluded jobs.
 	NotCounted []GateRun `json:"not_counted,omitempty"`
 }
 
@@ -704,6 +705,10 @@ type GateReport struct {
 	// VolunteersCounted (?volunteers=1, lab gate --volunteers).
 	Volunteers        []string `json:"volunteers,omitempty"`
 	VolunteersCounted bool     `json:"volunteers_counted,omitempty"`
+	// Excluded lists the jobs the query set aside (?exclude=, lab gate
+	// --exclude), say a failure the lab caused that reads as the kernel's.
+	// Each one that would have counted is in its family's not_counted.
+	Excluded []string `json:"excluded,omitempty"`
 	// NotCounted holds the runs no family can take: those of Macs labd no
 	// longer has (lab forget) from jobs that didn't record their chip family.
 	NotCounted []GateRun `json:"not_counted,omitempty"`

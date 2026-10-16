@@ -443,6 +443,7 @@ U-Boot and device trees (see "Kernel artifacts"), so it says nothing about a boo
 lab gate <build-id | kernel sha256 prefix>                    # all six families must pass
 lab gate b1015-120000-ab12 --families m1,m2 --evidence gate.json
 lab gate b1015-120000-ab12 --volunteers                       # count volunteers' Macs too
+lab gate b1015-120000-ab12 --exclude j1015-093012-ab12        # set a lab-caused failure aside, this once
 ```
 
 Families come from the SoC compatible in each Mac's device tree (or, from an agent older than that
@@ -495,6 +496,13 @@ the lab doesn't control, so they count only with `--volunteers`; otherwise the r
 and their runs apart. A staging problem on one Mac doesn't hide a pass or a failure on another.
 The gate is open only when every required family passed. `lab gate` exits 3 when it is shut.
 
+A failure the lab caused can read as the kernel's: an access point that goes down during a test
+makes the Mac look lost, `crashed_or_hung`, and that failure would keep its family flaky for good.
+`--exclude j1,j2` sets those jobs aside for that one report. They are listed as excluded, in
+`excluded` and, marked `excluded`, in their family's `not_counted`, and the summary names them, so
+the decision is on the record; nothing is kept, so a `lab gate` without it counts them again. Only
+finished jobs of the kernel can be excluded.
+
 Results are strings: a family's is `pass`, `fail`, `flaky`, `stage_failed` or `untested`, and a
 run's `pass`, `fail`, `flaky` or `stage_failed`. A script that looks for `"fail"` must treat
 `"flaky"` as not passing too. The report's own `result` is only ever `pass` (the gate is open) or
@@ -504,10 +512,11 @@ run's `pass`, `fail`, `flaky` or `stage_failed`. A script that looks for `"fail"
 the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family its result and
 runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
 couldn't stage, or a flaky Mac's other result), and `not_counted`, the runs that decide nothing,
-each with its reason (`volunteer` marks a volunteer's Mac). Then `volunteers` names the volunteers'
-Macs, `volunteers_counted` says whether they counted, `not_counted` holds the runs of forgotten
-Macs whose jobs didn't record their family, and the labd host. The API is
-`GET /api/gate/{kernel}?families=m1,m2&volunteers=1`; agents use `lab_gate`.
+each with its reason (`volunteer` marks a volunteer's Mac, `excluded` a job `--exclude` set
+aside). Then `volunteers` names the volunteers' Macs, `volunteers_counted` says whether they
+counted, `excluded` lists the excluded jobs, `not_counted` holds the runs of forgotten Macs whose
+jobs didn't record their family, and the labd host. The API is
+`GET /api/gate/{kernel}?families=m1,m2&volunteers=1&exclude=j1,j2`; agents use `lab_gate`.
 
 ## Kernel artifacts
 

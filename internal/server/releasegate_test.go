@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"maps"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/client"
 	"github.com/iconidentify/maclab/internal/detect"
 )
 
@@ -553,6 +555,34 @@ func TestGateDeviceAtSubmit(t *testing.T) {
 	}
 }
 
+// --exclude sets a job aside for one query, such as a failure the lab
+// caused: it is listed as excluded, and the report says so.
+func TestGateExclude(t *testing.T) {
+	jobs := gateJobs("m1air pass", "m1air crashed_or_hung", "m2air pass", "m2air canceled")
+	exclude := map[string]bool{"jm1air-b": true, "jm2air-d": true}
+	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, []string{"m1", "m2"}, gateOpts{exclude: exclude})
+	if got := gateResults(r); got["m1"] != "pass" || got["m2"] != "pass" || r.Result != api.GatePass {
+		t.Fatalf("families %v: %s", got, r.Summary)
+	}
+	nc := r.Families[0].NotCounted
+	if len(nc) != 1 || nc[0].Job != "jm1air-b" || !nc[0].Excluded || nc[0].Result != api.GateFail || nc[0].NotCounted != "excluded (lab gate --exclude)" {
+		t.Fatalf("m1 not counted %+v", nc)
+	}
+	if !slices.Equal(r.Excluded, []string{"jm1air-b", "jm2air-d"}) || r.Summary != "gate open: passed on m1, m2; excluded jm1air-b, jm2air-d" {
+		t.Fatalf("excluded %v: %s", r.Excluded, r.Summary)
+	}
+	b, _ := json.Marshal(r)
+	for _, s := range []string{`"not_counted":"excluded (lab gate --exclude)","excluded":true}`, `"excluded":["jm1air-b","jm2air-d"]`} {
+		if !strings.Contains(string(b), s) {
+			t.Errorf("record lacks %s: %s", s, b)
+		}
+	}
+	// without it the failure counts again: nothing was kept
+	if r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, []string{"m1", "m2"}, gateOpts{}); gateResults(r)["m1"] != "flaky" || r.Excluded != nil {
+		t.Fatalf("no exclusion: %s", r.Summary)
+	}
+}
+
 // Volunteers' Macs run agents the lab doesn't control: the gate lists their
 // runs apart and counts them only when asked.
 func TestGateVolunteers(t *testing.T) {
@@ -727,6 +757,23 @@ func TestGateEndpoint(t *testing.T) {
 	if nc := r.Families[0].NotCounted; r.Result != api.GatePass || len(nc) != 1 || nc[0].Job != noRef.ID || !strings.HasPrefix(nc[0].NotCounted, "no OMT reference: ") {
 		t.Fatalf("a pass with no omarchy-m-test reference: %+v", r)
 	}
+	// Excluding the pass that counted leaves none.
+	r = gate("/api/gate/"+k[:12]+"?families=m1&exclude="+first.ID, 200)
+	if nc := r.Families[0].NotCounted; r.Result != api.GateFail || len(nc) != 2 || !nc[1].Excluded || nc[1].Job != first.ID || !slices.Equal(r.Excluded, []string{first.ID}) {
+		t.Fatalf("excluding %s: %+v", first.ID, r)
+	}
+	gate("/api/gate/"+k[:12]+"?exclude=jnope", 400)
+	// lab gate --exclude is that query.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("MACLAB_URL", l.url)
+	t.Setenv("MACLAB_TOKEN", "admin")
+	c, err := client.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r, err := c.Gate(context.Background(), k[:12], []string{"m1"}, false, []string{first.ID}); err != nil || r.Result != api.GateFail || !slices.Equal(r.Excluded, []string{first.ID}) {
+		t.Fatalf("client gate excluding %s: %+v %v", first.ID, r, err)
+	}
 
 	// Once there is a reference, a pass compared with it counts.
 	l.baseline()
@@ -736,7 +783,7 @@ func TestGateEndpoint(t *testing.T) {
 	if o := j.Result.OMT; o == nil || o.BaselineJob == "" {
 		t.Fatalf("omt %+v", j.Result.OMT)
 	}
-	if r := gate("/api/gate/"+k[:12]+"?families=m1", 200); r.Result != api.GatePass || r.Families[0].Runs[0].Job != j.ID {
+	if r := gate("/api/gate/"+k[:12]+"?families=m1&exclude="+first.ID, 200); r.Result != api.GatePass || r.Families[0].Runs[0].Job != j.ID {
 		t.Fatalf("a pass compared with a reference: %+v", r)
 	}
 	gate("/api/gate/"+k[:12]+"?families=m1,m4", 400)
