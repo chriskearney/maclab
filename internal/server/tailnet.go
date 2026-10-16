@@ -178,7 +178,9 @@ func (s *Server) tailnetPeer(r *http.Request) *TailnetPeer {
 	s.whoCalls[ip] = c
 	s.whoMu.Unlock()
 
-	ttl := whoisTTL
+	// A lookup is a failure until it returns an answer: one that panics is
+	// kept for whoisFailTTL too, not whoisTTL.
+	ttl := whoisFailTTL
 	defer func() {
 		s.whoMu.Lock()
 		if s.whoCache == nil {
@@ -196,9 +198,9 @@ func (s *Server) tailnetPeer(r *http.Request) *TailnetPeer {
 	p, err := s.cfg.WhoIs(ctx, ip.String())
 	if err != nil {
 		s.log.Printf("tailscale whois %s: %v", ip, err)
-		p, ttl = nil, whoisFailTTL
+		return nil
 	}
-	c.p = p
+	c.p, ttl = p, whoisTTL
 	return p
 }
 

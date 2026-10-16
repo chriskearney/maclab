@@ -460,3 +460,40 @@ func TestWhoisSingleFlight(t *testing.T) {
 		t.Errorf("lookups left in flight: %v", s.whoCalls)
 	}
 }
+
+// A lookup that panics is kept as a failure, for whoisFailTTL, not as an
+// answer for whoisTTL: a real admin is locked out for seconds, not a minute.
+func TestWhoisPanicExpiresSoon(t *testing.T) {
+	calls, broken := 0, true
+	s := &Server{log: log.New(io.Discard, "", 0), cfg: Config{Tailscale: true, WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+		calls++
+		if broken {
+			panic("whois blew up")
+		}
+		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+	}}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "100.64.0.1:1"
+	ip := netip.MustParseAddr("100.64.0.1")
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic was swallowed")
+			}
+		}()
+		s.tailnetPeer(r)
+	}()
+	if e := s.whoCache[ip]; e.p != nil || e.ttl != whoisFailTTL {
+		t.Errorf("after a panic: cached %+v for %v, want nobody for %v", e.p, e.ttl, whoisFailTTL)
+	}
+	if len(s.whoCalls) != 0 {
+		t.Errorf("the panicked lookup is still in flight: %v", s.whoCalls)
+	}
+	broken = false
+	e := s.whoCache[ip]
+	e.at = e.at.Add(-(whoisFailTTL + time.Second))
+	s.whoCache[ip] = e
+	if p := s.tailnetPeer(r); p == nil || calls != 2 {
+		t.Errorf("%v after the panic: %+v after %d calls", whoisFailTTL+time.Second, p, calls)
+	}
+}
