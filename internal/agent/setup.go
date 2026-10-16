@@ -20,6 +20,13 @@ const (
 	sysctlPath  = "/etc/sysctl.d/90-maclab.conf"
 	watchdogCfg = "/etc/systemd/system.conf.d/90-maclab-watchdog.conf"
 	journalCfg  = "/etc/systemd/journald.conf.d/90-maclab.conf"
+	workDir     = "/var/lib/maclab"
+	gettyDropIn = "/etc/systemd/system/serial-getty@ttySAC0.service.d/maclab.conf"
+	sddmConf    = "/etc/sddm.conf.d/zz-maclab-autologin.conf"
+	stayAwake   = ".local/state/omarchy/indicators/stay-awake" // in the GUI user's home
+	// What setup found already on, in workDir, so uninstall leaves it on.
+	gettyWasEnabled = "serial-getty.pre-maclab"
+	stayAwakeWasOn  = "stay-awake.pre-maclab"
 )
 
 const unit = `[Unit]
@@ -54,7 +61,11 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("setup must run as root")
 	}
-	l := &Linux{WorkDir: "/var/lib/maclab", GUIUser: o.GUIUser}
+	l := &Linux{WorkDir: workDir, GUIUser: o.GUIUser}
+	if err := os.MkdirAll(l.WorkDir, 0o755); err != nil {
+		return err
+	}
+
 	b, err := detectBootloader()
 	if err != nil {
 		return err
@@ -466,12 +477,17 @@ func serialGetty(user string) error {
 	if user != "" {
 		login = "--autologin " + user + " "
 	}
-	dir := "/etc/systemd/system/serial-getty@ttySAC0.service.d"
-	os.MkdirAll(dir, 0o755)
+	// Uninstall disables the getty again, unless it was enabled before the lab's first setup.
+	if _, err := os.Stat(gettyDropIn); os.IsNotExist(err) {
+		if out, _ := exec.Command("systemctl", "is-enabled", "serial-getty@ttySAC0.service").Output(); strings.TrimSpace(string(out)) == "enabled" {
+			os.WriteFile(filepath.Join(workDir, gettyWasEnabled), []byte("enabled\n"), 0o644)
+		}
+	}
+	os.MkdirAll(filepath.Dir(gettyDropIn), 0o755)
 	conf := "# maclab: a shell on the debug UART, reached through the controller Mac over USB-C.\n" +
 		"# Works with no network. Anyone holding the oobd token or the cable gets this shell.\n" +
 		"[Service]\nExecStart=\nExecStart=-/sbin/agetty -o \"-p -f -- \\\\u\" " + login + "115200 - ${TERM}\n"
-	if err := os.WriteFile(filepath.Join(dir, "maclab.conf"), []byte(conf), 0o644); err != nil {
+	if err := os.WriteFile(gettyDropIn, []byte(conf), 0o644); err != nil {
 		return err
 	}
 	exec.Command("systemctl", "daemon-reload").Run()
@@ -498,11 +514,17 @@ func autologin(user string) error {
 		}
 	}
 	conf := fmt.Sprintf("# maclab: log straight into the desktop so GUI tests have a session after every lab reboot.\n[Autologin]\nUser=%s\nSession=%s\nRelogin=false\n", user, session)
-	os.MkdirAll("/etc/sddm.conf.d", 0o755)
-	if err := os.WriteFile("/etc/sddm.conf.d/zz-maclab-autologin.conf", []byte(conf), 0o644); err != nil {
+	// Uninstall turns stay-awake off again, unless the user had it on before the lab's first setup.
+	if _, err := os.Stat(sddmConf); os.IsNotExist(err) {
+		if _, err := os.Stat(filepath.Join(u.HomeDir, stayAwake)); err == nil {
+			os.WriteFile(filepath.Join(workDir, stayAwakeWasOn), []byte(user+"\n"), 0o644)
+		}
+	}
+	os.MkdirAll(filepath.Dir(sddmConf), 0o755)
+	if err := os.WriteFile(sddmConf, []byte(conf), 0o644); err != nil {
 		return err
 	}
 	// Omarchy's stay-awake state file: the same thing `omarchy toggle idle stay-awake` sets.
-	dir := filepath.Join(u.HomeDir, ".local/state/omarchy/indicators")
+	dir := filepath.Join(u.HomeDir, filepath.Dir(stayAwake))
 	return exec.Command("runuser", "-u", user, "--", "sh", "-c", "mkdir -p '"+dir+"' && touch '"+dir+"/stay-awake'").Run()
 }

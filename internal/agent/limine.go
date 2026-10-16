@@ -291,6 +291,18 @@ func (l *limineLayout) writeEntriesLocked() error {
 	return writeSynced(l.Conf, []byte(out))
 }
 
+// removeEntriesLocked takes the marked block out of limine.conf, leaving the
+// file as it was before setup added the block. The caller holds the
+// boot-partition locks.
+func (l *limineLayout) removeEntriesLocked() error {
+	conf, err := os.ReadFile(l.Conf)
+	if err != nil || !reMaclabBlock.Match(conf) {
+		return err
+	}
+	out := strings.TrimRight(reMaclabBlock.ReplaceAllString(string(conf), "\n"), "\n") + "\n"
+	return writeSynced(l.Conf, []byte(out))
+}
+
 func (l *limineLayout) arm(entry string) error {
 	if !strings.HasPrefix(entry, entryPrefix) {
 		return fmt.Errorf("refusing to arm non-lab entry %q", entry)

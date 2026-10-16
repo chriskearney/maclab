@@ -209,6 +209,11 @@ func (s *Server) attachOOB(v *dev) {
 	}
 	ctx, cancel := context.WithCancel(s.ctx)
 	v.mu.Lock()
+	if v.forgotten { // lab forget ran meanwhile
+		v.mu.Unlock()
+		cancel()
+		return
+	}
 	v.oob, v.oobStop = ctl, cancel
 	v.mu.Unlock()
 	go func() {
@@ -340,6 +345,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/devices", s.admin(s.hDevices))
 	m.HandleFunc("GET /api/devices/{name}", s.admin(s.hDevice))
 	m.HandleFunc("PATCH /api/devices/{name}", s.admin(s.hPatchDevice))
+	m.HandleFunc("DELETE /api/devices/{name}", s.admin(s.hForgetDevice))
 	m.HandleFunc("POST /api/devices/{name}/lease", s.admin(s.hLease))
 	m.HandleFunc("DELETE /api/devices/{name}/lease", s.admin(s.hRelease))
 	m.HandleFunc("POST /api/devices/{name}/reset", s.admin(s.hReset))
@@ -706,6 +712,59 @@ func (s *Server) hPatchDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.view(v))
 }
 
+// hForgetDevice takes a Mac out of the lab: after `lab-agent uninstall`, or so
+// it can enroll again under the same name. Its jobs stay in the history. A
+// Mac with a job running, queued, or unfinished in the store is refused.
+func (s *Server) hForgetDevice(w http.ResponseWriter, r *http.Request) {
+	v := s.devOr404(w, r)
+	if v == nil {
+		return
+	}
+	if code, err := s.forget(v); err != nil {
+		httpErr(w, code, "%v", err)
+		return
+	}
+	s.log.Printf("forgot %s", r.PathValue("name"))
+	writeJSON(w, map[string]string{"forgot": r.PathValue("name")})
+}
+
+// forget deletes v's row and drops it from devs, ending its device loop and
+// out-of-band stream. It holds v.mu throughout, as every save of v does, and
+// marks v forgotten before letting go: nothing still holding v can then
+// write the row back, and Submit queues nothing more on it.
+func (s *Server) forget(v *dev) (int, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	name := v.d.Name
+	if v.forgotten {
+		return 404, fmt.Errorf("no device %q", name)
+	}
+	// A job queued while the Mac was offline waits in the store, not the queue,
+	// and labd would hand it to whatever enrolls next under this name.
+	open, err := s.store.jobs(name, 1, true)
+	if err != nil {
+		return 500, err
+	}
+	if v.d.State == api.StateBusy || v.d.State == api.StateRecovering || len(v.queue) > 0 || len(open) > 0 {
+		return 409, fmt.Errorf("%s has a job running or queued; cancel it first", name)
+	}
+	if err := s.store.deleteDevice(v.d.ID); err != nil {
+		return 500, err
+	}
+	v.forgotten = true
+	s.mu.Lock()
+	if s.devs[name] == v {
+		delete(s.devs, name)
+	}
+	s.mu.Unlock()
+	if v.oobStop != nil {
+		v.oobStop()
+	}
+	v.oobStop, v.oob, v.serialUp = nil, nil, false
+	close(v.gone)
+	return 200, nil
+}
+
 func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	v := s.devOr404(w, r)
 	if v == nil {
@@ -926,6 +985,18 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) {
 		Events: []api.JobEvent{{Time: now, Msg: "queued"}}}
 	if err := s.store.saveJob(j); err != nil {
 		return nil, 500, err
+	}
+	// lab forget may have dropped the Mac since it was looked up, and then
+	// nothing would run the job. Past this check the saved job keeps forget
+	// from dropping it.
+	v.mu.Lock()
+	gone := v.forgotten
+	v.mu.Unlock()
+	if gone {
+		s.updateJob(j, func(j *api.Job) {
+			j.State, j.Outcome, j.Summary = api.JobDone, api.OutcomeCanceled, spec.Device+" was forgotten (lab forget) before the job started"
+		})
+		return nil, 404, fmt.Errorf("no device %q", spec.Device)
 	}
 	v.queue <- j.ID
 	return j, 200, nil

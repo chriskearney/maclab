@@ -351,7 +351,10 @@ func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 		if res.Kernel != j.Result.BootKernel {
 			return "", fmt.Errorf("report names kernel %s but the baseline booted %s", res.Kernel, j.Result.BootKernel)
 		}
-	} else if kg := s.dev(j.Spec.Device).snapshot().KnownGood; kg != "" && res.Kernel != kg {
+	} else if v := s.dev(j.Spec.Device); v == nil {
+		// lab forget dropped the Mac, and its known-good kernel with it
+		return "", fmt.Errorf("%s was forgotten (lab forget), so there is no known-good kernel to check the report against", j.Spec.Device)
+	} else if kg := v.snapshot().KnownGood; kg != "" && res.Kernel != kg {
 		return "", fmt.Errorf("report names kernel %s but the known-good kernel is %s", res.Kernel, kg)
 	}
 	body, err := os.ReadFile(filepath.Join(s.jobDir(j.ID), res.Report))

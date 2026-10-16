@@ -1042,7 +1042,7 @@ func (s *Server) promote(ctx context.Context, v *dev, release string, j *api.Job
 	v.mu.Lock()
 	prev := v.d.KnownGood
 	v.d.KnownGood = j.Result.BootKernel
-	err := s.store.saveDevice(&v.d, v.secretHash)
+	err := v.storeLocked()
 	if err != nil {
 		v.d.KnownGood = prev
 	}
@@ -1057,7 +1057,7 @@ func (s *Server) promote(ctx context.Context, v *dev, release string, j *api.Job
 		}
 		v.mu.Lock()
 		v.d.KnownGood = prev
-		serr := s.store.saveDevice(&v.d, v.secretHash)
+		serr := v.storeLocked()
 		v.mu.Unlock()
 		if serr != nil {
 			why = fmt.Errorf("%v; and putting back labd's known-good %s failed: %v", why, prev, serr)

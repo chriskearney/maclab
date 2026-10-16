@@ -1,0 +1,568 @@
+package agent
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	osuser "os/user"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+// labMac is what setup leaves on a Limine Mac, under a temp root.
+type labMac struct {
+	u     *uninstaller
+	lim   *limineLayout
+	calls []string
+	out   []string
+}
+
+var labMacFiles = map[string]string{
+	ConfigPath:                    `{"server":"http://labd:7770","name":"m1air","secret":"s3cret"}`,
+	binPath:                       "ELF",
+	unitPath:                      unit,
+	sysctlPath:                    "kernel.panic = 10\n",
+	watchdogCfg:                   "[Manager]\nRuntimeWatchdogSec=30s\n",
+	journaldCfg:                   "[Journal]\nStorage=persistent\n",
+	gettyDropIn:                   "[Service]\nExecStart=\n",
+	sddmConf:                      "[Autologin]\nUser=alice\nSession=hyprland-uwsm.desktop\n",
+	"/home/alice/" + stayAwake:    "",
+	workDir + "/known-good.json":  `{"kernel":"7.1-good","stage_dir":"/boot/efi/maclab","loader":"limine"}`,
+	"/etc/sysctl.d/10-other.conf": "vm.swappiness = 10\n",
+	// modules: an orphaned test kernel, a test kernel that became known-good,
+	// the running one, and the distro's
+	"/usr/lib/modules/7.2-lab/" + markerFile:     "j1",
+	"/usr/lib/modules/7.2-lab/kernel/x.ko":       "",
+	"/usr/lib/modules/7.1-good/" + markerFile:    "j0",
+	"/usr/lib/modules/7.0-running/" + markerFile: "j2",
+	"/usr/lib/modules/6.9-arch/vmlinuz":          "",
+}
+
+func newLabMac(t *testing.T) *labMac {
+	t.Helper()
+	oldLocks, oldVars := bootPartitionLocks, efivarsDir
+	t.Cleanup(func() { bootPartitionLocks, efivarsDir = oldLocks, oldVars })
+	locks := t.TempDir()
+	bootPartitionLocks = []string{filepath.Join(locks, "boot-partition.lock"), filepath.Join(locks, "limine-global.lock")}
+	efivarsDir = t.TempDir()
+
+	m := &labMac{lim: testLimine(t)}
+	if err := m.lim.writeEntries(); err != nil { // setup's empty block
+		t.Fatal(err)
+	}
+	// the ESP holds limine.conf, and the loader U-Boot boots, as shipped
+	m.lim.ESP.Target = filepath.Dir(m.lim.Conf)
+	m.lim.Loader = filepath.Join(m.lim.ESP.Target, "EFI/BOOT/BOOTAA64.EFI")
+	os.MkdirAll(filepath.Dir(m.lim.Loader), 0o755)
+	if err := os.WriteFile(m.lim.Loader, limineBinary(""), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for p, s := range labMacFiles {
+		p = filepath.Join(root, p)
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		if err := os.WriteFile(p, []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.u = &uninstaller{root: root, boot: m.lim, running: "7.0-running", cmdline: "root=UUID=x rw quiet",
+		say: func(f string, a ...any) { m.out = append(m.out, fmt.Sprintf(f, a...)) },
+		cmd: func(name string, args ...string) error {
+			m.calls = append(m.calls, name+" "+strings.Join(args, " "))
+			return nil
+		},
+		home: func(user string) (string, error) { return filepath.Join(root, "home", user), nil },
+	}
+	return m
+}
+
+// again runs uninstall afresh, as a second `lab-agent uninstall` would.
+func (m *labMac) again(dry bool) error {
+	m.calls, m.out, m.u.acted, m.u.removed, m.u.dry = nil, nil, 0, nil, dry
+	return m.u.uninstall()
+}
+
+func (m *labMac) gone(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		if exists(m.u.path(p)) {
+			t.Errorf("%s is still there", p)
+		}
+	}
+}
+
+func (m *labMac) kept(t *testing.T, paths ...string) {
+	t.Helper()
+	for _, p := range paths {
+		if !exists(m.u.path(p)) {
+			t.Errorf("%s was removed", p)
+		}
+	}
+}
+
+// snapshot is every file and directory under dirs, with its contents.
+func snapshot(t *testing.T, dirs ...string) map[string]string {
+	t.Helper()
+	s := map[string]string{}
+	for _, d := range dirs {
+		filepath.WalkDir(d, func(p string, e fs.DirEntry, err error) error {
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, _ := os.ReadFile(p)
+			s[p] = string(b)
+			return nil
+		})
+	}
+	return s
+}
+
+func TestUninstallLimine(t *testing.T) {
+	m := newLabMac(t)
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(m.lim.Conf); string(got) != omarchyLimineConf {
+		t.Errorf("limine.conf is not as setup found it:\n%s", got)
+	}
+	if exists(m.lim.Stage) {
+		t.Error("stage directory is still there")
+	}
+	m.gone(t, "/etc/maclab", binPath, unitPath, sysctlPath, watchdogCfg, filepath.Dir(watchdogCfg), journaldCfg, filepath.Dir(journaldCfg),
+		gettyDropIn, filepath.Dir(gettyDropIn), sddmConf, filepath.Dir(sddmConf), workDir, "/usr/lib/modules/7.2-lab")
+	m.kept(t, "/usr/lib/modules/7.1-good", "/usr/lib/modules/7.0-running", "/usr/lib/modules/6.9-arch", "/etc/sysctl.d/10-other.conf")
+	want := []string{
+		"systemctl disable --now lab-agent.service",
+		"systemctl daemon-reload",
+		"systemctl daemon-reexec",
+		"systemctl restart systemd-journald",
+		"systemctl disable serial-getty@ttySAC0.service",
+		"systemctl daemon-reload",
+		"runuser -u alice -- rm -f " + m.u.path("/home/alice", stayAwake),
+	}
+	if !reflect.DeepEqual(m.calls, want) {
+		t.Errorf("commands:\n%s\nwant:\n%s", strings.Join(m.calls, "\n"), strings.Join(want, "\n"))
+	}
+	if last := m.out[len(m.out)-1]; last != "uninstalled. labd still lists this Mac as m1air" {
+		t.Errorf("last line %q", last)
+	}
+
+	// Idempotent: a second run finds nothing left to do.
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	if m.u.acted != 0 || len(m.calls) != 0 {
+		t.Errorf("second run acted %d times, ran %q:\n%s", m.u.acted, m.calls, strings.Join(m.out, "\n"))
+	}
+	if last := m.out[len(m.out)-1]; !strings.HasPrefix(last, "nothing to undo") {
+		t.Errorf("last line %q", last)
+	}
+}
+
+// A dry run changes nothing and prints exactly the actions the real run takes.
+func TestUninstallDryRun(t *testing.T) {
+	m := newLabMac(t)
+	before := snapshot(t, m.u.root, filepath.Dir(m.lim.Conf))
+	if err := m.again(true); err != nil {
+		t.Fatal(err)
+	}
+	if after := snapshot(t, m.u.root, filepath.Dir(m.lim.Conf)); !reflect.DeepEqual(before, after) {
+		t.Error("a dry run changed files")
+	}
+	if len(m.calls) != 0 {
+		t.Errorf("a dry run ran %q", m.calls)
+	}
+	dry := m.out
+	if last := dry[len(dry)-1]; last != "dry run: nothing was changed" {
+		t.Errorf("last line %q", last)
+	}
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	taken := m.out
+	if len(dry) != len(taken) {
+		t.Fatalf("dry run:\n%s\nreal run:\n%s", strings.Join(dry, "\n"), strings.Join(taken, "\n"))
+	}
+	for i := range len(dry) - 1 {
+		if d := strings.TrimPrefix(dry[i], "would "); d != taken[i] {
+			t.Errorf("dry run %q, real run %q", dry[i], taken[i])
+		}
+	}
+}
+
+// What was on before setup stays on: the getty it found enabled, and the
+// user's own stay-awake.
+func TestUninstallKeepsPreSetupState(t *testing.T) {
+	m := newLabMac(t)
+	os.WriteFile(m.u.path(workDir, gettyWasEnabled), []byte("enabled\n"), 0o644)
+	os.WriteFile(m.u.path(workDir, stayAwakeWasOn), []byte("alice\n"), 0o644)
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range m.calls {
+		if strings.Contains(c, "serial-getty") || strings.HasPrefix(c, "runuser") {
+			t.Errorf("ran %q", c)
+		}
+	}
+	m.gone(t, gettyDropIn, sddmConf)
+}
+
+// Without the lab's journald drop-in, uninstall leaves journald alone.
+func TestUninstallWithoutJournaldDropIn(t *testing.T) {
+	m := newLabMac(t)
+	os.Remove(m.u.path(journaldCfg))
+	os.WriteFile(m.u.path("/etc/systemd/journald.conf.d/50-mine.conf"), []byte("[Journal]\n"), 0o644)
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range append(m.calls, m.out...) {
+		if strings.Contains(c, "journald") && !strings.Contains(c, "50-mine") {
+			t.Errorf("%q", c)
+		}
+	}
+	m.kept(t, "/etc/systemd/journald.conf.d/50-mine.conf")
+}
+
+func armOneShot(t *testing.T, entry string) string {
+	t.Helper()
+	p := efivarPath("LoaderEntryOneShot", bliGUID)
+	b := binary.LittleEndian.AppendUint32(nil, efiVarNV|efiVarBS|efiVarRT)
+	if err := os.WriteFile(p, append(b, utf16z(entry)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestUninstallRefuses(t *testing.T) {
+	m := newLabMac(t)
+	before := snapshot(t, m.u.root, filepath.Dir(m.lim.Conf))
+
+	m.u.cmdline = "root=UUID=x rw panic=10 maclab.job=j9"
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "lab kernel") {
+		t.Errorf("on a lab kernel: %v", err)
+	}
+	m.u.force = true // never overrides the lab-kernel check
+	if err := m.u.uninstall(); err == nil {
+		t.Error("--force uninstalled on a lab kernel")
+	}
+	if after := snapshot(t, m.u.root, filepath.Dir(m.lim.Conf)); !reflect.DeepEqual(before, after) {
+		t.Error("a refused uninstall changed files")
+	}
+	m.u.cmdline, m.u.force = "root=UUID=x rw", false
+
+	// A job in flight: staged and armed.
+	stageLimineEntry(t, m.lim, "j1")
+	m.lim.writeEntries()
+	before = snapshot(t, m.u.root, filepath.Dir(m.lim.Conf))
+	v := armOneShot(t, "maclab-j1")
+	err := m.u.uninstall()
+	if err == nil || !strings.Contains(err.Error(), "in flight") || !strings.Contains(err.Error(), "maclab-j1 is armed") {
+		t.Fatalf("with a job in flight: %v", err)
+	}
+	if after := snapshot(t, m.u.root, filepath.Dir(m.lim.Conf)); !reflect.DeepEqual(before, after) || !exists(v) {
+		t.Error("a refused uninstall changed files")
+	}
+
+	m.u.force = true
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	if exists(v) {
+		t.Error("the lab's one-shot is still armed")
+	}
+	if got, _ := os.ReadFile(m.lim.Conf); string(got) != omarchyLimineConf || exists(m.lim.Stage) {
+		t.Errorf("limine.conf:\n%s", got)
+	}
+}
+
+// A command's work dir left by a boot that crashed or hung mid-command (the
+// agent never got to clean it up) is no job in flight: uninstall removes it.
+// One from this boot still is.
+func TestUninstallStaleWorkDirs(t *testing.T) {
+	m := newLabMac(t)
+	m.u.bootTime = time.Now().Add(-10 * time.Minute)
+	stale := m.u.path(workDir, "out", "c1792088777-48")
+	os.MkdirAll(stale, 0o755)
+	os.WriteFile(filepath.Join(stale, "log.txt"), []byte("freezing lab-agent\n"), 0o644)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(stale, old, old)
+
+	fresh := m.u.path(workDir, "out", "c1792090000-1")
+	os.MkdirAll(fresh, 0o755)
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "1 job work dirs from this boot") {
+		t.Fatalf("with a work dir from this boot: %v", err)
+	}
+	os.RemoveAll(fresh)
+	if err := m.again(false); err != nil {
+		t.Fatalf("a leftover from an earlier boot blocked uninstall: %v", err)
+	}
+	m.gone(t, workDir)
+}
+
+// Someone else's one-shot is not the lab's to clear, and is no job in flight.
+func TestUninstallLeavesOtherOneShot(t *testing.T) {
+	m := newLabMac(t)
+	v := armOneShot(t, "linux-aurora")
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if !exists(v) {
+		t.Error("cleared a one-shot the lab did not set")
+	}
+}
+
+func TestUninstallGrub(t *testing.T) {
+	const hookEnd = "# maclab: end\n"
+	for _, tc := range []struct {
+		name, before, edit, want string
+		backupKept               bool
+	}{
+		{name: "restores the backup", before: "menuentry 'macOS' {\n\texit\n}\n", want: "menuentry 'macOS' {\n\texit\n}\n"},
+		{name: "byte for byte", before: "set timeout=5", want: "set timeout=5"},
+		{name: "removes the file setup created", before: "", want: ""},
+		{name: "keeps later edits", before: "set timeout=5\n", edit: "# mine\n", want: "set timeout=5\n# mine\n", backupKept: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, esp, root := t.TempDir(), t.TempDir(), t.TempDir()
+			g := m1airLayout()
+			g.Dir, g.EnvFile = dir, filepath.Join(esp, envName)
+			custom := filepath.Join(dir, "custom.cfg")
+			if tc.before != "" {
+				os.WriteFile(custom, []byte(tc.before), 0o644)
+			}
+			os.WriteFile(g.EnvFile, nil, 0o644) // grub-editenv create
+			os.MkdirAll(filepath.Join(root, defaultStage), 0o755)
+			if err := g.installHook(); err != nil {
+				t.Fatal(err)
+			}
+			if b, _ := os.ReadFile(custom); !strings.HasSuffix(string(b), hookEnd) {
+				t.Fatalf("custom.cfg after setup:\n%s", b)
+			}
+			if tc.edit != "" {
+				b, _ := os.ReadFile(custom)
+				os.WriteFile(custom, append(b, tc.edit...), 0o644)
+			}
+
+			var out []string
+			u := &uninstaller{root: root, boot: g, say: func(f string, a ...any) { out = append(out, fmt.Sprintf(f, a...)) },
+				cmd: func(string, ...string) error { return nil }}
+			if err := u.uninstall(); err != nil {
+				t.Fatal(err)
+			}
+			got, err := os.ReadFile(custom)
+			if tc.want == "" && !os.IsNotExist(err) {
+				t.Errorf("custom.cfg is still there:\n%s", got)
+			} else if string(got) != tc.want {
+				t.Errorf("custom.cfg:\n%q\nwant:\n%q", got, tc.want)
+			}
+			if exists(custom+".pre-maclab") != tc.backupKept {
+				t.Errorf("backup kept: %v, want %v", !tc.backupKept, tc.backupKept)
+			}
+			for _, p := range []string{filepath.Join(dir, maclabCfg), g.EnvFile, filepath.Join(root, defaultStage)} {
+				if exists(p) {
+					t.Errorf("%s is still there", p)
+				}
+			}
+
+			u.acted, out = 0, nil
+			if err := u.uninstall(); err != nil || u.acted != 0 {
+				t.Errorf("second run: %v, %d actions:\n%s", err, u.acted, strings.Join(out, "\n"))
+			}
+
+			// The Mac died after restoring custom.cfg, before the backup went:
+			// a backup that holds just what custom.cfg does goes on the next run.
+			if !tc.backupKept && tc.before != "" {
+				os.WriteFile(custom+".pre-maclab", []byte(tc.want), 0o644)
+				if err := u.uninstall(); err != nil || exists(custom+".pre-maclab") {
+					t.Errorf("orphaned backup: %v, still there %v", err, exists(custom+".pre-maclab"))
+				}
+				if got, _ := os.ReadFile(custom); string(got) != tc.want {
+					t.Errorf("custom.cfg after the orphan went:\n%q", got)
+				}
+			}
+		})
+	}
+}
+
+func TestStripHook(t *testing.T) {
+	g := m1airLayout()
+	if _, ok := stripHook([]byte("x\n\n" + strings.TrimSuffix(g.hookText(), "# maclab: end\n"))); ok {
+		t.Error("a hook without its end marker was stripped")
+	}
+	if got, ok := stripHook([]byte("x\n")); !ok || string(got) != "x\n" {
+		t.Errorf("no hook: %q %v", got, ok)
+	}
+}
+
+// With Limine config enrollment on, taking the maclab block out of
+// limine.conf would stop the Mac booting: uninstall refuses before changing
+// anything, dry run or not, --force or not, and says how to turn it off.
+func TestUninstallRefusesLimineEnrollment(t *testing.T) {
+	m := newLabMac(t)
+	tools := filepath.Join(m.lim.ESP.Target, "EFI/limine/limine_aa64.efi")
+	os.MkdirAll(filepath.Dir(tools), 0o755)
+	os.MkdirAll(m.u.path("/etc/default"), 0o755)
+	for _, c := range []struct {
+		name, defaults string
+		loader, tools  string // the checksum enrolled in each binary; "" for none
+		want           string
+	}{
+		// none enrolled yet, but any Limine update could enroll one mid-uninstall
+		{"on, none enrolled yet", "ENABLE_ENROLL_LIMINE_CONFIG=yes\n", "", "", "To turn it off, set ENABLE_ENROLL_LIMINE_CONFIG=no in /etc/default/limine;"},
+		{"enrolled in the loader", "", limineEnrolledSum, "", "To turn it off, run `sudo limine enroll-config --reset " + m.lim.Loader + "`;"},
+		{"turned off, still enrolled in the tools' copy", "ENABLE_ENROLL_LIMINE_CONFIG=no\n", "", limineEnrolledSum,
+			"To turn it off, run `sudo limine enroll-config --reset " + tools + "`;"},
+	} {
+		os.WriteFile(m.u.path("/etc/default/limine"), []byte(c.defaults), 0o644)
+		os.WriteFile(m.lim.Loader, limineBinary(c.loader), 0o644)
+		os.WriteFile(tools, limineBinary(c.tools), 0o644)
+		before := snapshot(t, m.u.root, m.lim.ESP.Target)
+		for _, dry := range []bool{true, false} {
+			m.u.force = !dry
+			err := m.again(dry)
+			if err == nil || !strings.Contains(err.Error(), "Limine config enrollment is on") || !strings.Contains(err.Error(), c.want) {
+				t.Errorf("%s, dry run %v: %v", c.name, dry, err)
+			}
+			if len(m.calls)+m.u.acted > 0 {
+				t.Errorf("%s, dry run %v: acted %d times, ran %q", c.name, dry, m.u.acted, m.calls)
+			}
+		}
+		if after := snapshot(t, m.u.root, m.lim.ESP.Target); !reflect.DeepEqual(before, after) {
+			t.Errorf("%s: a refused uninstall changed files", c.name)
+		}
+	}
+
+	// Turned off: uninstall goes ahead. Once the block is gone, enrollment
+	// is none of its business.
+	m.u.force = false
+	os.WriteFile(m.u.path("/etc/default/limine"), nil, 0o644)
+	os.WriteFile(m.lim.Loader, limineBinary(""), 0o644)
+	os.WriteFile(tools, limineBinary(""), 0o644)
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(m.lim.Conf); string(got) != omarchyLimineConf {
+		t.Errorf("limine.conf:\n%s", got)
+	}
+	os.WriteFile(m.u.path("/etc/default/limine"), []byte("ENABLE_ENROLL_LIMINE_CONFIG=yes\n"), 0o644)
+	os.WriteFile(m.lim.Loader, limineBinary(limineEnrolledSum), 0o644)
+	if err := m.again(false); err != nil || m.u.acted != 0 {
+		t.Errorf("enrollment on again after uninstall: %v, %d actions", err, m.u.acted)
+	}
+}
+
+// If lab-agent.service won't stop, the agent may still be running: uninstall
+// changes nothing else, so the agent can't arm a one-shot or rewrite
+// limine.conf under it.
+func TestUninstallStopsWhenTheAgentWontStop(t *testing.T) {
+	m := newLabMac(t)
+	record := m.u.cmd
+	m.u.cmd = func(name string, args ...string) error {
+		record(name, args...)
+		if strings.Join(args, " ") == "disable --now lab-agent.service" {
+			return errors.New("exit status 1: Job for lab-agent.service canceled")
+		}
+		return nil
+	}
+	before := snapshot(t, m.u.root, m.lim.ESP.Target)
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "uninstall stopped there") {
+		t.Fatalf("the agent didn't stop: %v", err)
+	}
+	if after := snapshot(t, m.u.root, m.lim.ESP.Target); !reflect.DeepEqual(before, after) || len(m.calls) != 1 {
+		t.Errorf("changed more than the agent: ran %q", m.calls)
+	}
+	m.u.cmd = record
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	m.gone(t, unitPath, workDir)
+}
+
+// An autologin user deleted since setup has no stay-awake left to turn off:
+// the SDDM file still goes, and a second run has nothing to do. Any other
+// failure to look the user up stops that step, to be retried.
+func TestUninstallAutologinUserGone(t *testing.T) {
+	m := newLabMac(t)
+	m.u.home = func(string) (string, error) { return "", errors.New("nss: connection refused") }
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "autologin user alice") {
+		t.Fatalf("lookup failed: %v", err)
+	}
+	m.kept(t, sddmConf, workDir)
+
+	m.u.home = func(user string) (string, error) { return "", osuser.UnknownUserError(user) }
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	m.gone(t, sddmConf, workDir)
+	for _, c := range m.calls {
+		if strings.HasPrefix(c, "runuser") {
+			t.Errorf("ran %q", c)
+		}
+	}
+	if err := m.again(false); err != nil || m.u.acted != 0 {
+		t.Errorf("second run: %v, %d actions", err, m.u.acted)
+	}
+}
+
+// writeSynced's limine.conf.tmp, left by a write the Mac died during, goes
+// too, even once nothing else of the lab's is left.
+func TestUninstallStaleLimineTmp(t *testing.T) {
+	m := newLabMac(t)
+	tmp := m.lim.Conf + ".tmp"
+	os.WriteFile(tmp, []byte("half a limine.conf"), 0o644)
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if exists(tmp) {
+		t.Error("limine.conf.tmp is still there")
+	}
+	os.WriteFile(tmp, []byte("half a limine.conf"), 0o644)
+	if err := m.again(false); err != nil || exists(tmp) || m.u.acted != 1 {
+		t.Errorf("after uninstall: %v, %d actions, tmp still there %v", err, m.u.acted, exists(tmp))
+	}
+}
+
+// A maclab block that lost its end line can't come out safely: its entries
+// name the staged UKIs, so those stay, and the records too, with an error.
+func TestUninstallLimineBlockWithoutEnd(t *testing.T) {
+	m := newLabMac(t)
+	stageLimineEntry(t, m.lim, "j1")
+	m.lim.writeEntries()
+	conf, _ := os.ReadFile(m.lim.Conf)
+	broken := strings.Replace(string(conf), limineEnd+"\n", "", 1)
+	os.WriteFile(m.lim.Conf, []byte(broken), 0o644)
+	m.u.force = true // the staged job is in flight otherwise
+	err := m.u.uninstall()
+	if err == nil || !strings.Contains(err.Error(), `has no "# maclab: end" line`) {
+		t.Fatalf("a block without its end: %v", err)
+	}
+	if got, _ := os.ReadFile(m.lim.Conf); string(got) != broken {
+		t.Errorf("limine.conf changed:\n%s", got)
+	}
+	if !exists(filepath.Join(m.lim.Stage, "j1", limineEntry)) {
+		t.Error("removed the staged job its entry names")
+	}
+	m.kept(t, workDir)
+	if last := m.out[len(m.out)-1]; strings.HasPrefix(last, "uninstalled") {
+		t.Errorf("last line %q", last)
+	}
+}
+
+// --force with the bootloader not found leaves the bootloader alone, so a
+// lab one-shot may still be armed into the stage in /var/lib/maclab: the
+// records stay, and the run fails.
+func TestUninstallForceWithoutBootloader(t *testing.T) {
+	m := newLabMac(t)
+	m.u.boot, m.u.bootErr, m.u.force = nil, errors.New("no FAT ESP mounted at /boot/efi, /efi or /boot"), true
+	os.MkdirAll(m.u.path(altStage, "j1"), 0o755)
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "no FAT ESP") {
+		t.Fatalf("bootloader not found: %v", err)
+	}
+	m.kept(t, workDir, altStage+"/j1")
+	m.gone(t, sysctlPath, unitPath) // everything else went
+}
