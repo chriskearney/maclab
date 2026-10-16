@@ -102,6 +102,21 @@ Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
 1 = + hardware watchdog (`apple_wdt`, armed through systemd),
 2 = + out-of-band reset and serial.
 
+What a crashed boot leaves behind is incomplete. These Macs have no pstore
+backend: there is no ramoops region in the device tree, and the kernel's EFI
+pstore backend is off by default (`CONFIG_EFI_VARS_PSTORE_DEFAULT_DISABLE`); it
+wouldn't help anyway, since U-Boot keeps EFI variables in RAM at runtime. So the
+panic message itself reaches only a serial console. Writes made just before a
+panic are lost too. On an M1 MacBook Air (two runs, each ending in a sysrq
+panic), files whose `fsync` had returned 1 s or 0 s before the panic were gone
+after the reset, although `panic=10` held the Mac up for 10 s after it. Files
+fsync'd 2 s or more before survived on btrfs, and 5 s or more before on ext4
+(where 2 s and 1 s weren't tried). A file written without `fsync` 35 s before
+the panic came back empty. The cause wasn't investigated. So the previous boot's
+journal that labd collects can end well before the crash: journald syncs to disk
+every 5 minutes by default, and at once only after a critical message. labd's
+job events, which name each test as labd starts it, show where a boot crashed.
+
 ## Setup
 
 ```sh
