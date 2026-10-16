@@ -47,23 +47,13 @@ import (
 const (
 	watchdogDev = "/dev/watchdog0"
 	// labBootDeadline is watchdog.open_timeout on a test boot when labd
-	// doesn't say how long it waits for the boot (an older labd): the time
-	// from apple_wdt probing to the agent opening the watchdog (5 s on an M1
-	// Air). The kernel stops pinging it then, and apple_wdt's 30 s boot
-	// timeout resets the Mac within 30 s. It is what bootDeadline makes of
-	// labd's default 4-minute --boot-timeout.
+	// doesn't say how long it waits for the boot (an older labd), and the
+	// least any test boot gets: the time from apple_wdt probing to the agent
+	// opening the watchdog (5 s on an M1 Air; lab-agent starts only after
+	// network-online.target). The kernel stops pinging it then, and
+	// apple_wdt's 30 s boot timeout resets the Mac within 30 s. It is what
+	// bootDeadline makes of labd's default 4-minute --boot-timeout.
 	labBootDeadline = 120 * time.Second
-	// bootFallback is the part of labd's boot timeout a test boot's deadline
-	// leaves for the reset and the known-good kernel's boot after it. On an
-	// M1 Air, with a 120 s deadline, a boot stuck at 150 s was back on the
-	// known-good kernel 228 s after the reboot, 12 s inside labd's default
-	// 4-minute --boot-timeout; 2 minutes leaves room for slower firmware, so
-	// labd sees the fallback before it would call for a person.
-	bootFallback = 2 * time.Minute
-	// minBootDeadline is the least a test boot gets to open the watchdog,
-	// however short labd's boot timeout: lab-agent starts only after
-	// network-online.target.
-	minBootDeadline = time.Minute
 	// watchdogTimeout is the hardware timeout once the agent holds it.
 	watchdogTimeout = 60 * time.Second
 	// watchdogIdle is how long the agent keeps feeding, outside a test, after
@@ -155,15 +145,18 @@ var (
 )
 
 // bootDeadline is watchdog.open_timeout for a test boot that labd waits up to
-// boot for: what is left of it once the reset and the fallback boot are
-// allowed for, but at least minBootDeadline. A boot slow to start the agent
-// (a probe timing out, a nofail mount or network-online.target waiting) gets
-// as long as labd would wait for it anyway.
+// boot for: half of it, and at least labBootDeadline. The other half is left
+// for the reset (up to 30 s) and the known-good kernel's boot after it, so
+// labd sees the fallback before it gives up on the boot and resets the Mac
+// itself, mid-fallback. That margin grows with the timeout, as slower
+// firmware and boots are what a longer timeout is for. On an M1 Air, with a
+// 120 s deadline, a boot stuck at 150 s was back on the known-good kernel
+// 228 s after the reboot, 12 s inside labd's default 4-minute --boot-timeout.
+// A boot slow to start the agent (a probe timing out, a nofail mount or
+// network-online.target waiting) gets as long as that, however short labd's
+// timeout.
 func bootDeadline(boot time.Duration) time.Duration {
-	if boot <= 0 {
-		return labBootDeadline
-	}
-	return max(boot-bootFallback, minBootDeadline)
+	return max(boot/2, labBootDeadline)
 }
 
 // openDeadline is the boot's watchdog.open_timeout, or labBootDeadline if its

@@ -809,9 +809,9 @@ func TestQuietSpellWindow(t *testing.T) {
 	lost(true, 0, "on the next boot")
 }
 
-// A test boot's watchdog deadline comes from the job's boot timeout: what is
-// left of it once the reset and the fallback boot are allowed for, and at
-// least a minute.
+// A test boot's watchdog deadline comes from the job's boot timeout: half
+// of it, leaving the other half for the reset and the fallback boot, and at
+// least 120 s.
 func TestTestBootWatchdogDeadline(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
@@ -819,8 +819,8 @@ func TestTestBootWatchdogDeadline(t *testing.T) {
 		boot int
 		want string
 	}{
-		{0, "watchdog.open_timeout=60"}, // labd's 4 s in these tests
-		{600, "watchdog.open_timeout=480"},
+		{0, "watchdog.open_timeout=120"}, // labd's 4 s in these tests
+		{600, "watchdog.open_timeout=300"},
 	} {
 		j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), BootTimeoutSec: c.boot})
 		l.expect(j, api.OutcomePass)

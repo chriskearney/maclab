@@ -397,15 +397,18 @@ func TestRunHoldsWatchdogOnTestBoot(t *testing.T) {
 	}
 }
 
-// A test boot's deadline is labd's boot timeout less the time the reset and
-// the fallback boot take, so labd sees the fallback, but never short.
+// A test boot's deadline is half of labd's boot timeout, so the reset and
+// the fallback boot have the other half and labd sees the fallback, with a
+// margin that grows with the timeout; and never less than 120 s.
 func TestBootDeadline(t *testing.T) {
 	for _, c := range []struct{ boot, want time.Duration }{
 		{0, 120 * time.Second}, // an older labd
 		{4 * time.Minute, 120 * time.Second},
-		{10 * time.Minute, 8 * time.Minute},
-		{2 * time.Minute, time.Minute},
-		{4 * time.Second, time.Minute},
+		{5 * time.Minute, 150 * time.Second},
+		{10 * time.Minute, 5 * time.Minute}, // reset by 330 s, not at 510 s mid-fallback
+		{time.Hour, 30 * time.Minute},
+		{2 * time.Minute, 120 * time.Second},
+		{4 * time.Second, 120 * time.Second},
 	} {
 		if got := bootDeadline(c.boot); got != c.want {
 			t.Errorf("boot timeout %s: deadline %s, want %s", c.boot, got, c.want)

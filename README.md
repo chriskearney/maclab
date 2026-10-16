@@ -166,8 +166,11 @@ U-Boot leaves `apple_wdt` running into Linux (it feeds it itself while it or Lim
 so a Mac sitting at a U-Boot prompt or the Limine menu is not reset). A test boot's
 command line adds `systemd.watchdog_sec=0 watchdog.open_timeout=N`: systemd, in the
 initramfs too, leaves the watchdog alone, and the kernel pings it only for N seconds. N is
-the job's boot timeout less 2 minutes for the reset and the fallback boot, and at least
-60: 120 with labd's default 4-minute `--boot-timeout`. Any boot that hasn't opened the
+half the job's boot timeout, and at least 120 (what an older labd, which doesn't send its
+timeout, gets too): 120 with labd's default 4-minute `--boot-timeout`, 300 with
+`lab run --boot-timeout 600`. The other half is left for the reset and the fallback boot, so labd
+sees the Mac back on its known-good kernel before it gives up and resets it mid-fallback,
+with a margin that grows with the timeout. Any boot that hasn't opened the
 watchdog by then is reset within 30 s, a healthy one too, so lab-agent opens it on every
 test boot (about 5 s after the kernel starts, on an M1 Air). If it can't yet, it tries
 again every second, while it checks in, until N seconds after the kernel started, and then
