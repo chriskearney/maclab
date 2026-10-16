@@ -77,7 +77,9 @@ AI agents get the same operations over MCP (`lab mcp`).
    suspends, the test tells labd how long the Mac may be off the network (3.5
    minutes: the waits for the cycle, for it to settle and for the route, or
    what is left of the timeout), and labd waits that out on that boot before
-   counting the Mac as lost. A real suspend can't be
+   counting the Mac as lost. Once the network is back, the test tells labd
+   so, and labd stops waiting: a hang in the next test shows after the usual
+   60 s of silence. A real suspend can't be
    tested unattended: Apple Silicon's RTC has no wake alarm, so only a key
    press wakes the Mac (a reset ends the boot). labd warns when a test named
    `suspend-*` needs someone there.

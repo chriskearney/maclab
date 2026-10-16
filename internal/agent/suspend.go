@@ -71,7 +71,8 @@ var sleepLockUnits = []string{"omarchy-sleep-lock.service"}
 // report to labd fails, after holding the suspend for 4s. So just before it
 // suspends, the test tells labd how long the Mac may be off the network
 // (quiet), and labd waits that long on this boot before it counts the Mac as
-// lost. On an M1 Air the Mac is quiet for 10-15s (Wi-Fi is back a second
+// lost; once the network is back, it tells labd so (quiet 0), and labd stops
+// waiting. On an M1 Air the Mac is quiet for 10-15s (Wi-Fi is back a second
 // after the resume); without the warning labd would wait out up to
 // quietGrace (60s) from the last check-in.
 func suspendDevices(ctx context.Context, t api.TestSpec, outDir, gui string, quiet Quieter) api.TestResult {
@@ -130,11 +131,32 @@ func suspendCycle(ctx, tidy context.Context, gui string, quiet Quieter, logf fun
 		return fmt.Errorf("reading this boot's kernel log: %w", err)
 	}
 	logf("pm_test: %s; %d suspend cycles so far this boot; default route: %v", shown, len(cycles), route)
-	t0 := time.Now()
-	if err := pmTestDevices(ctx, tidy, gui, prev, len(cycles), quiet, logf); err != nil {
-		return err
+	told, tell := false, quiet // told: labd heard the Mac may go off the network
+	if quiet != nil {
+		tell = func(ctx context.Context, d time.Duration) error { told = true; return quiet(ctx, d) }
 	}
-	logf("devices suspended and resumed in %.0fs", time.Since(t0).Seconds())
+	t0 := time.Now()
+	err = pmTestDevices(ctx, tidy, gui, prev, len(cycles), tell, logf)
+	if err == nil {
+		logf("devices suspended and resumed in %.0fs", time.Since(t0).Seconds())
+		err = routeBack(ctx, route, logf)
+	}
+	// Once the network is back, the spell off it labd was told of is over,
+	// so that labd sees a hang in the next test at once, not once the spell
+	// would have ended. Without the network, labd waits the spell out.
+	if told && (err == nil || !route || defaultRoute(tidy)) {
+		if qerr := quiet(tidy, 0); qerr != nil {
+			logf("could not tell labd the Mac is back on the network: %v; it waits out the spell instead", qerr)
+		} else {
+			logf("told labd the Mac is back on the network")
+		}
+	}
+	return err
+}
+
+// routeBack waits for the default route to come back after the resume, if
+// there was one before the suspend.
+func routeBack(ctx context.Context, route bool, logf func(string, ...any)) error {
 	if !route {
 		logf("no default route before suspending; not waiting for one")
 		return nil

@@ -807,6 +807,53 @@ func TestQuietSpellWindow(t *testing.T) {
 	lost(true, maxQuiet+time.Minute, "a day's spell, past maxQuiet")
 	v.d.BootID = "b2"
 	lost(true, 0, "on the next boot")
+
+	// Back on the network, the agent ends the spell, on its own boot only,
+	// and labd has just heard from it: from then on quietGrace counts.
+	v.d.BootID = "b1"
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 600}})
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b0", Seconds: 0}})
+	lost(false, 9*time.Minute, "9 minutes into a spell, after another boot's ended")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 0}})
+	lost(false, 0, "just back on the network")
+	lost(true, quietGrace+time.Second, "silent past quietGrace once back, inside the spell it ended")
+}
+
+// suspend-devices tells labd once the Mac is back on the network, ending the
+// spell it announced, so a hang in the next test is caught after quietGrace,
+// not once the spell would have ended.
+func TestQuietSpellEndsWhenTheMacIsBack(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	// The spell outlasts the hang, which ends in a reset that labd would
+	// otherwise see first.
+	l.sim.SuspendFor, l.sim.QuietFor, l.sim.HangFor = time.Second, 30*time.Second, 12*time.Second
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"),
+		Tests: []api.TestSpec{{Name: "suspend-devices", Builtin: "suspend-devices"}, {Name: "hang-after-resume", Builtin: "x"}}})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	var started, lost time.Time
+	for _, e := range j.Events {
+		switch {
+		case e.Msg == "test hang-after-resume: running":
+			started = e.Time
+		case strings.HasPrefix(e.Msg, "lost the Mac during test hang-after-resume"):
+			lost = e.Time
+		}
+	}
+	if started.IsZero() || lost.IsZero() {
+		t.Fatalf("events %v", j.Events)
+	}
+	// quietGrace (3 s here) of silence, and a tick or two
+	if took := lost.Sub(started); took > quietGrace+3*time.Second {
+		t.Fatalf("lost the Mac %s into the hung test: labd waited out the spell after the Mac was back", took)
+	}
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	quiet := v.quietLocked(time.Now())
+	v.mu.Unlock()
+	if quiet {
+		t.Error("the known-good boot after the job is within a quiet spell")
+	}
 }
 
 // A test boot's watchdog deadline comes from the job's boot timeout: half

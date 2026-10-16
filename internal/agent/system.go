@@ -12,7 +12,8 @@ import (
 type Fetcher func(ctx context.Context, sha, dst string) error
 
 // Quieter tells labd, before the Mac goes off the network, how long it may be
-// off on this boot, so that labd doesn't count it as lost meanwhile.
+// off on this boot, so that labd doesn't count it as lost meanwhile; 0, once
+// it is back, ends that spell.
 type Quieter func(ctx context.Context, d time.Duration) error
 
 // System is everything the agent does to the machine. Linux is the real

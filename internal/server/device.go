@@ -66,8 +66,9 @@ type dev struct {
 	quietBoot  string
 	quietUntil time.Time
 
-	// heard is the last check-in from the Mac itself. LastSeen also moves when
-	// labd answers a held check-in, which a Mac that just died can't hear.
+	// heard is the last check-in from the Mac itself, or its report that it
+	// is back on the network. LastSeen also moves when labd answers a held
+	// check-in, which a Mac that just died can't hear.
 	heard time.Time
 	// The last reboot labd saw: the boot that ended, the last check-in heard
 	// from it, and the first check-in of the boot after it.
@@ -266,10 +267,20 @@ func (v *dev) deliver(bootID string) api.CheckinResponse {
 func (v *dev) report(rep api.Report) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID && q.Seconds > 0 {
-		d := min(time.Duration(q.Seconds)*time.Second, maxQuiet)
-		v.quietBoot, v.quietUntil = q.BootID, time.Now().Add(d)
-		v.s.log.Printf("%s: may be off the network for up to %s on boot %s", v.d.Name, d, short(q.BootID))
+	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID {
+		switch now := time.Now(); {
+		case q.Seconds > 0:
+			d := min(time.Duration(q.Seconds)*time.Second, maxQuiet)
+			v.quietBoot, v.quietUntil = q.BootID, now.Add(d)
+			v.s.log.Printf("%s: may be off the network for up to %s on boot %s", v.d.Name, d, short(q.BootID))
+		case v.quietLocked(now):
+			// Back on the network: from now on a silence is quietGrace's
+			// again, so a hang in the next step shows at once. The report
+			// is the Mac itself, heard now, maybe before its next check-in.
+			v.quietBoot, v.quietUntil = "", time.Time{}
+			v.d.LastSeen, v.heard = now, now
+			v.s.log.Printf("%s: back on the network on boot %s; no longer waiting out its spell off it", v.d.Name, short(q.BootID))
+		}
 	}
 	for _, r := range rep.Results {
 		if _, ok := v.inflight[r.ID]; ok {

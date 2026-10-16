@@ -145,7 +145,8 @@ type Report struct {
 // Quiet is the agent saying, while it can, that the Mac is about to go off
 // the network on boot BootID for up to Seconds from now (suspend-devices,
 // whose suspend takes Wi-Fi down). labd waits that out on that boot before
-// it counts the Mac as lost.
+// it counts the Mac as lost. Seconds 0, sent once the Mac is back, ends that
+// spell: a silence after it is no longer the spell's.
 type Quiet struct {
 	BootID  string `json:"boot_id"`
 	Seconds int    `json:"seconds"`

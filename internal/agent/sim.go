@@ -30,7 +30,9 @@ import (
 // logind does; one named quiet-suspend-* sleeps without announcing it. The
 // builtin suspend-devices tells labd to expect QuietFor of silence first, as
 // the real one does, and then is quiet for SuspendFor, with no sleep
-// announcement (on a real Mac that rarely reaches labd).
+// announcement (on a real Mac that rarely reaches labd), and then tells labd
+// it is back. A test named hang-* goes silent for HangFor, and then a
+// watchdog resets the Mac, as hang-in-test does.
 type Sim struct {
 	RebootDelay time.Duration
 	OnBoot      func() // called when the machine goes down, like a dropped connection
@@ -352,6 +354,7 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 	case t.Builtin == suspendDevicesTest:
 		quiet(ctx, s.QuietFor) // the real test carries on if labd didn't hear it, too
 		s.suspend(s.SuspendFor, false)
+		quiet(ctx, 0) // the network is back
 	case strings.HasPrefix(t.Name, "suspend-") || strings.HasPrefix(t.Name, "quiet-suspend-"):
 		s.suspend(s.SuspendFor, strings.HasPrefix(t.Name, "suspend-"))
 	}
@@ -362,8 +365,8 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 		<-ctx.Done()
 		return api.TestResult{Name: t.Name, Error: "machine went away"}
 	}
-	if b == "reboot-in-test" || b == "hang-in-test" {
-		if b == "hang-in-test" {
+	if hang := b == "hang-in-test" || strings.HasPrefix(t.Name, "hang-"); hang || b == "reboot-in-test" {
+		if hang {
 			s.mu.Lock()
 			s.alive = false
 			s.mu.Unlock()

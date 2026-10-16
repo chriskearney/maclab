@@ -278,7 +278,8 @@ func (a *Agent) endTest(tr *testRun) {
 }
 
 // quiet tells labd that this boot is about to go off the network for up to
-// d, and returns once labd has heard it, or after a few seconds without.
+// d, or with d 0 that it is back, and returns once labd has heard it, or
+// after a few seconds without.
 func (a *Agent) quiet(ctx context.Context, d time.Duration) error {
 	bootID, _, _ := a.sys.Identity()
 	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)

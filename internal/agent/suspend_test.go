@@ -435,41 +435,62 @@ func TestSuspendDevicesSlowFailureEndsInTime(t *testing.T) {
 
 // Just before it suspends, with pm_test at devices, the test tells labd how
 // long the Mac may be off the network: until the cycle, its settling and the
-// network have had their time, or the test's time is up. If labd doesn't
-// hear it, the test carries on.
+// network have had their time, or the test's time is up. Once the network is
+// back it tells labd so (0), ending that spell; without the network labd
+// waits the spell out. If labd doesn't hear it, the test carries on.
 func TestSuspendDevicesTellsLabd(t *testing.T) {
 	for _, c := range []struct {
-		name     string
-		spec     api.TestSpec
-		net      time.Duration
-		fail     error
-		min, max time.Duration
-		want     string
+		name      string
+		spec      api.TestSpec
+		net       time.Duration
+		routeDown int // as fakeSuspend's
+		fail      error
+		min, max  time.Duration
+		passed    bool
+		want      []string // in the log
+		back      bool     // told labd the Mac is back
 	}{
-		{"waits", api.TestSpec{}, 300 * time.Millisecond, nil, 900 * time.Millisecond, 900 * time.Millisecond,
-			"told labd the Mac may be off the network for up to 1s"},
-		{"time left", api.TestSpec{TimeoutSec: 2}, time.Minute, nil, 1500 * time.Millisecond, 2 * time.Second,
-			"told labd the Mac may be off the network for up to 2s"},
-		{"labd unreachable", api.TestSpec{}, 300 * time.Millisecond, errors.New("connection refused"), 900 * time.Millisecond, 900 * time.Millisecond,
-			"could not tell labd the Mac may be off the network for 1s: connection refused"},
+		{"waits", api.TestSpec{}, 300 * time.Millisecond, 0, nil, 900 * time.Millisecond, 900 * time.Millisecond, true,
+			[]string{"told labd the Mac may be off the network for up to 1s", "told labd the Mac is back on the network"}, true},
+		{"time left", api.TestSpec{TimeoutSec: 2}, time.Minute, 0, nil, 1500 * time.Millisecond, 2 * time.Second, true,
+			[]string{"told labd the Mac may be off the network for up to 2s", "told labd the Mac is back on the network"}, true},
+		{"route back late", api.TestSpec{}, 300 * time.Millisecond, 3, nil, 900 * time.Millisecond, 900 * time.Millisecond, true,
+			[]string{"default route back", "told labd the Mac is back on the network"}, true},
+		{"network never back", api.TestSpec{}, 300 * time.Millisecond, -1, nil, 900 * time.Millisecond, 900 * time.Millisecond, false,
+			[]string{"no default route 300ms after resuming"}, false},
+		{"labd unreachable", api.TestSpec{}, 300 * time.Millisecond, 0, errors.New("connection refused"), 900 * time.Millisecond, 900 * time.Millisecond, true,
+			[]string{"could not tell labd the Mac may be off the network for 1s: connection refused",
+				"could not tell labd the Mac is back on the network: connection refused; it waits out the spell instead"}, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeSuspend(t, pmTestModes)
 			suspendNetWait = c.net
+			f.routeDown = c.routeDown
 			var told []time.Duration
-			var mode string
-			var suspended int
+			var modes []string
+			var suspended []int
 			r := runSuspendDevicesQuiet(t, "lab", c.spec, func(ctx context.Context, d time.Duration) error {
 				f.mu.Lock()
 				defer f.mu.Unlock()
-				told, mode, suspended = append(told, d), pmTestNow(t), f.suspends
+				told, modes, suspended = append(told, d), append(modes, pmTestNow(t)), append(suspended, f.suspends)
 				return c.fail
 			})
-			if !r.Passed || !strings.Contains(r.Tail, c.want) {
-				t.Fatalf("passed=%v tail:\n%s", r.Passed, r.Tail)
+			if r.Passed != c.passed {
+				t.Fatalf("passed=%v, want %v; tail:\n%s", r.Passed, c.passed, r.Tail)
 			}
-			if len(told) != 1 || told[0] < c.min || told[0] > c.max || mode != "devices" || suspended != 0 {
-				t.Fatalf("told labd %v, with pm_test=%q after %d suspends; want once, %s to %s, devices, before suspending", told, mode, suspended, c.min, c.max)
+			for _, w := range c.want {
+				if !strings.Contains(r.Tail, w) {
+					t.Errorf("log lacks %q:\n%s", w, r.Tail)
+				}
+			}
+			if len(told) == 0 || told[0] < c.min || told[0] > c.max || modes[0] != "devices" || suspended[0] != 0 {
+				t.Fatalf("told labd %v, with pm_test=%q after %v suspends; want first %s to %s, devices, before suspending", told, modes, suspended, c.min, c.max)
+			}
+			switch {
+			case !c.back && len(told) != 1:
+				t.Errorf("told labd %v with the network not back; want only the spell", told)
+			case c.back && (len(told) != 2 || told[1] != 0 || suspended[1] != 1 || modes[1] != "none"):
+				t.Errorf("told labd %v, with pm_test=%q after %v suspends; want the spell, then 0 once the cycle was over", told, modes, suspended)
 			}
 		})
 	}
