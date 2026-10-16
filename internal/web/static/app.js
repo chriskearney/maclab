@@ -685,6 +685,7 @@ const BUILTINS = [
   ['boot-health', 'systemd state, failed units, kernel errors, boot time', false, true],
   ['gui-smoke', 'Hyprland answers, a monitor is up, screenshot', true, false],
   ['gui-terminal', 'open a terminal, type into it, screenshot', true, false],
+  ['suspend-devices', 'suspend and resume the devices (pm_test), network back', false, false],
 ];
 
 function paintRun() {

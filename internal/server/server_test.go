@@ -752,6 +752,30 @@ func TestShortQuietSpellDuringTest(t *testing.T) {
 	}
 }
 
+// A test that really suspends an Apple Silicon Mac needs a person to wake it;
+// suspend-devices (pm_test) and other Macs don't.
+func TestRealSleepNote(t *testing.T) {
+	air := api.Device{Name: "m1air", Facts: api.Facts{DTModel: "Apple MacBook Air (M1, 2020)"}}
+	withOOB := air
+	withOOB.OOB = &api.OOBConfig{Driver: "macvdmtool"}
+	for _, c := range []struct {
+		d    api.Device
+		t    api.TestSpec
+		want string
+	}{
+		{air, api.TestSpec{Name: "suspend-lid", Script: "abc"}, "test suspend-lid puts m1air to sleep, and it can't wake itself (Apple Silicon's RTC has no wakealarm): someone must press a key on it"},
+		{withOOB, api.TestSpec{Name: "suspend-lid", Script: "abc"}, "; an OOB reset would end the test"},
+		{air, api.TestSpec{Name: "suspend-devices", Builtin: "suspend-devices"}, ""},
+		{air, api.TestSpec{Name: "gui-smoke", Builtin: "gui-smoke"}, ""},
+		{api.Device{Name: "sim", Facts: api.Facts{DTModel: "Simulated Mac"}}, api.TestSpec{Name: "suspend-lid"}, ""},
+	} {
+		n := realSleepNote(c.d, c.t)
+		if (c.want == "") != (n == "") || !strings.Contains(n, c.want) {
+			t.Errorf("%s on %s (oob %v): %q, want %q", c.t.Name, c.d.Name, c.d.OOB != nil, n, c.want)
+		}
+	}
+}
+
 func TestOmarchyMTest(t *testing.T) {
 	l := newLab(t, true)
 	var posts []string
