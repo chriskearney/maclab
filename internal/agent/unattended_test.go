@@ -117,7 +117,9 @@ func luksRoot(more map[string]string) map[string]string {
 }
 
 // An encrypted disk is refused only when booting it would wait for a
-// passphrase: a key file, from crypttab or the cmdline, unlocks it alone.
+// passphrase: a key file, from crypttab or the cmdline, unlocks it alone. For
+// the volume under / or /boot, only a key file the initramfs reads before /
+// is unlocked does.
 func TestUnattendedEncryptedRoot(t *testing.T) {
 	const luks = "/dev/mapper/root[/@]"
 	for _, c := range []struct {
@@ -145,9 +147,6 @@ func TestUnattendedEncryptedRoot(t *testing.T) {
 
 		// a key file unlocks / with no one there
 		{"LUKS root, key file in crypttab.initramfs", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /etc/cryptsetup-keys.d/root.key luks\n"}), luks, "", false, ""},
-		{"LUKS root, key file in crypttab", luksRoot(map[string]string{"etc/crypttab": "root UUID=0123 /root.key luks,discard\n"}), luks, "", false, ""},
-		{"LUKS root, cryptsetup-keys.d", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 none luks\n",
-			"etc/cryptsetup-keys.d/root.key": "k"}), luks, "", false, ""},
 		{"LUKS root, crypttab keys another volume", luksRoot(map[string]string{"etc/crypttab.initramfs": "data UUID=0456 /data.key luks\n"}), luks, "", false,
 			"/ is on dm-crypt: root unlocks with a passphrase"},
 		{"LUKS root, rd.luks.key for every volume", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=/etc/root.key root=/dev/mapper/root rw\n"}), luks, "", false, ""},
@@ -160,6 +159,53 @@ func TestUnattendedEncryptedRoot(t *testing.T) {
 		{"LVM on LUKS, key file", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n", "sys/class/block/dm-1/slaves/dm-0/": "",
 			"sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123-cryptlvm\n", "sys/class/block/dm-0/dm/name": "cryptlvm\n",
 			"etc/crypttab.initramfs": "cryptlvm UUID=0123 /crypto_keyfile.bin luks\n"}, "/dev/mapper/vg-root", "", false, ""},
+		{"LUKS root, crypttab.initramfs key file on another disk", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /root.key:UUID=4567 luks\n"}), luks, "", false, ""},
+		{"LUKS root, cryptkey on another disk", luksRoot(map[string]string{"proc/cmdline": "cryptdevice=UUID=0123:root cryptkey=UUID=4567:vfat:/root.key root=/dev/mapper/root\n"}), luks, "", false, ""},
+
+		// a key file the initramfs can't read before / is unlocked: one
+		// /etc/crypttab names or /etc/cryptsetup-keys.d holds (both on /, and
+		// the initramfs reads neither), or one on the encrypted root itself
+		{"LUKS root, key file only in /etc/crypttab", luksRoot(map[string]string{"etc/crypttab": "root UUID=0123 /root.key luks,discard\n"}), luks, "", false,
+			"/ is on dm-crypt: root unlocks with a passphrase; /etc/crypttab's key file counts only once / is unlocked"},
+		{"LUKS root, cryptsetup-keys.d", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 none luks\n",
+			"etc/cryptsetup-keys.d/root.key": "k"}), luks, "", false,
+			"/ is on dm-crypt: root unlocks with a passphrase; /etc/cryptsetup-keys.d/root.key counts only once / is unlocked"},
+		{"LUKS root, cryptsetup-keys.d, no crypttab.initramfs", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root root=/dev/mapper/root\n",
+			"etc/crypttab": "root UUID=0123 none luks\n", "etc/cryptsetup-keys.d/root.key": "k"}), luks, "", false, "/ is on dm-crypt: root unlocks with a passphrase"},
+		{"LUKS root, cmdline names it, key file only in /etc/crypttab", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root root=/dev/mapper/root\n",
+			"etc/crypttab": "root UUID=0123 /root.key luks\n"}), luks, "", false, "/ is on dm-crypt: root unlocks with a passphrase"},
+		{"rd.luks.uuid keyed only in /etc/crypttab", map[string]string{"proc/cmdline": "rd.luks.uuid=0123 root=UUID=4f4d5801 rw\n",
+			"etc/crypttab": "luks-0123 UUID=0123 /data.key luks\n"}, m1airRootSource, "", false, "rd.luks.uuid=0123 on the kernel cmdline unlocks luks-0123 with a passphrase"},
+		{"encrypt hook, key file only in crypttab.initramfs", luksRoot(map[string]string{"proc/cmdline": "cryptdevice=UUID=0123:root root=/dev/mapper/root\n",
+			"etc/crypttab.initramfs": "root UUID=0123 /root.key luks\n"}), luks, "", false, "cryptdevice=UUID=0123:root on the kernel cmdline unlocks root with a passphrase"},
+		{"LUKS root, rd.luks.key on the root itself", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=0123=/root.key:/dev/mapper/root root=/dev/mapper/root\n"}), luks, "", false,
+			"/ is on dm-crypt: root unlocks with a passphrase; rd.luks.key='s key file is on /dev/mapper/root, which can't be read before root is unlocked"},
+		{"LUKS root, rd.luks.key on root=", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=/root.key:UUID=5e1f root=UUID=5e1f\n"}), luks, "", false,
+			"rd.luks.key='s key file is on UUID=5e1f, which can't be read before root is unlocked"},
+		{"LUKS root, rd.luks.key on the root's UUID", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=/root.key:UUID=5e1f root=/dev/mapper/root\n"}), luks, "", false,
+			"rd.luks.key='s key file is on UUID=5e1f, which can't be read before root is unlocked"},
+		{"LVM on LUKS, rd.luks.key on the root LV", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n", "sys/class/block/dm-1/slaves/dm-0/": "",
+			"sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123-cryptlvm\n", "sys/class/block/dm-0/dm/name": "cryptlvm\n",
+			"proc/cmdline": "rd.luks.name=0123=cryptlvm rd.luks.key=/k:/dev/mapper/vg-root root=/dev/mapper/vg-root\n"}, "/dev/mapper/vg-root", "", false,
+			"/ is on dm-crypt: cryptlvm unlocks with a passphrase; rd.luks.key='s key file is on /dev/mapper/vg-root"},
+		{"LUKS root, cryptkey on the root itself", luksRoot(map[string]string{"proc/cmdline": "cryptdevice=UUID=0123:root cryptkey=/dev/mapper/root:ext4:/root.key root=/dev/mapper/root\n"}), luks, "", false,
+			"cryptkey='s key file is on /dev/mapper/root"},
+		{"LUKS root, crypttab.initramfs key file on the root itself", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /root.key:/dev/mapper/root luks\n"}), luks, "", false,
+			"/etc/crypttab.initramfs's key file is on /dev/mapper/root"},
+		{"keyed LUKS /boot under Limine", map[string]string{"dev/dm-2": "", "sys/class/block/dm-2/dm/uuid": "CRYPT-LUKS2-0789-boot\n",
+			"sys/class/block/dm-2/dm/name": "boot\n", "etc/crypttab.initramfs": "boot UUID=0789 /boot.key luks\n"}, m1airRootSource, "/dev/mapper/boot", false, ""},
+		{"LUKS /boot keyed only in /etc/crypttab", map[string]string{"dev/dm-2": "", "sys/class/block/dm-2/dm/uuid": "CRYPT-LUKS2-0789-boot\n",
+			"sys/class/block/dm-2/dm/name": "boot\n", "etc/crypttab": "boot UUID=0789 /etc/boot.key luks\n"}, m1airRootSource, "/dev/mapper/boot", false,
+			"/boot is on dm-crypt: boot unlocks with a passphrase"},
+
+		// other volumes: a key file on / counts, once / is unlocked
+		{"/etc/crypttab key file on /", map[string]string{"etc/crypttab": "home UUID=0456 /etc/home.key luks\n"}, m1airRootSource, "", false, ""},
+		{"/etc/crypttab key file on another disk", map[string]string{"etc/crypttab": "home UUID=0456 /home.key:UUID=4567 luks\n"}, m1airRootSource, "", false, ""},
+		{"/etc/crypttab, cryptsetup-keys.d", map[string]string{"etc/crypttab": "home UUID=0456 none luks\n", "etc/cryptsetup-keys.d/home.key": "k"}, m1airRootSource, "", false, ""},
+		{"LUKS root keyed in crypttab.initramfs, /etc/crypttab line for it", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /root.key luks\n",
+			"etc/crypttab": "root UUID=0123 none luks\n"}), luks, "", false, ""},
+		{"keyed LUKS root, home keyed by a file on /", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /root.key luks\n",
+			"etc/crypttab": "home UUID=0456 /etc/home.key:/dev/mapper/root luks\n"}), luks, "", false, ""},
 
 		// nofail: boot goes on without it, unless / or /boot needs it
 		{"nofail passphrase volume", map[string]string{"etc/crypttab": "home UUID=0123 none luks,nofail\n"}, m1airRootSource, "", false, ""},
@@ -180,25 +226,35 @@ func TestUnattendedEncryptedRoot(t *testing.T) {
 			files[p] = b
 		}
 		root := fakeRoot(t, files)
-		// udev's /dev/mapper links are relative
+		// udev's /dev/mapper and /dev/disk links are relative; dm-0's
+		// filesystem has UUID 5e1f
 		os.MkdirAll(filepath.Join(root, "dev/mapper"), 0o755)
 		os.Symlink("../dm-0", filepath.Join(root, "dev/mapper/root"))
 		os.Symlink("../dm-1", filepath.Join(root, "dev/mapper/vg-root"))
 		os.Symlink("../dm-2", filepath.Join(root, "dev/mapper/boot"))
-		var b bootloader = m1airLimine(root)
-		if c.grub {
-			b = &grubLayout{}
-		}
+		os.MkdirAll(filepath.Join(root, "dev/disk/by-uuid"), 0o755)
+		os.Symlink("../../dm-0", filepath.Join(root, "dev/disk/by-uuid/5e1f"))
 		boot := c.boot
 		if boot == "" {
 			boot = c.source
 		}
-		hard, _ := unattendedProblems(root, b, c.source, boot)
-		switch {
-		case c.want == "" && len(hard) > 0:
-			t.Errorf("%s: %q", c.name, hard)
-		case c.want != "" && (len(hard) != 1 || !strings.Contains(hard[0], c.want) || !strings.Contains(hard[0], "passphrase")):
-			t.Errorf("%s: %q, want %q", c.name, hard, c.want)
+		// a plain root says the same under GRUB as under Limine
+		grubs := []bool{c.grub}
+		if !c.grub && c.source == m1airRootSource && c.boot == "" {
+			grubs = append(grubs, true)
+		}
+		for _, grub := range grubs {
+			var b bootloader = m1airLimine(root)
+			if grub {
+				b = &grubLayout{}
+			}
+			hard, _ := unattendedProblems(root, b, c.source, boot)
+			switch {
+			case c.want == "" && len(hard) > 0:
+				t.Errorf("%s (GRUB %v): %q", c.name, grub, hard)
+			case c.want != "" && (len(hard) != 1 || !strings.Contains(hard[0], c.want) || !strings.Contains(hard[0], "passphrase")):
+				t.Errorf("%s (GRUB %v): %q, want %q", c.name, grub, hard, c.want)
+			}
 		}
 	}
 }

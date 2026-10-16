@@ -231,13 +231,17 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
 
 `setup` refuses, before changing anything, a Mac that can't reboot unattended:
 one whose disk needs a passphrase at boot, or, under Limine, one with Limine
-config enrollment on. An encrypted volume is fine when a key file unlocks it: one
-named in its `/etc/crypttab` or `/etc/crypttab.initramfs` line, a
-`/etc/cryptsetup-keys.d/<name>.key`, or `rd.luks.key=` or `cryptkey=` on the
-cmdline. What is refused is a volume that would wait for a passphrase and that
-boot can't do without: the one under `/` or `/boot`, one the cmdline unlocks
-(`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=`, `cryptdevice=`),
-or a crypttab entry without `nofail`. Under GRUB, a `/boot` on dm-crypt is
+config enrollment on. An encrypted volume is fine when a key file unlocks it. For the
+volume under `/` (or an encrypted `/boot`), that must be a key file the initramfs can read
+before `/` is unlocked: one its `/etc/crypttab.initramfs` line names, or `rd.luks.key=` or
+`cryptkey=` on the cmdline, and not on that volume itself (as in
+`rd.luks.key=<file>:<device>` or `cryptkey=<device>:...` naming it, or `root=`). Keys in
+`/etc/crypttab` and `/etc/cryptsetup-keys.d/<name>.key` live on `/` and the initramfs
+reads neither, so they count only for other volumes; the `encrypt` hook (`cryptdevice=`)
+reads no crypttab at all, only `cryptkey=`. What is refused is a volume that would wait
+for a passphrase and that boot can't do without: the one under `/` or `/boot`, one the
+cmdline unlocks (`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=`,
+`cryptdevice=`), or a crypttab entry without `nofail`. Under GRUB, a `/boot` on dm-crypt is
 refused whatever unlocks it later: GRUB asks for its passphrase itself. Limine then
 checks `limine.conf` against a checksum built into its EFI binary and stops
 booting once the lab edits `limine.conf`. Enrollment is on when
