@@ -227,10 +227,15 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
 - Installs and starts `lab-agent.service`.
 
 `setup` refuses, before changing anything, a Mac that can't reboot unattended:
-one whose disk needs a passphrase at boot (dm-crypt root, an `/etc/crypttab` or
-`/etc/crypttab.initramfs` entry unlocked at boot without a key file, or
-`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=` or `cryptdevice=` on
-the cmdline), or, under Limine, one with Limine config enrollment on. Limine then
+one whose disk needs a passphrase at boot, or, under Limine, one with Limine
+config enrollment on. An encrypted volume is fine when a key file unlocks it: one
+named in its `/etc/crypttab` or `/etc/crypttab.initramfs` line, a
+`/etc/cryptsetup-keys.d/<name>.key`, or `rd.luks.key=` or `cryptkey=` on the
+cmdline. What is refused is a volume that would wait for a passphrase and that
+boot can't do without: the one under `/` or `/boot`, one the cmdline unlocks
+(`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=`, `cryptdevice=`),
+or a crypttab entry without `nofail`. Under GRUB, a `/boot` on dm-crypt is
+refused whatever unlocks it later: GRUB asks for its passphrase itself. Limine then
 checks `limine.conf` against a checksum built into its EFI binary and stops
 booting once the lab edits `limine.conf`. Enrollment is on when
 `EFI/BOOT/BOOTAA64.EFI` or `EFI/limine/limine_aa64.efi` on the ESP holds a

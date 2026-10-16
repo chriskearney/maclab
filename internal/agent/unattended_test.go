@@ -50,9 +50,15 @@ func m1airLimine(root string) *limineLayout {
 
 func TestUnattendedClean(t *testing.T) {
 	root := fakeRoot(t, m1airRoot())
-	hard, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource)
+	hard, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource, m1airRootSource)
 	if len(hard)+len(warnings) > 0 {
 		t.Fatalf("hard %q warnings %q", hard, warnings)
+	}
+	// GRUB too, /boot on its own partition or not
+	for _, boot := range []string{m1airRootSource, "/dev/nvme0n1p5"} {
+		if hard, warnings := unattendedProblems(root, &grubLayout{}, m1airRootSource, boot); len(hard)+len(warnings) > 0 {
+			t.Fatalf("GRUB, /boot on %s: hard %q warnings %q", boot, hard, warnings)
+		}
 	}
 }
 
@@ -83,7 +89,7 @@ func TestUnattendedLimineEnroll(t *testing.T) {
 		files["boot/efi/EFI/limine/limine_aa64.efi"] = string(limineBinary(c.tools))
 		root := fakeRoot(t, files)
 		l := m1airLimine(root)
-		hard, _ := unattendedProblems(root, l, m1airRootSource)
+		hard, _ := unattendedProblems(root, l, m1airRootSource, m1airRootSource)
 		if len(c.want) == 0 && len(hard) > 0 || len(c.want) > 0 && len(hard) != 1 {
 			t.Errorf("%s: %q", c.name, hard)
 			continue
@@ -94,33 +100,80 @@ func TestUnattendedLimineEnroll(t *testing.T) {
 			}
 		}
 		// GRUB Macs don't use Limine's config.
-		if hard, _ := unattendedProblems(root, nil, m1airRootSource); len(hard) > 0 {
+		if hard, _ := unattendedProblems(root, &grubLayout{}, m1airRootSource, m1airRootSource); len(hard) > 0 {
 			t.Errorf("%s, GRUB: %q", c.name, hard)
 		}
 	}
 }
 
+// luksRoot is / on LUKS, opened as /dev/mapper/root.
+func luksRoot(more map[string]string) map[string]string {
+	files := map[string]string{"dev/dm-0": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123456789abcdef-root\n",
+		"sys/class/block/dm-0/dm/name": "root\n", "sys/class/block/dm-0/slaves/nvme0n1p6/": ""}
+	for p, b := range more {
+		files[p] = b
+	}
+	return files
+}
+
+// An encrypted disk is refused only when booting it would wait for a
+// passphrase: a key file, from crypttab or the cmdline, unlocks it alone.
 func TestUnattendedEncryptedRoot(t *testing.T) {
+	const luks = "/dev/mapper/root[/@]"
 	for _, c := range []struct {
 		name   string
 		files  map[string]string
 		source string
+		boot   string // /boot's source; the same as /'s if empty
+		grub   bool
 		want   string
 	}{
-		{"LUKS root", map[string]string{"dev/dm-0": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123456789abcdef-root\n"}, "/dev/mapper/root[/@]", "/ is on dm-crypt"},
+		{"LUKS root", map[string]string{"dev/dm-0": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123456789abcdef-root\n"}, "/dev/mapper/root[/@]", "", false, "/ is on dm-crypt"},
 		{"LVM on LUKS", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n",
-			"sys/class/block/dm-1/slaves/dm-0/": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123-cryptlvm\n"}, "/dev/mapper/vg-root", "/ is on dm-crypt"},
-		{"plain LVM", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n", "sys/class/block/dm-1/slaves/nvme0n1p6/": ""}, "/dev/mapper/vg-root", ""},
+			"sys/class/block/dm-1/slaves/dm-0/": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123-cryptlvm\n"}, "/dev/mapper/vg-root", "", false, "/ is on dm-crypt"},
+		{"plain LVM", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n", "sys/class/block/dm-1/slaves/nvme0n1p6/": ""}, "/dev/mapper/vg-root", "", false, ""},
 		{"dm-verity root", map[string]string{"dev/dm-0": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-VERITY-0123456789abcdef-root\n",
-			"sys/class/block/dm-0/slaves/nvme0n1p6/": ""}, "/dev/mapper/root", ""},
+			"sys/class/block/dm-0/slaves/nvme0n1p6/": ""}, "/dev/mapper/root", "", false, ""},
 		{"dm-integrity under LVM", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n",
-			"sys/class/block/dm-1/slaves/dm-0/": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-INTEGRITY-pv\n"}, "/dev/mapper/vg-root", ""},
-		{"rd.luks cmdline", map[string]string{"proc/cmdline": "rd.luks.name=0123=root root=/dev/mapper/root rw\n"}, m1airRootSource, "rd.luks.name="},
-		{"encrypt hook cmdline", map[string]string{"proc/cmdline": "cryptdevice=UUID=0123:root root=/dev/mapper/root rw\n"}, m1airRootSource, "cryptdevice="},
-		{"crypttab", map[string]string{"etc/crypttab": "# comment\nhome UUID=0123 none luks\n"}, m1airRootSource, "unlocks home"},
-		{"crypttab.initramfs", map[string]string{"etc/crypttab.initramfs": "root UUID=0123\n"}, m1airRootSource, "unlocks root"},
-		{"swap with a random key", map[string]string{"etc/crypttab": "swap /dev/nvme0n1p7 /dev/urandom swap,cipher=aes-xts-plain64\n"}, m1airRootSource, ""},
-		{"crypttab noauto", map[string]string{"etc/crypttab": "backup UUID=0123 none luks,noauto\n"}, m1airRootSource, ""},
+			"sys/class/block/dm-1/slaves/dm-0/": "", "sys/class/block/dm-0/dm/uuid": "CRYPT-INTEGRITY-pv\n"}, "/dev/mapper/vg-root", "", false, ""},
+		{"rd.luks cmdline", map[string]string{"proc/cmdline": "rd.luks.name=0123=root root=/dev/mapper/root rw\n"}, m1airRootSource, "", false, "rd.luks.name="},
+		{"encrypt hook cmdline", map[string]string{"proc/cmdline": "cryptdevice=UUID=0123:root root=/dev/mapper/root rw\n"}, m1airRootSource, "", false, "cryptdevice="},
+		{"crypttab", map[string]string{"etc/crypttab": "# comment\nhome UUID=0123 none luks\n"}, m1airRootSource, "", false, "unlocks home"},
+		{"crypttab.initramfs", map[string]string{"etc/crypttab.initramfs": "root UUID=0123\n"}, m1airRootSource, "", false, "unlocks root"},
+		{"swap with a random key", map[string]string{"etc/crypttab": "swap /dev/nvme0n1p7 /dev/urandom swap,cipher=aes-xts-plain64\n"}, m1airRootSource, "", false, ""},
+		{"crypttab noauto", map[string]string{"etc/crypttab": "backup UUID=0123 none luks,noauto\n"}, m1airRootSource, "", false, ""},
+
+		// a key file unlocks / with no one there
+		{"LUKS root, key file in crypttab.initramfs", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /etc/cryptsetup-keys.d/root.key luks\n"}), luks, "", false, ""},
+		{"LUKS root, key file in crypttab", luksRoot(map[string]string{"etc/crypttab": "root UUID=0123 /root.key luks,discard\n"}), luks, "", false, ""},
+		{"LUKS root, cryptsetup-keys.d", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 none luks\n",
+			"etc/cryptsetup-keys.d/root.key": "k"}), luks, "", false, ""},
+		{"LUKS root, crypttab keys another volume", luksRoot(map[string]string{"etc/crypttab.initramfs": "data UUID=0456 /data.key luks\n"}), luks, "", false,
+			"/ is on dm-crypt: root unlocks with a passphrase"},
+		{"LUKS root, rd.luks.key for every volume", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=/etc/root.key root=/dev/mapper/root rw\n"}), luks, "", false, ""},
+		{"LUKS root, rd.luks.key for its UUID", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=0123=/root.key:UUID=4567 root=/dev/mapper/root\n"}), luks, "", false, ""},
+		{"LUKS root, rd.luks.key for another UUID", luksRoot(map[string]string{"proc/cmdline": "rd.luks.name=0123=root rd.luks.key=0456=/data.key root=/dev/mapper/root\n"}), luks, "", false,
+			"/ is on dm-crypt: root unlocks with a passphrase"},
+		{"rd.luks.uuid keyed in crypttab.initramfs", map[string]string{"proc/cmdline": "rd.luks.uuid=luks-0123 root=/dev/mapper/root\n",
+			"etc/crypttab.initramfs": "root UUID=0123 /root.key\n"}, m1airRootSource, "", false, ""},
+		{"LUKS root, encrypt hook with cryptkey", luksRoot(map[string]string{"proc/cmdline": "cryptdevice=UUID=0123:root cryptkey=rootfs:/root.key root=/dev/mapper/root\n"}), luks, "", false, ""},
+		{"LVM on LUKS, key file", map[string]string{"dev/dm-1": "", "sys/class/block/dm-1/dm/uuid": "LVM-abc\n", "sys/class/block/dm-1/slaves/dm-0/": "",
+			"sys/class/block/dm-0/dm/uuid": "CRYPT-LUKS2-0123-cryptlvm\n", "sys/class/block/dm-0/dm/name": "cryptlvm\n",
+			"etc/crypttab.initramfs": "cryptlvm UUID=0123 /crypto_keyfile.bin luks\n"}, "/dev/mapper/vg-root", "", false, ""},
+
+		// nofail: boot goes on without it, unless / or /boot needs it
+		{"nofail passphrase volume", map[string]string{"etc/crypttab": "home UUID=0123 none luks,nofail\n"}, m1airRootSource, "", false, ""},
+		{"nofail passphrase volume, initramfs", map[string]string{"etc/crypttab.initramfs": "data UUID=0123 - nofail\n"}, m1airRootSource, "", false, ""},
+		{"nofail passphrase volume holding /", luksRoot(map[string]string{"etc/crypttab": "root UUID=0123 none luks,nofail\n"}), luks, "", false,
+			"/ is on dm-crypt: root unlocks with a passphrase"},
+		{"nofail passphrase volume holding /boot", map[string]string{"dev/dm-2": "", "sys/class/block/dm-2/dm/uuid": "CRYPT-LUKS2-0789-boot\n",
+			"sys/class/block/dm-2/dm/name": "boot\n", "etc/crypttab": "boot UUID=0789 none luks,nofail\n"}, m1airRootSource, "/dev/mapper/boot", false,
+			"/boot is on dm-crypt: boot unlocks with a passphrase"},
+
+		// GRUB unlocks /boot itself, key file or not
+		{"GRUB, /boot on keyed LUKS", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /root.key luks\n"}), luks, "", true,
+			"GRUB reads the kernels from /boot, which is on dm-crypt"},
+		{"GRUB, keyed LUKS root, plain /boot", luksRoot(map[string]string{"etc/crypttab.initramfs": "root UUID=0123 /root.key luks\n"}), luks, "/dev/nvme0n1p5", true, ""},
 	} {
 		files := m1airRoot()
 		for p, b := range c.files {
@@ -131,7 +184,16 @@ func TestUnattendedEncryptedRoot(t *testing.T) {
 		os.MkdirAll(filepath.Join(root, "dev/mapper"), 0o755)
 		os.Symlink("../dm-0", filepath.Join(root, "dev/mapper/root"))
 		os.Symlink("../dm-1", filepath.Join(root, "dev/mapper/vg-root"))
-		hard, _ := unattendedProblems(root, m1airLimine(root), c.source)
+		os.Symlink("../dm-2", filepath.Join(root, "dev/mapper/boot"))
+		var b bootloader = m1airLimine(root)
+		if c.grub {
+			b = &grubLayout{}
+		}
+		boot := c.boot
+		if boot == "" {
+			boot = c.source
+		}
+		hard, _ := unattendedProblems(root, b, c.source, boot)
 		switch {
 		case c.want == "" && len(hard) > 0:
 			t.Errorf("%s: %q", c.name, hard)
@@ -174,7 +236,7 @@ func TestUnattendedJournal(t *testing.T) {
 			files[p] = b
 		}
 		root := fakeRoot(t, files)
-		hard, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource)
+		hard, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource, m1airRootSource)
 		if len(hard) > 0 {
 			t.Errorf("%s: hard %q", c.name, hard)
 		}
@@ -206,7 +268,7 @@ func TestPersistJournal(t *testing.T) {
 	if move, err := persistJournal(root, false); !move || err != nil {
 		t.Fatalf("move %v, %v", move, err)
 	}
-	if _, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource); len(warnings) > 0 {
+	if _, warnings := unattendedProblems(root, m1airLimine(root), m1airRootSource, m1airRootSource); len(warnings) > 0 {
 		t.Fatalf("after setup: %q", warnings)
 	}
 	conf, _ := os.ReadFile(filepath.Join(root, journalCfg))
