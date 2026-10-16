@@ -41,6 +41,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab crashtest <device>              deliberately panic the Mac and check it recovers by itself
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
+  lab gate <kernel> [--families m1,m2] [--evidence file]
+                                      did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
@@ -422,6 +424,33 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		return follow(ctx, c, pos[0])
 
+	case "gate":
+		fams := fs.String("families", "", "chip families that must pass, comma-separated (default all: m1,m1-pro,m2,m2-pro,m3,m3-pro)")
+		evidence := fs.String("evidence", "", "write the report to this file as a JSON evidence record")
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--evidence file]"); err != nil {
+			return err
+		}
+		var list []string
+		if *fams != "" {
+			list = strings.Split(*fams, ",")
+		}
+		rep, err := c.Gate(ctx, pos[0], list)
+		if err != nil {
+			return err
+		}
+		if *evidence != "" {
+			b, _ := json.MarshalIndent(rep, "", "  ")
+			if err := os.WriteFile(*evidence, append(b, '\n'), 0o644); err != nil {
+				return err
+			}
+		}
+		printGate(rep)
+		if rep.Result != api.GatePass {
+			os.Exit(3)
+		}
+		return nil
+
 	case "publish":
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab publish <job>"); err != nil {
@@ -661,6 +690,45 @@ func printJob(j *api.Job, events bool) {
 			fmt.Printf("    %s  %s\n", e.Time.Format(time.TimeOnly), e.Msg)
 		}
 	}
+}
+
+func printGate(r *api.GateReport) {
+	k := r.Kernel
+	fmt.Printf("kernel %s", k.SHA256[:12])
+	if k.Release != "" || k.Build != "" {
+		fmt.Printf(" (%s)", strings.Join(strings.Fields(k.Release+" "+k.Build), ", "))
+	}
+	fmt.Println()
+	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(w, "FAMILY\tCHIP\tRESULT\tDEVICE\tJOB\tOUTCOME")
+	var unstaged []string
+	for _, f := range r.Families {
+		res := f.Result
+		if res == api.GateStageFailed {
+			res = "couldn't stage"
+		}
+		if len(f.Runs) == 0 {
+			fmt.Fprintf(w, "%s\t%s\t%s\t\t\t\n", f.Family, f.Name, res)
+		}
+		for i, run := range f.Runs {
+			if run.Result == api.GateStageFailed {
+				unstaged = append(unstaged, fmt.Sprintf("couldn't stage on %s (%s): %s; run it again once that's fixed", run.Device, run.Job, run.Reason))
+			}
+			fam, name, res := f.Family, f.Name, res
+			if i > 0 {
+				fam, name, res = "", "", ""
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fam, name, res, run.Device, run.Job, run.Outcome)
+		}
+	}
+	w.Flush()
+	for _, l := range unstaged {
+		fmt.Println(l)
+	}
+	if len(r.Unclassified) > 0 {
+		fmt.Printf("not counted (no supported chip family known): %s\n", strings.Join(r.Unclassified, ", "))
+	}
+	fmt.Println(r.Summary)
 }
 
 func verdict(t api.TestResult) string {

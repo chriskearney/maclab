@@ -208,6 +208,13 @@ func (c *Client) File(ctx context.Context, id, name string) ([]byte, error) {
 	return []byte(out), err
 }
 
+// Gate reports whether a kernel (build id or sha256 prefix) passed on every
+// required chip family; no families means all of them.
+func (c *Client) Gate(ctx context.Context, kernel string, families []string) (*api.GateReport, error) {
+	var out api.GateReport
+	return &out, c.do(ctx, "GET", "/api/gate/"+url.PathEscape(kernel)+"?families="+url.QueryEscape(strings.Join(families, ",")), nil, &out)
+}
+
 // ConsoleArm puts the Mac's debug UART into serial mode.
 func (c *Client) ConsoleArm(ctx context.Context, name string) error {
 	return c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/console/arm", nil, nil)

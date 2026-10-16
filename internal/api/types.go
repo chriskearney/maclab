@@ -83,8 +83,9 @@ func (d *Device) Tier() int {
 // Facts are reported by the agent at startup and refreshed by preflight.
 type Facts struct {
 	Hostname      string   `json:"hostname"`
-	Machine       string   `json:"machine"`  // uname -m
-	DTModel       string   `json:"dt_model"` // /proc/device-tree/model
+	Machine       string   `json:"machine"`              // uname -m
+	DTModel       string   `json:"dt_model"`             // /proc/device-tree/model
+	Compatible    []string `json:"compatible,omitempty"` // /proc/device-tree/compatible: board, then SoC
 	Bootloader    string   `json:"bootloader"`
 	Initramfs     string   `json:"initramfs"`
 	Watchdog      bool     `json:"watchdog"`
@@ -562,4 +563,60 @@ type ExecResult struct {
 	Stderr   string  `json:"stderr"`
 	Seconds  float64 `json:"seconds"`
 	Via      string  `json:"via"` // agent or serial
+}
+
+// ---- release gate: a kernel's results across the supported chip families ----
+
+// Gate results: of a run, a chip family, and the whole gate.
+const (
+	GatePass     = "pass"
+	GateFail     = "fail"
+	GateUntested = "untested"
+	// GateStageFailed: the kernel never booted because staging it failed on
+	// the Mac (e.g. a full boot partition). It says nothing about the kernel,
+	// but the gate stays shut until a run gives a result.
+	GateStageFailed = "stage_failed"
+)
+
+type GateKernel struct {
+	SHA256  string `json:"sha256"`
+	Build   string `json:"build,omitempty"`   // the build that produced it
+	Release string `json:"release,omitempty"` // the kernel release it boots as
+}
+
+type GateTest struct {
+	Name   string `json:"name"`
+	Result string `json:"result"` // pass or fail
+}
+
+// GateRun is the job that decides one Mac's result on the kernel.
+type GateRun struct {
+	Device   string     `json:"device"`
+	Job      string     `json:"job"`
+	Outcome  string     `json:"outcome"`
+	Result   string     `json:"result"`           // pass, fail or stage_failed
+	Reason   string     `json:"reason,omitempty"` // stage_failed: the job's summary
+	Finished time.Time  `json:"finished"`
+	Tests    []GateTest `json:"tests,omitempty"`
+}
+
+type GateFamily struct {
+	Family string    `json:"family"`         // m1, m1-pro, ...
+	Name   string    `json:"name"`           // M1 Pro/Max/Ultra
+	Result string    `json:"result"`         // pass, fail, stage_failed or untested
+	Runs   []GateRun `json:"runs,omitempty"` // the deciding run first
+}
+
+// GateReport says whether a kernel passed on real hardware for every required
+// chip family. It is also the evidence record `lab gate --evidence` writes.
+type GateReport struct {
+	Kernel       GateKernel   `json:"kernel"`
+	Result       string       `json:"result"` // pass (the gate is open) or fail
+	Summary      string       `json:"summary"`
+	Required     []string     `json:"required"`
+	Families     []GateFamily `json:"families"`
+	Untested     []string     `json:"untested,omitempty"`
+	Unclassified []string     `json:"unclassified,omitempty"` // Macs of no supported family, or too old an agent to say
+	Labd         string       `json:"labd"`
+	Generated    time.Time    `json:"generated"`
 }

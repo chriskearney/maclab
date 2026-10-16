@@ -179,6 +179,16 @@ func serveMCP(ctx context.Context) error {
 			return text(b.String()), nil, nil
 		})
 
+	type gateArg struct {
+		Kernel   string   `json:"kernel" jsonschema:"the candidate kernel: a build id, or its artifact sha256 or a prefix of it"`
+		Families []string `json:"families,omitempty" jsonschema:"chip families that must pass (default all: m1, m1-pro, m2, m2-pro, m3, m3-pro)"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_gate", Description: "Release gate: whether a kernel passed on real hardware for every required chip family, from each Mac's latest pass or failure on it (a Mac that couldn't stage the kernel counts only when it has neither). A family fails if any of its Macs' latest runs failed, passes if one passed and none failed, is stage_failed if its only results are Macs that couldn't stage the kernel (each such run gives the job's reason; run it again once that's fixed), and is untested if none has a result; result is pass only when every required family passed."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, a gateArg) (*mcp.CallToolResult, any, error) {
+			r, err := c.Gate(ctx, a.Kernel, a.Families)
+			return text(r), nil, err
+		})
+
 	type logArg struct {
 		JobID     string `json:"job_id"`
 		File      string `json:"file" jsonschema:"a name from the job's logs or test files, e.g. serial.log, boot0/kernel.txt, prevboot/journal.txt, test-boot-health/log.txt"`

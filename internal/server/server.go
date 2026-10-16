@@ -364,6 +364,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
 	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
 	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.admin(s.hJobFile))
+	m.HandleFunc("GET /api/gate/{kernel}", s.admin(s.hGate))
 	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))

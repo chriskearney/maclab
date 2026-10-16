@@ -291,6 +291,44 @@ The 30+ GB work tree is deleted after every build. The volume keeps downloaded s
 six) and the Rust toolchains. `lab-builder` takes package builds only when it has
 `--pkg-image` (the default, `maclab-pkgbuild:1`). An older builder only ever gets kernel builds.
 
+## Release gate
+
+`lab gate` answers whether a kernel has passed on real hardware for every supported chip family,
+from the jobs already run. It covers the kernel only: lab boots use each Mac's installed m1n1,
+U-Boot and device trees (see "Kernel artifacts"), so it says nothing about a boot-chain change.
+
+```sh
+lab gate <build-id | kernel sha256 prefix>                    # all six families must pass
+lab gate b1015-120000-ab12 --families m1,m2 --evidence gate.json
+```
+
+Families come from the SoC compatible in each Mac's device tree (or, from an agent older than that
+fact, its device-tree model): `m1` (t8103), `m1-pro` (M1 Pro/Max/Ultra: t6000-t6002), `m2` (t8112),
+`m2-pro` (M2 Pro/Max/Ultra: t6020-t6022), `m3` (t8122) and `m3-pro` (M3 Pro/Max: t6030, t6031,
+t6034). M3 Ultra and M4 and later are not covered: those Macs are listed as not counted.
+
+For each Mac, only its latest pass or failure on that kernel counts. Canceled and `infra_error`
+jobs say nothing about the kernel and are skipped, and so are crash tests, which crash it on
+purpose. `stage_failed` means the kernel never booted (the Mac couldn't stage it, e.g. its boot
+partition was full): it counts only for a Mac with no pass or failure on the kernel, so a run that
+couldn't stage never hides an earlier result. Every other outcome but `pass` is a
+failure. A family's result is decided in this order:
+
+1. **fail** when any of its Macs' latest runs failed;
+2. **pass** when at least one passed;
+3. **couldn't stage** (`stage_failed`) when its only results are Macs that couldn't stage the
+   kernel: the gate stays shut, and the report gives the job's reason to fix before running it again;
+4. **untested** when none of its Macs has a result, including when it has no Mac in the lab.
+
+A staging problem on one Mac doesn't hide a pass or a failure on another. The gate is open only
+when every required family passed. `lab gate` exits 3 when it is shut.
+
+`--evidence` writes the report as one JSON evidence record:
+the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family its result and
+runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
+couldn't stage), plus the labd host. The
+API is `GET /api/gate/{kernel}?families=m1,m2`; agents use `lab_gate`.
+
 ## Kernel artifacts
 
 A tarball in the Arch package layout: exactly one
@@ -318,7 +356,7 @@ claude mcp add maclab -- lab mcp
 Tools: `lab_devices`, `lab_device`, `lab_run`, `lab_wait`, `lab_job`, `lab_jobs`,
 `lab_log`, `lab_screenshot`, `lab_baseline`, `lab_crashtest`, `lab_lease`,
 `lab_release`, `lab_reset`, `lab_serial`, `lab_exec`, `lab_cancel`, `lab_build`,
-`lab_build_status`, `lab_package` and `lab_publish`. A device in `needs_hands` is waiting for a
+`lab_build_status`, `lab_package`, `lab_publish` and `lab_gate`. A device in `needs_hands` is waiting for a
 person. Tell the user; don't retry.
 
 A lab is worth describing to its agents once: which Macs you have, which one has
