@@ -192,12 +192,13 @@ func serveMCP(ctx context.Context) error {
 		})
 
 	type gateArg struct {
-		Kernel   string   `json:"kernel" jsonschema:"the candidate kernel: a build id, or its artifact sha256 or a prefix of it"`
-		Families []string `json:"families,omitempty" jsonschema:"chip families that must pass (default all: m1, m1-pro, m2, m2-pro, m3, m3-pro)"`
+		Kernel     string   `json:"kernel" jsonschema:"the candidate kernel: a build id, or its artifact sha256 or a prefix of it"`
+		Families   []string `json:"families,omitempty" jsonschema:"chip families that must pass (default all: m1, m1-pro, m2, m2-pro, m3, m3-pro)"`
+		Volunteers bool     `json:"volunteers,omitempty" jsonschema:"count volunteers' Macs (enrolled with ./volunteer, agents the lab doesn't control) too; by default their runs are listed under not_counted"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_gate", Description: "Release gate: whether a kernel passed on real hardware for every required chip family, from each Mac's latest pass or failure on it (a Mac that couldn't stage the kernel counts only when it has neither). A family fails if any of its Macs' latest runs failed, passes if one passed and none failed, is stage_failed if its only results are Macs that couldn't stage the kernel (each such run gives the job's reason; run it again once that's fixed), and is untested if none has a result; result is pass only when every required family passed."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_gate", Description: "Release gate: whether a kernel passed on real hardware for every required chip family, from each Mac's plain runs on it: the known-good cmdline, at least the tests every job on that Mac runs, no omt_allow. A run with a changed cmdline counts neither way; one that tested less counts only if it failed. Canceled, infra_error and crash-test runs, and tests_failed runs whose failed tests couldn't start (exit 126/127), say nothing. A Mac fails if it failed, passes if it passed, and is flaky (not a pass) if it did both, so a retry's pass doesn't hide a failure; a Mac that couldn't stage the kernel counts only when it has neither. A family fails if any Mac failed, is flaky if any is flaky, passes if one passed, is stage_failed if its only results are Macs that couldn't stage the kernel (each such run gives the job's reason; run it again once that's fixed), and is untested if none has a result. Runs that don't count are in each family's not_counted with the reason; volunteers' Macs are there too unless volunteers is set. result is pass only when every required family passed."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a gateArg) (*mcp.CallToolResult, any, error) {
-			r, err := c.Gate(ctx, a.Kernel, a.Families)
+			r, err := c.Gate(ctx, a.Kernel, a.Families, a.Volunteers)
 			return text(r), nil, err
 		})
 

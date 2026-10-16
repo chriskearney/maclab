@@ -397,6 +397,7 @@ U-Boot and device trees (see "Kernel artifacts"), so it says nothing about a boo
 ```sh
 lab gate <build-id | kernel sha256 prefix>                    # all six families must pass
 lab gate b1015-120000-ab12 --families m1,m2 --evidence gate.json
+lab gate b1015-120000-ab12 --volunteers                       # count volunteers' Macs too
 ```
 
 Families come from the SoC compatible in each Mac's device tree (or, from an agent older than that
@@ -404,27 +405,44 @@ fact, its device-tree model): `m1` (t8103), `m1-pro` (M1 Pro/Max/Ultra: t6000-t6
 `m2-pro` (M2 Pro/Max/Ultra: t6020-t6022), `m3` (t8122) and `m3-pro` (M3 Pro/Max: t6030, t6031,
 t6034). M3 Ultra and M4 and later are not covered: those Macs are listed as not counted.
 
-For each Mac, only its latest pass or failure on that kernel counts. Canceled and `infra_error`
-jobs say nothing about the kernel and are skipped, and so are crash tests, which crash it on
-purpose. `stage_failed` means the kernel never booted (the Mac couldn't stage it, e.g. its boot
-partition was full): it counts only for a Mac with no pass or failure on the kernel, so a run that
-couldn't stage never hides an earlier result. Every other outcome but `pass` is a
-failure. A family's result is decided in this order:
+Only plain runs count: ones that boot the Mac's known-good cmdline (no `--cmdline`,
+`--cmdline-strip` or `--cmdline-base` other than `known-good`; `--verbose-boot` is fine), run at
+least the tests every job on that Mac runs (`boot-health`, and `omarchy-m-test` where labd runs it),
+and have no `--omt-allow`. A run with a changed cmdline boots something a release doesn't, so it
+counts neither way. A run that tested less counts when it failed, since it failed even so, but not
+when it passed. Canceled, `infra_error` and `build_failed` jobs say nothing about the kernel and are
+skipped, and so are crash tests, which crash it on purpose. So is a `tests_failed` job whose every
+failed test couldn't start at all (its shell exited 126 or 127, as `omarchy-m-test` does when the
+desktop user can't read the job's directory) and whose kernel logged nothing fatal; other trouble
+running a test (a script that didn't download, no desktop session) looks like the kernel's in the
+job's record, so it still counts as a failure. Every other outcome but `pass` is a failure.
 
-1. **fail** when any of its Macs' latest runs failed;
-2. **pass** when at least one passed;
-3. **couldn't stage** (`stage_failed`) when its only results are Macs that couldn't stage the
+Each Mac fails when it failed on the kernel and never passed, passes when it passed and never
+failed, and is **flaky** when it did both, in either order: a `lab retry` that passes doesn't hide
+the failure before it, and the report lists both jobs. `stage_failed` means the kernel never booted
+(the Mac couldn't stage it, e.g. its boot partition was full): it counts only for a Mac with no pass
+or failure on the kernel, so a run that couldn't stage never hides another result. A family's
+result is decided in this order:
+
+1. **fail** when any of its Macs failed;
+2. **flaky** when any of its Macs both passed and failed;
+3. **pass** when at least one passed;
+4. **couldn't stage** (`stage_failed`) when its only results are Macs that couldn't stage the
    kernel: the gate stays shut, and the report gives the job's reason to fix before running it again;
-4. **untested** when none of its Macs has a result, including when it has no Mac in the lab.
+5. **untested** when none of its Macs has a result, including when it has no Mac in the lab.
 
-A staging problem on one Mac doesn't hide a pass or a failure on another. The gate is open only
-when every required family passed. `lab gate` exits 3 when it is shut.
+Volunteers' Macs (enrolled with `./volunteer`, see [Volunteer a Mac](#volunteer-a-mac)) run agents
+the lab doesn't control, so they count only with `--volunteers`; otherwise the report lists them
+and their runs apart. A staging problem on one Mac doesn't hide a pass or a failure on another.
+The gate is open only when every required family passed. `lab gate` exits 3 when it is shut.
 
 `--evidence` writes the report as one JSON evidence record:
 the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family its result and
 runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
-couldn't stage), plus the labd host. The
-API is `GET /api/gate/{kernel}?families=m1,m2`; agents use `lab_gate`.
+couldn't stage, or a flaky Mac's other result), and `not_counted`, the runs that decide nothing,
+each with its reason (`volunteer` marks a volunteer's Mac). Then `volunteers` names the volunteers'
+Macs, `volunteers_counted` says whether they counted, and the labd host. The API is
+`GET /api/gate/{kernel}?families=m1,m2&volunteers=1`; agents use `lab_gate`.
 
 ## Kernel artifacts
 
@@ -528,7 +546,8 @@ Then they share the labd machine with each volunteer's Tailscale account (admin
 console, Machines, Share), or invite them to the tailnet. Any person labd lets
 look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
 name made from `<user>-<hostname>` and the volunteer's login as its label, and
-is marked a volunteer's. Tagged tailnet devices, lab Macs under `tag:maclab`
+is marked a volunteer's: `lab gate` leaves its results out unless asked (see
+[Release gate](#release-gate)). Tagged tailnet devices, lab Macs under `tag:maclab`
 among them, are machines and get no token. Each person holds at most one unused
 token: asking again replaces it, so running `./volunteer` again after a setup
 that stopped half way just works. At most 20 people hold one at once; the next

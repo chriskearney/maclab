@@ -220,10 +220,15 @@ func (c *Client) File(ctx context.Context, id, name string) ([]byte, error) {
 }
 
 // Gate reports whether a kernel (build id or sha256 prefix) passed on every
-// required chip family; no families means all of them.
-func (c *Client) Gate(ctx context.Context, kernel string, families []string) (*api.GateReport, error) {
+// required chip family; no families means all of them. volunteers counts
+// volunteers' Macs too.
+func (c *Client) Gate(ctx context.Context, kernel string, families []string, volunteers bool) (*api.GateReport, error) {
 	var out api.GateReport
-	return &out, c.do(ctx, "GET", "/api/gate/"+url.PathEscape(kernel)+"?families="+url.QueryEscape(strings.Join(families, ",")), nil, &out)
+	q := "?families=" + url.QueryEscape(strings.Join(families, ","))
+	if volunteers {
+		q += "&volunteers=1"
+	}
+	return &out, c.do(ctx, "GET", "/api/gate/"+url.PathEscape(kernel)+q, nil, &out)
 }
 
 // ConsoleArm puts the Mac's debug UART into serial mode.

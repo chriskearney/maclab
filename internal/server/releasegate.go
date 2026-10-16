@@ -6,10 +6,12 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/detect"
 )
 
 // Chip families a release must pass on, by SoC compatible in the device tree.
@@ -61,89 +63,235 @@ func family(f api.Facts) string {
 }
 
 // gateResult is what a finished job says about its kernel: pass, fail,
-// stage_failed (it never booted), or "" for nothing (canceled, or the lab
-// itself failed).
+// stage_failed (it never booted), or "" for nothing: canceled, the lab
+// itself failed, or no kernel was built to boot. Every other outcome
+// (panicked, hung, crashed_or_hung, boot_failed, booted_unhealthy,
+// tests_failed) is the kernel's failure, but see runnerFailures.
 func gateResult(outcome string) string {
 	switch outcome {
 	case api.OutcomePass:
 		return api.GatePass
 	case api.OutcomeStageFailed:
 		return api.GateStageFailed
-	case api.OutcomeCanceled, api.OutcomeInfra, "":
+	case api.OutcomeCanceled, api.OutcomeInfra, api.OutcomeBuildFailed, "":
 		return ""
 	}
 	return api.GateFail
 }
 
-// gatePrecedence orders run results by how much they decide a family: a
-// failure on any Mac decides it, then a pass; a Mac that couldn't stage the
-// kernel decides only when no other Mac has a result.
-var gatePrecedence = []string{api.GateFail, api.GatePass, api.GateStageFailed}
+// runnerFailures says why a tests_failed job says nothing about its kernel:
+// every test that failed couldn't run at all, its shell exiting 126 or 127
+// (not executable, not found), as omarchy-m-test does when the desktop user
+// can't reach the job's directory, and the kernel logged nothing fatal. It
+// is "" when any failure may be the kernel's. Other trouble running a test
+// (a script that didn't download, no desktop session, a tool that didn't
+// install) is recorded just like a kernel's failure, so it still counts.
+func runnerFailures(j *api.Job) string {
+	if j.Outcome != api.OutcomeTestsFailed {
+		return ""
+	}
+	for _, e := range j.Result.KernelEvents {
+		if detect.Fatal(e.Kind) {
+			return ""
+		}
+	}
+	var why []string
+	for _, t := range j.Result.Tests {
+		switch {
+		case t.Passed:
+		case !t.TimedOut && (t.ExitCode == 126 || t.ExitCode == 127):
+			why = append(why, fmt.Sprintf("test %s couldn't run (exit %d)", t.Name, t.ExitCode))
+		default:
+			return ""
+		}
+	}
+	return strings.Join(why, ", ")
+}
 
-// rollUp judges a kernel from each Mac's latest pass or failure on it (jobs
-// come newest first). A Mac that couldn't stage the kernel says nothing about
-// it, so that run counts only when the Mac has no pass or failure on the
-// kernel; crash tests boot the kernel only to crash it, so they don't count at
-// all. A family fails when any of its Macs' latest runs failed,
-// passes when at least one passed and none failed, is stage_failed when its
-// only results are Macs that couldn't stage the kernel, and is untested when
-// none of its Macs has a result. The gate opens only when every required
-// family passed.
-func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []string) api.GateReport {
-	rep := api.GateReport{Kernel: k, Required: required}
-	fam := map[string]string{}
+// customCmdline says how a job changed the Mac's known-good cmdline, or "".
+// A verbose boot is no change here: a Mac with a serial console always
+// boots verbose.
+func customCmdline(s api.JobSpec) string {
+	var why []string
+	if s.Cmdline != "" {
+		why = append(why, fmt.Sprintf("--cmdline %q", s.Cmdline))
+	}
+	if s.CmdlineBase != "" && s.CmdlineBase != "known-good" {
+		why = append(why, fmt.Sprintf("--cmdline-base %q", s.CmdlineBase))
+	}
+	if len(s.CmdlineStrip) > 0 {
+		why = append(why, fmt.Sprintf("--cmdline-strip %q", strings.Join(s.CmdlineStrip, " ")))
+	}
+	return strings.Join(why, " ")
+}
+
+// lessTested says how a job checked less than a plain run on its Mac, or "":
+// omarchy-m-test allowances, or a test that every job there runs (boot-health,
+// and omarchy-m-test when omt) missing.
+func lessTested(j *api.Job, omt bool) string {
+	var why []string
+	if len(j.Spec.OMTAllow) > 0 {
+		why = append(why, "--omt-allow "+strings.Join(j.Spec.OMTAllow, ","))
+	}
+	want := []string{"boot-health"}
+	if omt {
+		want = append(want, omtTest)
+	}
+	for _, w := range want {
+		if !slices.ContainsFunc(j.Result.Tests, func(t api.TestResult) bool { return t.Name == w && t.Passed }) {
+			why = append(why, w+" didn't run")
+		}
+	}
+	return strings.Join(why, ", ")
+}
+
+// gatePrecedence orders run results by how much they decide a family: a
+// failure on any Mac decides it, then a Mac that both passed and failed,
+// then a pass; a Mac that couldn't stage the kernel decides only when no
+// other Mac has a result.
+var gatePrecedence = []string{api.GateFail, api.GateFlaky, api.GatePass, api.GateStageFailed}
+
+// gateOpts are a gate's choices besides the required families.
+type gateOpts struct {
+	// volunteers counts volunteers' Macs (enrolled with ./volunteer), whose
+	// agents the lab doesn't control. Otherwise their runs are not counted.
+	volunteers bool
+	// omt names the Macs whose jobs all run omarchy-m-test.
+	omt map[string]bool
+}
+
+// gateRun is job j's line in a gate report, with the result res.
+func gateRun(j *api.Job, res string) api.GateRun {
+	r := api.GateRun{Device: j.Spec.Device, Job: j.ID, Outcome: j.Outcome, Result: res, Finished: j.Updated}
+	if res == api.GateStageFailed {
+		r.Reason = j.Summary
+	}
+	for _, t := range j.Result.Tests {
+		tr := api.GateTest{Name: t.Name, Result: api.GatePass}
+		if !t.Passed {
+			tr.Result = api.GateFail
+		}
+		r.Tests = append(r.Tests, tr)
+	}
+	return r
+}
+
+// rollUp judges a kernel from each Mac's plain runs on it (jobs come newest
+// first). A plain run boots the Mac's known-good cmdline and runs at least
+// the tests every job on that Mac runs, with no omarchy-m-test allowances. A
+// run with a changed cmdline boots something a release doesn't, so it
+// counts neither way. A run that tested less counts when it failed, since it
+// failed even so, but not when it passed. Canceled and infra_error jobs say
+// nothing about the kernel, nor do tests_failed jobs whose failed tests
+// couldn't run at all, nor crash tests, which crash it on purpose.
+//
+// A Mac fails when it failed on the kernel and never passed, passes when it
+// passed and never failed, and is flaky when it did both: a retry's pass
+// doesn't hide an earlier failure, and a flaky Mac doesn't pass. A run that
+// couldn't stage the kernel says nothing about it, so it counts only for a
+// Mac with no pass or failure. A family fails when any of its Macs failed,
+// is flaky when any is flaky, passes when at least one passed, is
+// stage_failed when its only results are Macs that couldn't stage the kernel,
+// and is untested when none of its Macs has a result. Volunteers' Macs count
+// only with o.volunteers. Runs that don't count are listed per family, with
+// the reason. The gate opens only when every required family passed.
+func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []string, o gateOpts) api.GateReport {
+	rep := api.GateReport{Kernel: k, Required: required, VolunteersCounted: o.volunteers}
+	fam, vol := map[string]string{}, map[string]bool{}
 	for _, d := range devs {
 		if f := family(d.Facts); f != "" {
 			fam[d.Name] = f
 		} else {
 			rep.Unclassified = append(rep.Unclassified, d.Name)
 		}
+		if d.Volunteer {
+			vol[d.Name] = true
+			rep.Volunteers = append(rep.Volunteers, d.Name)
+		}
 	}
-	runs := map[string][]api.GateRun{}
-	add := func(j *api.Job, res string) {
+	type mac struct {
+		pass, fail, unstaged *api.Job      // its newest counted pass, failure and couldn't-stage run
+		skipped              []api.GateRun // its runs that don't count
+	}
+	macs := map[string]*mac{}
+	var order []string // the Mac with the newest run first
+	for _, j := range jobs {
+		res, d := gateResult(j.Outcome), j.Spec.Device
+		if j.State != api.JobDone || res == "" || j.Spec.Crash != "" {
+			continue // says nothing about the kernel
+		}
 		if rep.Kernel.Build == "" {
 			rep.Kernel.Build = j.Spec.Build
 		}
 		if rep.Kernel.Release == "" && j.Result.Booted {
 			rep.Kernel.Release = j.Result.BootKernel
 		}
-		f := fam[j.Spec.Device]
-		if f == "" {
-			return
+		m := macs[d]
+		if m == nil {
+			m = &mac{}
+			macs[d] = m
+			order = append(order, d)
 		}
-		r := api.GateRun{Device: j.Spec.Device, Job: j.ID, Outcome: j.Outcome, Result: res, Finished: j.Updated}
-		if res == api.GateStageFailed {
-			r.Reason = j.Summary
+		why := ""
+		if res == api.GateFail {
+			why = runnerFailures(j)
 		}
-		for _, t := range j.Result.Tests {
-			tr := api.GateTest{Name: t.Name, Result: api.GatePass}
-			if !t.Passed {
-				tr.Result = api.GateFail
-			}
-			r.Tests = append(r.Tests, tr)
+		if c := customCmdline(j.Spec); why == "" && c != "" {
+			why = "custom cmdline: " + c
 		}
-		runs[f] = append(runs[f], r)
-	}
-	decided := map[string]bool{}      // the Mac's latest pass or failure is in
-	unstaged := map[string]*api.Job{} // its latest couldn't-stage run, if it has nothing else
-	for _, j := range jobs {
-		res, d := gateResult(j.Outcome), j.Spec.Device
+		if l := lessTested(j, o.omt[d]); why == "" && res == api.GatePass && l != "" {
+			why = "tested less than a plain run: " + l
+		}
 		switch {
-		case j.State != api.JobDone || res == "" || j.Spec.Crash != "" || decided[d]:
-			// says nothing about the kernel, or the Mac already has its result
-		case res == api.GateStageFailed:
-			if unstaged[d] == nil {
-				unstaged[d] = j
-			}
-		default:
-			decided[d] = true
-			add(j, res)
+		case why != "":
+			r := gateRun(j, res)
+			r.NotCounted = why
+			m.skipped = append(m.skipped, r)
+		case res == api.GatePass && m.pass == nil:
+			m.pass = j
+		case res == api.GateFail && m.fail == nil:
+			m.fail = j
+		case res == api.GateStageFailed && m.unstaged == nil:
+			m.unstaged = j
 		}
 	}
-	for _, j := range jobs {
-		if d := j.Spec.Device; unstaged[d] == j && !decided[d] {
-			add(j, api.GateStageFailed)
+	runs, skipped := map[string][]api.GateRun{}, map[string][]api.GateRun{}
+	for _, d := range order {
+		m, f := macs[d], fam[d]
+		if f == "" {
+			continue // no supported family: listed as unclassified
 		}
+		var counted []api.GateRun
+		switch {
+		case m.pass != nil && m.fail != nil:
+			fail, pass := gateRun(m.fail, api.GateFlaky), gateRun(m.pass, api.GateFlaky)
+			fail.Reason = "passed too, in job " + m.pass.ID
+			pass.Reason = fmt.Sprintf("%s too, in job %s", m.fail.Outcome, m.fail.ID)
+			counted = []api.GateRun{fail, pass}
+		case m.fail != nil:
+			counted = []api.GateRun{gateRun(m.fail, api.GateFail)}
+		case m.pass != nil:
+			counted = []api.GateRun{gateRun(m.pass, api.GatePass)}
+		case m.unstaged != nil:
+			counted = []api.GateRun{gateRun(m.unstaged, api.GateStageFailed)}
+		}
+		if vol[d] {
+			for i := range counted {
+				counted[i].Volunteer = true
+				if !o.volunteers {
+					counted[i].NotCounted = "a volunteer's Mac"
+				}
+			}
+			for i := range m.skipped {
+				m.skipped[i].Volunteer = true
+			}
+		}
+		if vol[d] && !o.volunteers {
+			skipped[f] = append(skipped[f], counted...)
+		} else {
+			runs[f] = append(runs[f], counted...)
+		}
+		skipped[f] = append(skipped[f], m.skipped...)
 	}
 	byID := map[string]api.GateFamily{}
 	for _, f := range families {
@@ -151,7 +299,7 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		slices.SortStableFunc(l, func(a, b api.GateRun) int {
 			return slices.Index(gatePrecedence, a.Result) - slices.Index(gatePrecedence, b.Result)
 		})
-		fr := api.GateFamily{Family: f.id, Name: f.name, Result: api.GateUntested, Runs: l}
+		fr := api.GateFamily{Family: f.id, Name: f.name, Result: api.GateUntested, Runs: l, NotCounted: skipped[f.id]}
 		if len(l) > 0 {
 			fr.Result = l[0].Result
 		} else {
@@ -165,8 +313,16 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		switch fr := byID[f]; fr.Result {
 		case api.GateFail:
 			why = append(why, fmt.Sprintf("%s failed (%s, job %s)", f, fr.Runs[0].Device, fr.Runs[0].Job))
+		case api.GateFlaky:
+			// a flaky Mac's failure comes first, then its pass
+			r, p := fr.Runs[0], fr.Runs[1]
+			why = append(why, fmt.Sprintf("%s flaky (%s passed in job %s, %s in job %s)", f, r.Device, p.Job, r.Outcome, r.Job))
 		case api.GateUntested:
-			why = append(why, f+" untested")
+			if n := len(fr.NotCounted); n > 0 {
+				why = append(why, fmt.Sprintf("%s untested (%d %s not counted)", f, n, plural(n, "run", "runs")))
+			} else {
+				why = append(why, f+" untested")
+			}
 		case api.GateStageFailed:
 			r := fr.Runs[0]
 			why = append(why, fmt.Sprintf("%s couldn't stage on %s (job %s: %s)", f, r.Device, r.Job, r.Reason))
@@ -176,7 +332,17 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 	if len(why) > 0 {
 		rep.Result, rep.Summary = api.GateFail, "gate shut: "+strings.Join(why, ", ")
 	}
+	if o.volunteers && len(rep.Volunteers) > 0 {
+		rep.Summary += "; volunteers' Macs counted"
+	}
 	return rep
+}
+
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 var reKernelPrefix = regexp.MustCompile(`^[0-9a-f]{6,64}$`)
@@ -220,7 +386,8 @@ func (s *Server) gateKernel(id string) (api.GateKernel, int, error) {
 }
 
 // hGate reports whether a kernel passed on every required chip family:
-// ?families=m1,m2 narrows the requirement from all of them.
+// ?families=m1,m2 narrows the requirement from all of them, and
+// ?volunteers=1 counts volunteers' Macs.
 func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 	required := familyIDs()
 	if v := r.URL.Query().Get("families"); v != "" {
@@ -236,6 +403,15 @@ func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	o := gateOpts{omt: map[string]bool{}}
+	if v := r.URL.Query().Get("volunteers"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			httpErr(w, 400, "volunteers=%q: give 1 to count volunteers' Macs, 0 not to", v)
+			return
+		}
+		o.volunteers = b
+	}
 	k, code, err := s.gateKernel(r.PathValue("kernel"))
 	if err != nil {
 		httpErr(w, code, "%v", err)
@@ -248,9 +424,11 @@ func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 	}
 	var devs []api.Device
 	for _, v := range s.allDevs() {
-		devs = append(devs, v.snapshot())
+		d := v.snapshot()
+		devs = append(devs, d)
+		o.omt[d.Name] = s.omtWanted(d, api.JobSpec{})
 	}
-	rep := rollUp(k, devs, jobs, required)
+	rep := rollUp(k, devs, jobs, required, o)
 	rep.Labd, rep.Generated = r.Host, time.Now().UTC()
 	writeJSON(w, rep)
 }

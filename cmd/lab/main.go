@@ -41,7 +41,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab crashtest <device>              deliberately panic the Mac and check it recovers by itself
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
-  lab gate <kernel> [--families m1,m2] [--evidence file]
+  lab gate <kernel> [--families m1,m2] [--volunteers] [--evidence file]
                                       did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel, tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
@@ -429,15 +429,16 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 	case "gate":
 		fams := fs.String("families", "", "chip families that must pass, comma-separated (default all: m1,m1-pro,m2,m2-pro,m3,m3-pro)")
 		evidence := fs.String("evidence", "", "write the report to this file as a JSON evidence record")
+		volunteers := fs.Bool("volunteers", false, "count volunteers' Macs (enrolled with ./volunteer) too; by default they're listed, not counted")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--evidence file]"); err != nil {
+		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--volunteers] [--evidence file]"); err != nil {
 			return err
 		}
 		var list []string
 		if *fams != "" {
 			list = strings.Split(*fams, ",")
 		}
-		rep, err := c.Gate(ctx, pos[0], list)
+		rep, err := c.Gate(ctx, pos[0], list, *volunteers)
 		if err != nil {
 			return err
 		}
@@ -754,6 +755,38 @@ func printGate(r *api.GateReport) {
 	for _, l := range unstaged {
 		fmt.Println(l)
 	}
+	// Runs that decide nothing, the volunteers' Macs' apart.
+	var other, vol []string
+	for _, f := range r.Families {
+		for _, run := range f.NotCounted {
+			l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", f.Family, run.Device, run.Job, run.Outcome, run.NotCounted)
+			if run.Volunteer {
+				vol = append(vol, l)
+			} else {
+				other = append(other, l)
+			}
+		}
+	}
+	section := func(title string, lines []string) {
+		if len(lines) == 0 {
+			return
+		}
+		fmt.Println(title)
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		for _, l := range lines {
+			fmt.Fprintln(w, l)
+		}
+		w.Flush()
+	}
+	section("not counted:", other)
+	switch {
+	case len(r.Volunteers) == 0:
+	case r.VolunteersCounted:
+		fmt.Printf("volunteers' Macs, counted: %s\n", strings.Join(r.Volunteers, ", "))
+	default:
+		fmt.Printf("volunteers' Macs, not counted (--volunteers counts them): %s\n", strings.Join(r.Volunteers, ", "))
+	}
+	section("volunteers' runs, not counted:", vol)
 	if len(r.Unclassified) > 0 {
 		fmt.Printf("not counted (no supported chip family known): %s\n", strings.Join(r.Unclassified, ", "))
 	}
@@ -813,6 +846,9 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 		fmt.Printf("\n>>> %s\n%s\n\n", strings.ToUpper(d.Action.Title), indent(d.Action.Text()))
 	}
 	fmt.Printf("  model:       %s, %s\n", d.Facts.DTModel, orDash(d.Label, "no label"))
+	if d.Volunteer {
+		fmt.Printf("  volunteer:   enrolled with ./volunteer; lab gate counts it only with --volunteers\n")
+	}
 	fmt.Printf("  kernel:      %s (known-good: %s)\n", d.Kernel, orDash(d.KnownGood, "no baseline yet"))
 	fmt.Printf("  last seen:   %s, uptime %.0fs, systemd %s\n", ago(d.LastSeen), d.Health.Uptime, d.Health.SystemState)
 	tiers := []string{"panic reboot + one-shot fallback", "+ hardware watchdog", "+ out-of-band reset and serial"}

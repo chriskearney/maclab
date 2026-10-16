@@ -582,6 +582,9 @@ const (
 	// the Mac (e.g. a full boot partition). It says nothing about the kernel,
 	// but the gate stays shut until a run gives a result.
 	GateStageFailed = "stage_failed"
+	// GateFlaky: a Mac both passed and failed on the kernel, e.g. a retry
+	// passed after a failure. It doesn't pass.
+	GateFlaky = "flaky"
 )
 
 type GateKernel struct {
@@ -595,22 +598,27 @@ type GateTest struct {
 	Result string `json:"result"` // pass or fail
 }
 
-// GateRun is the job that decides one Mac's result on the kernel.
+// GateRun is the job that decides one Mac's result on the kernel; a flaky
+// Mac has two, its failure and then its pass. In a family's not_counted it is
+// a run that decides nothing, and NotCounted says why.
 type GateRun struct {
-	Device   string     `json:"device"`
-	Job      string     `json:"job"`
-	Outcome  string     `json:"outcome"`
-	Result   string     `json:"result"`           // pass, fail or stage_failed
-	Reason   string     `json:"reason,omitempty"` // stage_failed: the job's summary
-	Finished time.Time  `json:"finished"`
-	Tests    []GateTest `json:"tests,omitempty"`
+	Device     string     `json:"device"`
+	Job        string     `json:"job"`
+	Outcome    string     `json:"outcome"`
+	Result     string     `json:"result"`           // pass, fail, flaky or stage_failed
+	Reason     string     `json:"reason,omitempty"` // stage_failed: the job's summary; flaky: the Mac's other result
+	Finished   time.Time  `json:"finished"`
+	Tests      []GateTest `json:"tests,omitempty"`
+	Volunteer  bool       `json:"volunteer,omitempty"`   // the Mac is a volunteer's (Device.Volunteer)
+	NotCounted string     `json:"not_counted,omitempty"` // why the run doesn't count
 }
 
 type GateFamily struct {
-	Family string    `json:"family"`         // m1, m1-pro, ...
-	Name   string    `json:"name"`           // M1 Pro/Max/Ultra
-	Result string    `json:"result"`         // pass, fail, stage_failed or untested
-	Runs   []GateRun `json:"runs,omitempty"` // the deciding run first
+	Family     string    `json:"family"`                // m1, m1-pro, ...
+	Name       string    `json:"name"`                  // M1 Pro/Max/Ultra
+	Result     string    `json:"result"`                // pass, fail, flaky, stage_failed or untested
+	Runs       []GateRun `json:"runs,omitempty"`        // the deciding run first
+	NotCounted []GateRun `json:"not_counted,omitempty"` // runs that decide nothing: volunteers' Macs, runs that weren't plain, tests that couldn't run
 }
 
 // GateReport says whether a kernel passed on real hardware for every required
@@ -625,4 +633,8 @@ type GateReport struct {
 	Unclassified []string     `json:"unclassified,omitempty"` // Macs of no supported family, or too old an agent to say
 	Labd         string       `json:"labd"`
 	Generated    time.Time    `json:"generated"`
+	// Volunteers lists the volunteers' Macs. Their runs count only when
+	// VolunteersCounted (?volunteers=1, lab gate --volunteers).
+	Volunteers        []string `json:"volunteers,omitempty"`
+	VolunteersCounted bool     `json:"volunteers_counted,omitempty"`
 }
