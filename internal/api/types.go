@@ -189,6 +189,10 @@ type StageArgs struct {
 	// Installed boots an installed release through its installer-made Limine
 	// entry instead of staging a kernel (the installed-kernel job mode).
 	Installed *InstalledStage `json:"installed,omitempty"`
+	// BootTimeoutSec is how long labd waits for the test boot to check in.
+	// The agent takes the boot's watchdog deadline from it; 0 (an older
+	// labd) leaves the agent's default.
+	BootTimeoutSec int `json:"boot_timeout_sec,omitempty"`
 }
 
 // InstalledStage points a one-shot lab entry at the installer's own UKI, with

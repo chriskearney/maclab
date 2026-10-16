@@ -752,6 +752,27 @@ func TestShortQuietSpellDuringTest(t *testing.T) {
 	}
 }
 
+// A test boot's watchdog deadline comes from the job's boot timeout: what is
+// left of it once the reset and the fallback boot are allowed for, and at
+// least a minute.
+func TestTestBootWatchdogDeadline(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	for _, c := range []struct {
+		boot int
+		want string
+	}{
+		{0, "watchdog.open_timeout=60"}, // labd's 4 s in these tests
+		{600, "watchdog.open_timeout=480"},
+	} {
+		j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), BootTimeoutSec: c.boot})
+		l.expect(j, api.OutcomePass)
+		if !strings.Contains(j.Result.BootCmdline+" ", " "+c.want+" ") {
+			t.Errorf("boot timeout %ds: cmdline %q, want %s", c.boot, j.Result.BootCmdline, c.want)
+		}
+	}
+}
+
 // A test that really suspends an Apple Silicon Mac needs a person to wake it;
 // suspend-devices (pm_test) and other Macs don't.
 func TestRealSleepNote(t *testing.T) {

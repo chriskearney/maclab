@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +13,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -267,8 +272,6 @@ func (l *wdLabd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const testBoot = "root=UUID=sim rw maclab.job=j1"
-
 func wdAgent(t *testing.T, cmdline string, lab *wdLabd) (*Agent, *wdSystem) {
 	t.Helper()
 	hs := httptest.NewServer(lab)
@@ -280,34 +283,91 @@ func wdAgent(t *testing.T, cmdline string, lab *wdLabd) (*Agent, *wdSystem) {
 	return a, sys
 }
 
+// labBoot is a test boot's command line, as testCmdline writes it, and
+// installedBoot an installed-mode boot's, which leaves the watchdog to systemd.
+const (
+	labBoot       = "root=UUID=sim rw panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.job=j1"
+	installedBoot = "root=UUID=sim rw quiet maclab.job=j1 panic=10"
+)
+
+// logBuf collects what an agent logs.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// On a test boot the agent holds the watchdog. If it can't open it yet, it
+// tries again while it checks in, until watchdog.open_timeout has passed
+// since boot, and then says the Mac resets. Where the command line leaves
+// the watchdog to systemd, systemd holding it is no cause for a warning.
 func TestRunHoldsWatchdogOnTestBoot(t *testing.T) {
-	busy := errors.New("device or resource busy")
+	busy := &os.PathError{Op: "open", Path: watchdogDev, Err: unix.EBUSY}
+	missing := &os.PathError{Op: "open", Path: watchdogDev, Err: unix.ENOENT}
+	oldUptime, oldRetry := watchdogUptime, watchdogRetry
+	t.Cleanup(func() { watchdogUptime, watchdogRetry = oldUptime, oldRetry })
+	watchdogRetry = 10 * time.Millisecond
+	never := slices.Repeat([]error{missing}, 10000)
 	for _, c := range []struct {
 		name, cmdline string
+		uptime        time.Duration // when the agent starts
 		openErrs      []error
-		opened        int32
+		opened        int32 // 0 for none; -1 for more than 3
 		held          bool
+		log, quiet    string // logged; not logged
 	}{
-		{"test boot", testBoot, nil, 1, true},
-		{"known-good boot", "root=UUID=sim rw", nil, 0, false},
-		{"busy for a moment", testBoot, []error{busy}, 2, true},
-		{"systemd holds it", testBoot, []error{busy, busy}, 2, false},
+		{"test boot", labBoot, 10 * time.Second, nil, 1, true, "holding the hardware watchdog", "can't"},
+		{"known-good boot", "root=UUID=sim rw", 10 * time.Second, nil, 0, false, "", "watchdog"},
+		{"busy for a moment", labBoot, 10 * time.Second, []error{busy, missing, missing}, 4, true,
+			"holding the hardware watchdog", "resets"},
+		{"not there in time", labBoot, 119*time.Second + 800*time.Millisecond, never, -1, false,
+			"the Mac resets now that watchdog.open_timeout=120 has run out", "holding"},
+		{"started after the deadline", labBoot, 130 * time.Second, never, 1, false,
+			"the Mac resets now that watchdog.open_timeout=120 has run out", "holding"},
+		{"systemd holds it", installedBoot, 10 * time.Second, []error{busy, busy}, 1, false,
+			"systemd holds the hardware watchdog and feeds it", "resets"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			lab := &wdLabd{checkins: make(chan api.Checkin, 100), hold: 10 * time.Millisecond}
 			a, sys := wdAgent(t, c.cmdline, lab)
+			var logged logBuf
+			a.log = log.New(&logged, "", 0)
 			sys.openErrs = c.openErrs
+			watchdogUptime = func() time.Duration { return c.uptime }
 			ctx, cancel := context.WithCancel(context.Background())
 			ran := make(chan error, 1)
 			go func() { ran <- a.Run(ctx) }()
 
-			select {
-			case ci := <-lab.checkins:
-				if ci.Facts == nil || ci.Facts.WatchdogArmed != c.held {
+			// labd hears it from the first check-in on, or once the agent holds it.
+			armed := false
+			for first, start := true, time.Now(); ; first = false {
+				var ci api.Checkin
+				select {
+				case ci = <-lab.checkins:
+				case <-time.After(5 * time.Second):
+					t.Fatal("no check-in")
+				}
+				armed = ci.Facts != nil && ci.Facts.WatchdogArmed
+				if first && c.opened == 1 && armed != c.held {
 					t.Errorf("first check-in's facts: %+v, want watchdog_armed %v", ci.Facts, c.held)
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("no check-in")
+				if armed || !c.held || time.Since(start) > 5*time.Second {
+					break
+				}
+			}
+			if armed != c.held {
+				t.Errorf("watchdog_armed %v, want %v", armed, c.held)
 			}
 			if c.held {
 				for start := time.Now(); sys.dev.feeds.Load() == 0 || sys.pinged.Load() == 0; time.Sleep(time.Millisecond) {
@@ -316,15 +376,47 @@ func TestRunHoldsWatchdogOnTestBoot(t *testing.T) {
 					}
 				}
 			}
+			for start := time.Now(); !strings.Contains(logged.String(), c.log); time.Sleep(time.Millisecond) {
+				if time.Since(start) > 5*time.Second {
+					t.Fatalf("didn't log %q:\n%s", c.log, logged.String())
+				}
+			}
 			cancel()
 			<-ran
-			if n := sys.opened.Load(); n != c.opened {
+			switch n := sys.opened.Load(); {
+			case c.opened >= 0 && n != c.opened, c.opened < 0 && n <= 3:
 				t.Errorf("opened the watchdog %d times, want %d", n, c.opened)
 			}
-			if (a.wd != nil) != c.held || !c.held && sys.dev.feeds.Load() != 0 {
-				t.Errorf("holding %v with %d feeds, want holding %v", a.wd != nil, sys.dev.feeds.Load(), c.held)
+			if (a.wd.Load() != nil) != c.held || !c.held && sys.dev.feeds.Load() != 0 {
+				t.Errorf("holding %v with %d feeds, want holding %v", a.wd.Load() != nil, sys.dev.feeds.Load(), c.held)
+			}
+			if strings.Contains(logged.String(), c.quiet) {
+				t.Errorf("logged %q:\n%s", c.quiet, logged.String())
 			}
 		})
+	}
+}
+
+// A test boot's deadline is labd's boot timeout less the time the reset and
+// the fallback boot take, so labd sees the fallback, but never short.
+func TestBootDeadline(t *testing.T) {
+	for _, c := range []struct{ boot, want time.Duration }{
+		{0, 120 * time.Second}, // an older labd
+		{4 * time.Minute, 120 * time.Second},
+		{10 * time.Minute, 8 * time.Minute},
+		{2 * time.Minute, time.Minute},
+		{4 * time.Second, time.Minute},
+	} {
+		if got := bootDeadline(c.boot); got != c.want {
+			t.Errorf("boot timeout %s: deadline %s, want %s", c.boot, got, c.want)
+		}
+		cmdline := testCmdline("root=UUID=x rw watchdog.open_timeout=5", api.StageArgs{BootTimeoutSec: int(c.boot / time.Second)}, "j1")
+		if got := openDeadline(cmdline); got != c.want {
+			t.Errorf("boot timeout %s: %q gives the agent %s, want %s", c.boot, cmdline, got, c.want)
+		}
+	}
+	if got := openDeadline("root=UUID=x rw maclab.job=j1"); got != labBootDeadline {
+		t.Errorf("no watchdog.open_timeout: %s", got)
 	}
 }
 
@@ -341,21 +433,21 @@ type wdHarness struct {
 
 func newWDHarness(t *testing.T) *wdHarness {
 	lab := &wdLabd{}
-	a, sys := wdAgent(t, testBoot, lab)
+	a, sys := wdAgent(t, labBoot, lab)
 	h := &wdHarness{t: t, a: a, sys: sys, lab: lab, clock: &wdClock{t: time.Unix(1_000_000, 0)}}
-	a.wd = newLabWatchdog(&sys.dev, h.clock.now)
+	a.wd.Store(newLabWatchdog(&sys.dev, h.clock.now))
 	return h
 }
 
 // at moves the clock on by d, with PID 1 answering then.
 func (h *wdHarness) at(d time.Duration) {
 	h.clock.add(d)
-	answers(h.a.wd, true)
+	answers(h.a.wd.Load(), true)
 }
 
 func (h *wdHarness) fed(want bool, when string) {
 	h.t.Helper()
-	if got := h.a.wd.tick(); got != want {
+	if got := h.a.wd.Load().tick(); got != want {
 		h.t.Fatalf("%s: fed %v, want %v", when, got, want)
 	}
 }
@@ -453,7 +545,7 @@ func TestWatchdogIdleWhileUploading(t *testing.T) {
 	var uploading atomic.Bool
 	h.lab.onUpload = func() {
 		h.at(5 * time.Minute)
-		uploading.Store(h.a.wd.tick())
+		uploading.Store(h.a.wd.Load().tick())
 	}
 	test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Builtin: "x", TimeoutSec: 60})
 	<-h.sys.running
@@ -463,6 +555,31 @@ func TestWatchdogIdleWhileUploading(t *testing.T) {
 	if !uploading.Load() {
 		t.Fatal("not fed 5 minutes into uploading the output of a test with an 80 s budget")
 	}
+}
+
+// A test's budget starts once its script has downloaded, as the test's own
+// timeout does: the download runs on the idle budget, and a slow one leaves
+// the test all of its time.
+func TestWatchdogBudgetAfterDownload(t *testing.T) {
+	h := newWDHarness(t)
+	h.lab.art = []byte("echo ok\n")
+	sum := sha256.Sum256(h.lab.art)
+	var downloading atomic.Bool
+	h.lab.onFetch = func() {
+		h.at(5 * time.Minute)
+		downloading.Store(h.a.wd.Load().tick())
+	}
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Script: hex.EncodeToString(sum[:]), TimeoutSec: 60})
+	<-h.sys.running
+	if !downloading.Load() {
+		t.Fatal("not fed 5 minutes into downloading the script of a test with an 80 s budget")
+	}
+	h.at(70 * time.Second)
+	h.fed(true, "70 s into a test with an 80 s budget, after a 5-minute download")
+	h.at(15 * time.Second)
+	h.fed(false, "85 s into a test with an 80 s budget")
+	h.sys.finish <- struct{}{}
+	h.finished(test)
 }
 
 // PingInit asks PID 1 over systemctl.

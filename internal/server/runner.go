@@ -229,7 +229,8 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	r.ev("staging %s", what)
 	d := v.snapshot()
 	args := api.StageArgs{Artifact: j.Spec.Kernel, Cmdline: j.Spec.Cmdline, Serial: d.OOB != nil,
-		CmdlineBase: j.Spec.CmdlineBase, CmdlineStrip: j.Spec.CmdlineStrip, Verbose: j.Spec.VerboseBoot}
+		CmdlineBase: j.Spec.CmdlineBase, CmdlineStrip: j.Spec.CmdlineStrip, Verbose: j.Spec.VerboseBoot,
+		BootTimeoutSec: int(r.boot / time.Second)}
 	if r.ir != nil {
 		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
 	}
