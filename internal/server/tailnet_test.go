@@ -281,3 +281,98 @@ func TestParseWhoIs(t *testing.T) {
 		t.Error("an answer naming no one accepted")
 	}
 }
+
+// With --tailscale, tailnet traffic gets no admin through --trust when labd
+// can tell it is tailnet traffic: tailscale serve and Funnel proxy from
+// 127.0.0.1 with their own headers, and tailnet peers are judged by identity.
+func TestTrustYieldsToTailnet(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	whois := func(ctx context.Context, ip string) (*TailnetPeer, error) {
+		if ip == "100.64.0.3" {
+			return &TailnetPeer{Login: "tagged-devices", Node: "maclab-m1air", Tags: []string{"tag:maclab"}}, nil
+		}
+		return nil, fmt.Errorf("no match for IP")
+	}
+	trust, _ := ParseTrust("10.1.1.0/24,127.0.0.1,100.64.0.3")
+	newServer := func(tailscale bool) (http.Handler, string) {
+		var logs strings.Builder
+		s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", Trust: trust,
+			Tailscale: tailscale, Admins: ParseAdmins("admin@github"), WhoIs: whois}, log.New(&logs, "", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Handler(), logs.String()
+	}
+	type hdr = map[string]string
+	try := func(h http.Handler, method, path, remote, token string, headers hdr) int {
+		r := httptest.NewRequest(method, path, strings.NewReader("{}"))
+		r.RemoteAddr = remote
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		for k, v := range headers {
+			r.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	const (
+		loop = "127.0.0.1:50000"
+		lan  = "10.1.1.42:50000"
+		past = 404 // through auth, then no such Mac
+	)
+	serveUser := hdr{"Tailscale-User-Login": "visitor@github", "Tailscale-User-Name": "Visitor",
+		"Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers", "X-Forwarded-For": "100.64.0.2"}
+	cases := []struct {
+		name, method, path, remote, token string
+		headers                           hdr
+		want, without                     int // with --tailscale, without it
+	}{
+		{"loopback", "POST", "/api/jobs", loop, "", nil, past, past},
+		{"the LAN", "POST", "/api/jobs", lan, "", nil, past, past},
+		{"a tailnet user through tailscale serve", "POST", "/api/jobs", loop, "", serveUser, 401, past},
+		{"nor may it look", "GET", "/api/devices", loop, "", serveUser, 401, 200},
+		{"only the login header", "POST", "/api/jobs", loop, "", hdr{"Tailscale-User-Login": "admin@github"}, 401, past},
+		{"Funnel", "POST", "/api/jobs", loop, "", hdr{"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7"}, 401, past},
+		{"a tagged node through serve", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "100.64.0.3"}, 401, past},
+		{"serve on a LAN address", "POST", "/api/jobs", lan, "", hdr{"Tailscale-User-Name": "Visitor"}, 401, past},
+		{"a LAN proxy forwarding a LAN client", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, past, past},
+		{"serve with the token", "POST", "/api/jobs", loop, "adm_secret", serveUser, past, past},
+		{"a trusted tailnet peer is judged by identity", "POST", "/api/jobs", "100.64.0.3:1", "", nil, 403, past},
+	}
+	with, logs := newServer(true)
+	without, quiet := newServer(false)
+	for _, c := range cases {
+		if got := try(with, c.method, c.path, c.remote, c.token, c.headers); got != c.want {
+			t.Errorf("%s with --tailscale: %s %s got %d, want %d", c.name, c.method, c.path, got, c.want)
+		}
+		if got := try(without, c.method, c.path, c.remote, c.token, c.headers); got != c.without {
+			t.Errorf("%s without --tailscale: %s %s got %d, want %d", c.name, c.method, c.path, got, c.without)
+		}
+	}
+
+	r := httptest.NewRequest("GET", "/api/auth", nil)
+	r.RemoteAddr = loop
+	r.Header.Set("Tailscale-User-Login", "admin@github")
+	w := httptest.NewRecorder()
+	with.ServeHTTP(w, r)
+	var a struct {
+		Trusted       bool `json:"trusted"`
+		TokenRequired bool `json:"token_required"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &a)
+	if a.Trusted || !a.TokenRequired {
+		t.Errorf("/api/auth through tailscale serve: %s", w.Body)
+	}
+
+	for _, n := range []string{"10.1.1.0/24", "127.0.0.1/32", "100.64.0.3/32"} {
+		if !strings.Contains(logs, "warning: --trust "+n+" with --tailscale: tailnet traffic") {
+			t.Errorf("no startup warning for trusted network %s in:\n%s", n, logs)
+		}
+	}
+	if strings.Contains(quiet, "warning") {
+		t.Errorf("warned without --tailscale:\n%s", quiet)
+	}
+}

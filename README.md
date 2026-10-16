@@ -557,7 +557,21 @@ the console output in the live view and in each job's logs. Anything that
 changes the lab, the console itself (`lab shell`), the Mac's stored serial
 log and new screenshots answer 403, and device views never carry the
 controller's token. Peers off the tailnet still need the admin token, which
-keeps working everywhere for `lab` and scripts. `--trust` works as before.
+keeps working everywhere for `lab` and scripts.
+
+`--trust` still gives admin by the connection's address, so tailnet traffic
+that reaches labd from a trusted address gets admin too, whoever sent it.
+With `--tailscale`, labd refuses that trust where it can tell: a tailnet
+address is judged by its identity even inside a trusted network, and a
+request proxied by `tailscale serve` or Funnel (it carries serve's
+`Tailscale-User-*`, `Tailscale-Headers-Info` or `Tailscale-Funnel-Request`
+headers, or an `X-Forwarded-For` naming a tailnet address) gets no trust and
+needs the token. labd can't see the rest: a subnet router that brings tailnet
+traffic into a trusted network, or someone who reaches a machine there over
+Tailscale SSH and connects from it, looks like local traffic. labd logs a
+warning at startup for each trusted network. With `--tailscale`, trust only
+networks no tailnet route leads into, or leave `--trust` off and use
+`--admins` and the token.
 
 To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
 Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short

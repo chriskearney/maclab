@@ -121,6 +121,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		}
 		cfg.WhoIs = tailscaleWhoIs
 	}
+	warnTrustedNetworks(cfg, logger)
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
 	}
