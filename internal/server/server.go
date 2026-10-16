@@ -50,6 +50,13 @@ type Config struct {
 	Admins    []string
 	// WhoIs names the peer behind a tailnet address; tests swap in fakes.
 	WhoIs func(ctx context.Context, ip string) (*TailnetPeer, error)
+	// AllowHosts are names labd answers to besides its own (--allow-host):
+	// access without a token counts only on a request to one of labd's
+	// names (see ownHost).
+	AllowHosts []string
+	// TailnetNames looks up this machine's MagicDNS names, with Tailscale
+	// on; tests swap in fakes, and nil looks up none.
+	TailnetNames func(ctx context.Context) ([]string, error)
 	// OOBFactory builds a controller for a device; tests swap in fakes.
 	OOBFactory func(*api.Device) (oob.Controller, error)
 	// BuilderToken authenticates builder hosts; empty disables builds.
@@ -92,6 +99,10 @@ type Server struct {
 	whoMu       sync.Mutex
 	whoCache    map[netip.Addr]whoisEntry
 	whoCalls    map[netip.Addr]*whoisCall
+	hosts       []string // its host names and --allow-host's (see ownHost); the MagicDNS ones are tsNames
+	tsMu        sync.Mutex
+	tsAt        time.Time // when tsNames were looked up
+	tsNames     []string  // its MagicDNS names
 }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
@@ -121,8 +132,20 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			return nil, fmt.Errorf("--tailscale needs the tailscale CLI: %w", err)
 		}
 		cfg.WhoIs = tailscaleWhoIs
+		if cfg.TailnetNames == nil {
+			cfg.TailnetNames = tailscaleNames
+		}
 	}
 	warnTrustedNetworks(cfg, logger)
+	var hosts []string
+	for _, h := range cfg.AllowHosts {
+		hosts = append(hosts, hostName(h))
+	}
+	if len(cfg.Trust) > 0 || cfg.Tailscale {
+		hosts = append(hosts, localNames()...)
+		logger.Printf("without a token, labd answers only to its own names: IP addresses, localhost, %s%s; --allow-host adds one",
+			strings.Join(hosts, ", "), map[bool]string{true: " and its MagicDNS names"}[cfg.Tailscale])
+	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
 	}
@@ -135,7 +158,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, start: time.Now(), devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}}
+	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, start: time.Now(), devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}, hosts: hosts}
 	rows, err := st.devices()
 	if err != nil {
 		return nil, err
@@ -450,11 +473,13 @@ func bearer(r *http.Request) string {
 // the Mac's stored serial log.
 func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		switch a, who := s.access(r); a {
-		case adminAccess:
+		switch a, who, foreign := s.accessHost(r); {
+		case a == adminAccess:
 			h(w, r)
-		case viewAccess:
+		case a == viewAccess:
 			httpErr(w, 403, "%s may only look; this needs a lab admin", who)
+		case foreign:
+			foreignHost(w, r)
 		default:
 			httpErr(w, 401, "bad admin token")
 		}
@@ -464,7 +489,10 @@ func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
 // viewer guards read-only endpoints, which tailnet viewers may use too.
 func (s *Server) viewer(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if a, _ := s.access(r); a == noAccess {
+		if a, _, foreign := s.accessHost(r); foreign {
+			foreignHost(w, r)
+			return
+		} else if a == noAccess {
 			httpErr(w, 401, "bad admin token")
 			return
 		}
@@ -510,10 +538,16 @@ func ParseTrust(v string) ([]*net.IPNet, error) {
 
 // hAuth tells the UI whether this client needs a token at all, and whether
 // it may only look. Sent with a token, it says what that token is worth.
+// A request to a name labd doesn't know as its own needs a token, and
+// refused says why.
 func (s *Server) hAuth(w http.ResponseWriter, r *http.Request) {
-	a, who := s.access(r)
+	a, who, foreign := s.accessHost(r)
 	role := map[access]string{viewAccess: "viewer", adminAccess: "admin"}[a]
-	writeJSON(w, map[string]any{"trusted": a == adminAccess, "token_required": a == noAccess, "role": role, "login": who})
+	resp := map[string]any{"trusted": a == adminAccess, "token_required": a == noAccess, "role": role, "login": who}
+	if foreign {
+		resp["refused"] = hostRefusal(r.Host)
+	}
+	writeJSON(w, resp)
 }
 
 type ctxKey struct{}

@@ -658,6 +658,19 @@ the address it calls, works as before. The lab CLI, agents, builders and
 curl send neither header and aren't affected. A proxy in front of labd must
 pass on the `Host` the browser asked for.
 
+A page can get past that check by DNS rebinding: its site points the page's
+own name at labd's address once the page is open, and then the page and labd
+are one origin to the browser. So access that comes with no token, from
+`--trust` or a tailnet login, counts only on a request that asked for labd by
+one of its own names: an IP address, `localhost`, this machine's host name
+(short, fully qualified and under `.local`) and, with `--tailscale`, its
+MagicDNS name. Any other name gets a 403 that names it, for GETs too, since a
+page could read the lab as well; the UI shows why and asks for the token. If
+browsers reach labd by another name, a DNS alias say, run labd with
+`--allow-host labd.lan` (repeatable, or a comma-separated list). The token,
+device secrets and the builder token work by any name, so the lab CLI, agents,
+builders and scripts with the token don't care.
+
 ## Tailscale
 
 Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while

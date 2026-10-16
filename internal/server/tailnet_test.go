@@ -46,7 +46,7 @@ func TestTailnetRoles(t *testing.T) {
 	}
 	h := s.Handler()
 	try := func(method, path, remote, token string) int {
-		r := httptest.NewRequest(method, path, strings.NewReader("{}"))
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader("{}"))
 		r.RemoteAddr = remote
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)
@@ -107,7 +107,7 @@ func TestTailnetRoles(t *testing.T) {
 		TokenRequired bool `json:"token_required"`
 		Role, Login   string
 	}) {
-		r := httptest.NewRequest("GET", "/api/auth", nil)
+		r := httptest.NewRequest("GET", labdAt+"/api/auth", nil)
 		r.RemoteAddr = remote
 		for _, tok := range token {
 			r.Header.Set("Authorization", "Bearer "+tok)
@@ -190,7 +190,7 @@ func TestVolunteer(t *testing.T) {
 	h := s.Handler()
 	const peer = "100.64.0.2:40000"
 	do := func(method, path, remote, body string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader(body))
 		r.RemoteAddr = remote
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -312,7 +312,7 @@ func TestTrustYieldsToTailnet(t *testing.T) {
 	}
 	type hdr = map[string]string
 	try := func(h http.Handler, method, path, remote, token string, headers hdr) int {
-		r := httptest.NewRequest(method, path, strings.NewReader("{}"))
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader("{}"))
 		r.RemoteAddr = remote
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)
@@ -366,7 +366,7 @@ func TestTrustYieldsToTailnet(t *testing.T) {
 		}
 	}
 
-	r := httptest.NewRequest("GET", "/api/auth", nil)
+	r := httptest.NewRequest("GET", labdAt+"/api/auth", nil)
 	r.RemoteAddr = loop
 	r.Header.Set("Tailscale-User-Login", "admin@github")
 	w := httptest.NewRecorder()

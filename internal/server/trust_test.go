@@ -14,7 +14,7 @@ func TestTrustedNetworks(t *testing.T) {
 	s := &Server{cfg: Config{AdminToken: "adm_secret", Trust: trust}}
 	h := s.admin(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	try := func(remote, token, fwd string) int {
-		r := httptest.NewRequest("GET", "/api/devices", nil)
+		r := httptest.NewRequest("GET", labdAt+"/api/devices", nil)
 		r.RemoteAddr = remote
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)

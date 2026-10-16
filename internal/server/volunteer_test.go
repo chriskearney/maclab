@@ -41,7 +41,7 @@ func volunteerLab(t *testing.T) (*Server, func(method, path, remote, token, body
 	}
 	h := s.Handler()
 	return s, func(method, path, remote, token, body string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader(body))
 		r.RemoteAddr = remote
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)
@@ -320,7 +320,7 @@ func TestAgentBodyLimits(t *testing.T) {
 	// doesn't say.
 	post := func(path, secret string, body io.Reader, length ...int64) (int, string) {
 		t.Helper()
-		r := httptest.NewRequest("POST", path, body)
+		r := httptest.NewRequest("POST", labdAt+path, body)
 		r.ContentLength = -1
 		for _, n := range length {
 			r.ContentLength = n

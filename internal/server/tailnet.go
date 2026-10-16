@@ -68,12 +68,24 @@ type whoisCall struct {
 // access decides what a request may do. The admin token and a trusted network
 // give admin. With Tailscale on, a tailnet peer whose login is in Admins is an
 // admin and any other peer, tagged devices included, a viewer. who names the
-// tailnet peer, for error messages.
+// tailnet peer, for error messages. Without the token, a request gets in only
+// when it asked for labd by one of its own names (see ownHost).
 func (s *Server) access(r *http.Request) (a access, who string) {
+	a, who, _ = s.accessHost(r)
+	return a, who
+}
+
+// accessHost is access, and says whether the request has no access only
+// because it asked for labd by a name that isn't labd's own (foreign): its
+// network or its tailnet login would have let it in.
+func (s *Server) accessHost(r *http.Request) (a access, who string, foreign bool) {
 	if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) == 1 {
-		return adminAccess, ""
+		return adminAccess, "", false
 	}
-	return s.tokenless(r)
+	if a, who = s.tokenless(r); a != noAccess && !s.ownHost(r.Host) {
+		return noAccess, "", true
+	}
+	return a, who, false
 }
 
 // tokenless is the access a request gets without the admin token. With

@@ -1753,16 +1753,19 @@ document.addEventListener('keydown', e => {
 (async function start() {
   shell();
   await Promise.all([loadThemes(), logoSVG()]);
+  // refused: labd was opened by a name it doesn't know as its own, which gets no access without a token.
+  let refused = '';
   try {
     const a = await (await fetch('/api/auth')).json();
     S.open = !a.token_required;
     S.viewer = a.role === 'viewer';
+    refused = a.refused || '';
   } catch { S.open = false; }
-  if (!S.open && !S.token) {
+  if (!S.open && !S.token && !refused) {
     // An older labd has no /api/auth: try without a token before asking for one.
     S.open = (await fetch('/api/devices').catch(() => null))?.ok || false;
   }
-  if (!S.open && !S.token) { lock(); return; }
+  if (!S.open && !S.token) { lock(refused); return; }
   route();
   stream();
 })();

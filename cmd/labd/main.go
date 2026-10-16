@@ -28,6 +28,15 @@ func main() {
 	trust := flag.String("trust", os.Getenv("MACLAB_TRUST"), "networks that get admin access without a token, e.g. 192.168.1.0/24,127.0.0.1 (anyone there can reboot Macs and run commands on them)")
 	tailscale := flag.Bool("tailscale", false, "let tailnet peers in by their Tailscale identity: --admins get admin access, everyone else on the tailnet may only look")
 	admins := flag.String("admins", "", "Tailscale logins with admin access, e.g. a@github,b@github (needs --tailscale)")
+	var allowHosts []string
+	flag.Func("allow-host", "another name browsers reach labd by, e.g. labd.lan (repeatable). Access without a token (--trust, --tailscale) counts only "+
+		"on requests to labd's own names: IP addresses, localhost, this machine's host name (short, fully qualified and .local) "+
+		"and, with --tailscale, its MagicDNS name; any other name gets 403, so another site can't point its own name at labd (DNS rebinding)",
+		func(v string) error {
+			h, err := server.ParseAllowHost(v)
+			allowHosts = append(allowHosts, h...)
+			return err
+		})
 	omt := flag.Bool("omt", true, "run omarchy-m-test (github.com/maralcbr/omarchy-m-testing) in every job on Macs with a desktop user, and compare it with the known-good kernel")
 	omtSite := flag.String("omt-site", "https://omarchy-m-testing.org", "where omarchy-m-test reports are published (lab publish, --publish); empty never publishes")
 	omtPublish := flag.Bool("omt-publish", false, "publish known-good omarchy-m-test runs (baselines and --omt-every runs) by themselves")
@@ -77,7 +86,7 @@ func main() {
 	// ./volunteer downloads the lab-agent built alongside labd.
 	exe, _ := os.Executable()
 	s, err := server.New(ctx, server.Config{DataDir: *data, AdminToken: strings.TrimSpace(string(tok)), Trust: trusted,
-		Tailscale: *tailscale, Admins: server.ParseAdmins(*admins),
+		Tailscale: *tailscale, Admins: server.ParseAdmins(*admins), AllowHosts: allowHosts,
 		OMT: *omt, OMTSite: *omtSite, OMTPublish: *omtPublish, OMTEvery: *omtEvery,
 		BootTimeout: *bootTimeout, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
 		BuilderToken: strings.TrimSpace(string(btok)), ArtifactBudget: *artifactGB << 30,
