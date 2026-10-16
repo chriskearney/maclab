@@ -360,9 +360,13 @@ func (s *Server) baselinePath(name string) string {
 
 var jobMu sync.Mutex
 
+// updateJob changes j with f and saves it. Only lab exclude (hExclude)
+// changes a job's GateExclusion, through f; any other caller's copy of j may
+// be older than that, so j takes the stored one first.
 func (s *Server) updateJob(j *api.Job, f func(*api.Job)) {
 	jobMu.Lock()
 	defer jobMu.Unlock()
+	j.GateExclusion = s.store.gateExclusion(j.ID)
 	f(j)
 	j.Updated = time.Now()
 	if err := s.store.saveJob(j); err != nil {
@@ -433,6 +437,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
 	m.HandleFunc("POST /api/jobs/{id}/retry", s.admin(s.hRetry))
 	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
+	m.HandleFunc("POST /api/jobs/{id}/exclude", s.admin(s.hExclude))
+	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.admin(s.hExclude))
 	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.viewer(s.hJobFile))
 	m.HandleFunc("GET /api/gate/{kernel}", s.admin(s.hGate))
 	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))

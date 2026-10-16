@@ -452,6 +452,8 @@ lab gate <build-id | kernel sha256 prefix>                    # all six families
 lab gate b1015-120000-ab12 --families m1,m2 --evidence gate.json
 lab gate b1015-120000-ab12 --volunteers                       # count volunteers' Macs too
 lab gate b1015-120000-ab12 --exclude j1015-093012-ab12        # set a lab-caused failure aside, this once
+lab exclude j1015-093012-ab12 --reason "the access point went down mid-test"   # ... in every report
+lab exclude j1015-093012-ab12 --clear                         # count it again
 ```
 
 Families come from the SoC compatible in each Mac's device tree (or, from an agent older than that
@@ -514,6 +516,18 @@ makes the Mac look lost, `crashed_or_hung`, and that failure would keep its fami
 the decision is on the record; nothing is kept, so a `lab gate` without it counts them again. Only
 finished jobs of the kernel can be excluded.
 
+`lab exclude <job> --reason "..."` keeps a job aside instead: labd marks the job (`gate_exclusion`:
+who set it aside, why and when), and every `lab gate` after that, release scripts' included, sets it
+aside as `--exclude` would, without being asked. The report lists each such job of the kernel in
+`exclusions`, with who, why and when, and the summary names them; a run it sets aside that would
+have counted is in its family's `not_counted`, marked `excluded`, with the mark as `exclusion`.
+`lab job` shows the mark too. It takes a lab admin and a reason, and only a finished job; the person
+is the `lab` user and host, or a tailnet admin's login. `lab exclude <job> --clear` takes it off, and
+the job counts again. It is for a failure the lab caused, never for one of the kernel's that would
+keep a release back. Jobs from before labd kept the mark have none, and count as before. The API is
+`POST /api/jobs/{id}/exclude` with `{"reason": "...", "by": "..."}`, and `DELETE` to clear; agents
+use `lab_exclude`.
+
 Results are strings: a family's is `pass`, `fail`, `flaky`, `stage_failed` or `untested`, and a
 run's `pass`, `fail`, `flaky` or `stage_failed`. A script that looks for `"fail"` must treat
 `"flaky"` as not passing too. The report's own `result` is only ever `pass` (the gate is open) or
@@ -524,9 +538,11 @@ the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family
 runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
 couldn't stage, or a flaky Mac's other result; `retry_of` for a retry), and `not_counted`, the runs
 that decide nothing, each with its reason (`volunteer` marks a volunteer's Mac, `excluded` a job
-`--exclude` set aside). Then `volunteers` names the volunteers' Macs, `volunteers_counted` says
-whether they counted, `excluded` lists the excluded jobs, `not_counted` holds the runs of forgotten
-Macs whose jobs didn't record their family, and the labd host. The API is
+`--exclude` or `lab exclude` set aside, and `exclusion` the latter's mark). Then `volunteers` names
+the volunteers' Macs, `volunteers_counted` says whether they counted, `excluded` lists the jobs
+`--exclude` set aside, `exclusions` those `lab exclude` did (job, device, outcome, by, reason,
+time), `not_counted` holds the runs of forgotten Macs whose jobs didn't record their family, and the
+labd host. The API is
 `GET /api/gate/{kernel}?families=m1,m2&volunteers=1&exclude=j1,j2`; agents use `lab_gate`.
 
 ## Kernel artifacts
@@ -556,7 +572,7 @@ claude mcp add maclab -- lab mcp
 Tools: `lab_devices`, `lab_device`, `lab_run`, `lab_wait`, `lab_job`, `lab_jobs`,
 `lab_log`, `lab_screenshot`, `lab_baseline`, `lab_crashtest`, `lab_lease`,
 `lab_release`, `lab_reset`, `lab_serial`, `lab_exec`, `lab_cancel`, `lab_retry`, `lab_build`,
-`lab_build_status`, `lab_package`, `lab_publish` and `lab_gate`. A device in `needs_hands` is waiting for a
+`lab_build_status`, `lab_package`, `lab_publish`, `lab_gate` and `lab_exclude`. A device in `needs_hands` is waiting for a
 person. Tell the user; don't retry.
 
 A lab is worth describing to its agents once: which Macs you have, which one has

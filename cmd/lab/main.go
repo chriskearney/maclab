@@ -46,6 +46,9 @@ const usage = `lab: run kernels and tests on Omarchy Macs
                                       did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not.
                                       A family is pass, fail, flaky (passed and failed: not a pass), stage_failed or untested.
                                       --exclude sets jobs aside for this report only, e.g. a failure the lab caused
+  lab exclude <job> --reason "..." | lab exclude <job> --clear
+                                      set a finished job aside in every lab gate report, e.g. a failure the lab
+                                      caused; the gate lists who set it aside, why and when. --clear counts it again
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
@@ -463,6 +466,39 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		return nil
 
+	case "exclude":
+		reason := fs.String("reason", "", "why the job says nothing about its kernel, e.g. \"the access point went down mid-test\" (required)")
+		again := fs.Bool("clear", false, "count the job in lab gate again")
+		pos := parse(fs, args)
+		const use = `lab exclude <job> --reason "..." | lab exclude <job> --clear`
+		if err := need(pos, 1, use); err != nil {
+			return err
+		}
+		if *again {
+			if *reason != "" {
+				return fmt.Errorf("--clear takes no --reason; usage: %s", use)
+			}
+			if _, err := c.ClearExclusion(ctx, pos[0]); err != nil {
+				return err
+			}
+			fmt.Printf("job %s counts in lab gate again\n", pos[0])
+			return nil
+		}
+		if strings.TrimSpace(*reason) == "" {
+			return fmt.Errorf("say why with --reason; usage: %s", use)
+		}
+		j, err := c.Exclude(ctx, pos[0], *reason, holder())
+		if err != nil {
+			return err
+		}
+		x := j.GateExclusion
+		if x == nil {
+			return fmt.Errorf("labd answered, but didn't keep the exclusion: is it older than lab exclude?")
+		}
+		fmt.Printf("job %s (%s on %s) is set aside in every lab gate report, by %s at %s: %s. `lab exclude %s --clear` counts it again.\n",
+			j.ID, j.Outcome, j.Spec.Device, x.By, x.Time.Local().Format(time.DateTime), x.Reason, j.ID)
+		return nil
+
 	case "publish":
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab publish <job>"); err != nil {
@@ -678,6 +714,9 @@ func printJob(j *api.Job, events bool) {
 	if j.Summary != "" {
 		fmt.Printf("  %s\n", j.Summary)
 	}
+	if x := j.GateExclusion; x != nil {
+		fmt.Printf("  set aside in lab gate by %s at %s: %s\n", x.By, x.Time.Local().Format(time.DateTime), x.Reason)
+	}
 	r := j.Result
 	if r.Booted {
 		fmt.Printf("  booted %s in %.0fs\n", r.BootKernel, r.BootSeconds)
@@ -807,6 +846,14 @@ func printGate(r *api.GateReport) {
 	section("not counted:", other)
 	if len(r.Excluded) > 0 {
 		fmt.Printf("excluded for this report (--exclude): %s\n", strings.Join(r.Excluded, ", "))
+	}
+	if len(r.Exclusions) > 0 {
+		fmt.Println("set aside with lab exclude (`lab exclude <job> --clear` counts one again):")
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		for _, x := range r.Exclusions {
+			fmt.Fprintf(w, "  %s\t%s\t%s\tby %s\t%s\t%s\n", x.Job, x.Device, x.Outcome, x.By, x.Time.Local().Format(time.DateTime), x.Reason)
+		}
+		w.Flush()
 	}
 	section("excluded runs, not counted:", excluded)
 	switch {

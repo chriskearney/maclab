@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"net/http"
 	"slices"
 	"strings"
 	"testing"
@@ -583,6 +584,51 @@ func TestGateExclude(t *testing.T) {
 	}
 }
 
+// lab exclude marks a job: every report sets it aside like --exclude, and
+// lists who set it aside, why and when. A job from before labd kept the mark
+// has none, and counts.
+func TestGateStoredExclusion(t *testing.T) {
+	jobs := gateJobs("m1air pass", "m1air crashed_or_hung", "m2air pass", "m2air canceled")
+	at := time.Date(2026, 10, 16, 9, 30, 0, 0, time.UTC)
+	ap := &api.GateExclusion{By: "chris@i9beef", Reason: "the access point went down mid-test", Time: at}
+	jobs[1].GateExclusion = ap
+	jobs[3].GateExclusion = &api.GateExclusion{By: "chris@i9beef", Reason: "canceled anyway", Time: at}
+	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, []string{"m1", "m2"}, gateOpts{})
+	if got := gateResults(r); got["m1"] != "pass" || r.Result != api.GatePass {
+		t.Fatalf("families %v: %s", got, r.Summary)
+	}
+	nc := r.Families[0].NotCounted
+	want := "excluded (lab exclude, by chris@i9beef at 2026-10-16T09:30:00Z: the access point went down mid-test)"
+	if len(nc) != 1 || nc[0].Job != "jm1air-b" || !nc[0].Excluded || nc[0].Exclusion != ap || nc[0].Result != api.GateFail || nc[0].NotCounted != want {
+		t.Fatalf("m1 not counted %+v", nc)
+	}
+	wantX := []api.GateExcluded{{Job: "jm1air-b", Device: "m1air", Outcome: "crashed_or_hung", GateExclusion: *ap},
+		{Job: "jm2air-d", Device: "m2air", Outcome: "canceled", GateExclusion: *jobs[3].GateExclusion}}
+	if !slices.Equal(r.Exclusions, wantX) || r.Excluded != nil ||
+		r.Summary != "gate open: passed on m1, m2; set aside with lab exclude: jm1air-b, jm2air-d" {
+		t.Fatalf("exclusions %+v: %s", r.Exclusions, r.Summary)
+	}
+	b, _ := json.Marshal(r)
+	for _, s := range []string{`"exclusions":[{"job":"jm1air-b","device":"m1air","outcome":"crashed_or_hung","by":"chris@i9beef","reason":"the access point went down mid-test","time":"2026-10-16T09:30:00Z"}`,
+		`"excluded":true,"exclusion":{"by":"chris@i9beef"`} {
+		if !strings.Contains(string(b), s) {
+			t.Errorf("record lacks %s: %s", s, b)
+		}
+	}
+	// --exclude on the same job says so too
+	if r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, []string{"m1"}, gateOpts{exclude: map[string]bool{"jm1air-b": true}}); r.Families[0].NotCounted[0].NotCounted != "excluded (lab gate --exclude)" || len(r.Exclusions) != 2 {
+		t.Errorf("both: %+v", r)
+	}
+	// A job stored before labd kept the mark has none.
+	var old api.Job
+	if err := json.Unmarshal([]byte(`{"id":"jold","spec":{"device":"m1air","kernel":"k"},"state":"done","outcome":"crashed_or_hung"}`), &old); err != nil || old.GateExclusion != nil {
+		t.Fatalf("old job %+v: %v", old, err)
+	}
+	if r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), []*api.Job{&old, jobs[0]}, []string{"m1"}, gateOpts{}); gateResults(r)["m1"] != "flaky" || r.Exclusions != nil {
+		t.Fatalf("an old job: %s", r.Summary)
+	}
+}
+
 // A retry's pass names the job it retries, and the flaky Mac's reasons say so.
 func TestGateRetryLink(t *testing.T) {
 	jobs := gateJobs("m1air pass", "m1air tests_failed gui-smoke", "m2air pass", "m2air panicked")
@@ -809,6 +855,46 @@ func TestGateEndpoint(t *testing.T) {
 	gate("/api/gate/"+k[:12]+"?families=m1,m4", 400)
 	gate("/api/gate/abcdef0123", 404)
 	gate("/api/gate/not-a-kernel", 400)
+
+	// lab exclude keeps a job aside in every report, until it is cleared.
+	ctx := context.Background()
+	if _, err := c.Exclude(ctx, j.ID, "  ", "chris@i9beef"); err == nil || !strings.Contains(err.Error(), "say why") {
+		t.Fatalf("an exclusion with no reason: %v", err)
+	}
+	if _, err := c.Exclude(ctx, "jnope", "why", "chris@i9beef"); err == nil || err.(*client.StatusError).Code != 404 {
+		t.Fatalf("excluding no job: %v", err)
+	}
+	if resp, body := l.get("GET", "/api/jobs/"+j.ID); resp.StatusCode != 200 || strings.Contains(body, "gate_exclusion") {
+		t.Fatalf("a job before lab exclude: %s", body)
+	}
+	stale, _ := l.s.store.job(j.ID) // a copy from before the exclusion
+	xj, err := c.Exclude(ctx, j.ID, "the access point went down mid-test", "chris@i9beef")
+	if x := xj.GateExclusion; err != nil || x == nil || x.By != "chris@i9beef" || x.Reason != "the access point went down mid-test" || time.Since(x.Time) > time.Minute || !xj.Updated.Equal(stale.Updated) {
+		t.Fatalf("lab exclude: %+v %v", xj, err)
+	}
+	for _, q := range []string{"?families=m1", "?families=m1&exclude=" + first.ID} {
+		r = gate("/api/gate/"+k[:12]+q, 200)
+		if len(r.Exclusions) != 1 || r.Exclusions[0].Job != j.ID || r.Exclusions[0].By != "chris@i9beef" || !strings.Contains(r.Summary, "set aside with lab exclude: "+j.ID) {
+			t.Fatalf("gate %s after lab exclude: %+v", q, r)
+		}
+		if c := r.Families[0].NotCounted; !slices.ContainsFunc(c, func(run api.GateRun) bool { return run.Job == j.ID && run.Exclusion != nil }) {
+			t.Fatalf("gate %s: %s not set aside: %+v", q, j.ID, c)
+		}
+	}
+	// Another writer's older copy of the job keeps the mark.
+	l.s.updateJob(stale, func(j *api.Job) { j.Result.Logs = append(j.Result.Logs, "late.log") })
+	if got, _ := l.s.store.job(j.ID); got.GateExclusion == nil || !slices.Contains(got.Result.Logs, "late.log") {
+		t.Fatalf("a stale write: %+v", got)
+	}
+	if resp, _ := http.Post(l.url+"/api/jobs/"+j.ID+"/exclude", "application/json", strings.NewReader(`{"reason":"x"}`)); resp.StatusCode != 401 {
+		t.Fatalf("lab exclude without a token: %d", resp.StatusCode)
+	}
+	if _, err := c.ClearExclusion(ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if r = gate("/api/gate/"+k[:12]+"?families=m1&exclude="+first.ID, 200); r.Result != api.GatePass || r.Exclusions != nil || r.Families[0].Runs[0].Job != j.ID {
+		t.Fatalf("cleared: %+v", r)
+	}
 
 	// A Mac labd no longer has is listed as gone, not dropped.
 	if _, err := l.s.forget(v, "", true); err != nil {

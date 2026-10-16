@@ -227,6 +227,19 @@ func (c *Client) Retry(ctx context.Context, id, holder string) (*api.Job, error)
 	return &out, c.do(ctx, "POST", "/api/jobs/"+url.PathEscape(id)+"/retry?holder="+url.QueryEscape(holder), nil, &out)
 }
 
+// Exclude sets a finished job aside in every lab gate report, with the
+// reason and who asks, until ClearExclusion clears it.
+func (c *Client) Exclude(ctx context.Context, id, reason, by string) (*api.Job, error) {
+	var out api.Job
+	return &out, c.do(ctx, "POST", "/api/jobs/"+url.PathEscape(id)+"/exclude", jsonBody(api.ExcludeRequest{Reason: reason, By: by}), &out)
+}
+
+// ClearExclusion counts a job Exclude set aside in lab gate again.
+func (c *Client) ClearExclusion(ctx context.Context, id string) (*api.Job, error) {
+	var out api.Job
+	return &out, c.do(ctx, "DELETE", "/api/jobs/"+url.PathEscape(id)+"/exclude", nil, &out)
+}
+
 func (c *Client) File(ctx context.Context, id, name string) ([]byte, error) {
 	var out string
 	err := c.do(ctx, "GET", "/api/jobs/"+url.PathEscape(id)+"/files/"+name, nil, &out)
@@ -236,7 +249,7 @@ func (c *Client) File(ctx context.Context, id, name string) ([]byte, error) {
 // Gate reports whether a kernel (build id or sha256 prefix) passed on every
 // required chip family; no families means all of them. volunteers counts
 // volunteers' Macs too, and exclude sets those jobs of the kernel aside for
-// this report only.
+// this report only, besides those Exclude set aside.
 func (c *Client) Gate(ctx context.Context, kernel string, families []string, volunteers bool, exclude []string) (*api.GateReport, error) {
 	var out api.GateReport
 	q := "?families=" + url.QueryEscape(strings.Join(families, ","))

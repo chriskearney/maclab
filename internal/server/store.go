@@ -158,6 +158,19 @@ func (s *store) job(id string) (*api.Job, error) {
 	return &j, json.Unmarshal([]byte(data), &j)
 }
 
+// gateExclusion is the stored job id's GateExclusion, or nil.
+func (s *store) gateExclusion(id string) *api.GateExclusion {
+	var data sql.NullString
+	if s.db.QueryRow(`SELECT json_extract(data, '$.gate_exclusion') FROM jobs WHERE id=?`, id).Scan(&data) != nil || !data.Valid {
+		return nil
+	}
+	var x api.GateExclusion
+	if json.Unmarshal([]byte(data.String), &x) != nil {
+		return nil
+	}
+	return &x
+}
+
 func (s *store) jobs(device string, limit int, unfinished bool) ([]*api.Job, error) {
 	q := `SELECT data FROM jobs WHERE (?='' OR device=?)`
 	if unfinished {

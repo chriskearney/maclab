@@ -436,6 +436,24 @@ type Job struct {
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
 	// Jobs from before labd kept it have none.
 	DeviceAtSubmit *DeviceSnapshot `json:"device_at_submit,omitempty"`
+	// GateExclusion sets the job aside in every lab gate report until it is
+	// cleared (lab exclude), say a failure the lab caused. Jobs without one,
+	// those from before labd kept it among them, count as usual.
+	GateExclusion *GateExclusion `json:"gate_exclusion,omitempty"`
+}
+
+// GateExclusion is an admin's lasting word that a finished job says nothing
+// about its kernel: who said it, why and when.
+type GateExclusion struct {
+	By     string    `json:"by"`
+	Reason string    `json:"reason"`
+	Time   time.Time `json:"time"`
+}
+
+// ExcludeRequest sets a job aside in lab gate (POST /api/jobs/{id}/exclude).
+type ExcludeRequest struct {
+	Reason string `json:"reason"`       // required
+	By     string `json:"by,omitempty"` // who asks; labd names a tailnet admin by their login itself
 }
 
 // DeviceSnapshot is what lab gate needs to know about a job's Mac, as it was
@@ -678,7 +696,17 @@ type GateRun struct {
 	Volunteer  bool       `json:"volunteer,omitempty"`   // the Mac is a volunteer's (Device.Volunteer)
 	NotCounted string     `json:"not_counted,omitempty"` // why the run doesn't count
 	RetryOf    string     `json:"retry_of,omitempty"`    // the job this one retries (lab retry)
-	Excluded   bool       `json:"excluded,omitempty"`    // the query set it aside (?exclude=, lab gate --exclude)
+	Excluded   bool       `json:"excluded,omitempty"`    // the query (?exclude=, lab gate --exclude) or lab exclude set it aside
+	// Exclusion is the lab exclude mark that set the run aside, if one did.
+	Exclusion *GateExclusion `json:"exclusion,omitempty"`
+}
+
+// GateExcluded is one of a kernel's jobs that lab exclude set aside.
+type GateExcluded struct {
+	Job     string `json:"job"`
+	Device  string `json:"device"`
+	Outcome string `json:"outcome"`
+	GateExclusion
 }
 
 type GateFamily struct {
@@ -712,6 +740,10 @@ type GateReport struct {
 	// --exclude), say a failure the lab caused that reads as the kernel's.
 	// Each one that would have counted is in its family's not_counted.
 	Excluded []string `json:"excluded,omitempty"`
+	// Exclusions lists the kernel's jobs set aside until cleared (lab
+	// exclude), with who set each aside, why and when. Each one that would
+	// have counted is in its family's not_counted too.
+	Exclusions []GateExcluded `json:"exclusions,omitempty"`
 	// NotCounted holds the runs no family can take: those of Macs labd no
 	// longer has (lab forget) from jobs that didn't record their chip family.
 	NotCounted []GateRun `json:"not_counted,omitempty"`

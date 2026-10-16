@@ -1,6 +1,7 @@
 package server
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"maps"
@@ -262,7 +263,8 @@ func gateRun(j *api.Job, res string) api.GateRun {
 // failed, since it failed even so, but not when it passed. Canceled and
 // infra_error jobs say nothing about the kernel, nor do tests_failed jobs
 // whose failed tests couldn't run at all, nor crash tests, which crash it on
-// purpose, nor the jobs o.exclude sets aside.
+// purpose, nor the jobs o.exclude or lab exclude (a job's GateExclusion)
+// sets aside.
 //
 // A job is judged by its Mac as it was when the job was submitted: its chip
 // family, whether it was a volunteer's and whether its jobs ran
@@ -284,6 +286,11 @@ func gateRun(j *api.Job, res string) api.GateRun {
 // when every required family passed.
 func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []string, o gateOpts) api.GateReport {
 	rep := api.GateReport{Kernel: k, Required: required, VolunteersCounted: o.volunteers}
+	for _, j := range jobs {
+		if x := j.GateExclusion; x != nil {
+			rep.Exclusions = append(rep.Exclusions, api.GateExcluded{Job: j.ID, Device: j.Spec.Device, Outcome: j.Outcome, GateExclusion: *x})
+		}
+	}
 	cur := map[string]api.Device{}
 	for _, d := range devs {
 		cur[d.Name] = d
@@ -323,9 +330,12 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 			macs[key] = m
 			order = append(order, key)
 		}
-		why := ""
-		if o.exclude[j.ID] {
+		why, x := "", j.GateExclusion
+		switch {
+		case o.exclude[j.ID]:
 			why = "excluded (lab gate --exclude)"
+		case x != nil:
+			why = fmt.Sprintf("excluded (lab exclude, by %s at %s: %s)", x.By, x.Time.UTC().Format(time.RFC3339), x.Reason)
 		}
 		if why == "" && res == api.GateFail {
 			why = runnerFailures(j)
@@ -342,7 +352,7 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		switch {
 		case why != "":
 			r := gateRun(j, res)
-			r.NotCounted, r.Excluded = why, o.exclude[j.ID]
+			r.NotCounted, r.Excluded, r.Exclusion = why, o.exclude[j.ID] || x != nil, x
 			m.skipped = append(m.skipped, r)
 		case res == api.GatePass && m.pass == nil:
 			m.pass = j
@@ -456,6 +466,13 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 	if len(rep.Excluded) > 0 {
 		rep.Summary += "; excluded " + strings.Join(rep.Excluded, ", ")
 	}
+	if len(rep.Exclusions) > 0 {
+		var ids []string
+		for _, x := range rep.Exclusions {
+			ids = append(ids, x.Job)
+		}
+		rep.Summary += "; set aside with lab exclude: " + strings.Join(ids, ", ")
+	}
 	return rep
 }
 
@@ -511,7 +528,8 @@ func (s *Server) gateKernel(id string) (api.GateKernel, int, error) {
 // counts volunteers' Macs, and ?exclude=j1,j2 sets those jobs of the kernel
 // aside for this query, say a failure the lab caused (an access point that
 // went down mid-test reads as crashed_or_hung). Nothing is kept: the next
-// query without it counts them again.
+// query without it counts them again. The jobs lab exclude set aside
+// (hExclude) stay aside in every query, and are listed.
 func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 	required := familyIDs()
 	if v := r.URL.Query().Get("families"); v != "" {
@@ -568,4 +586,61 @@ func (s *Server) hGate(w http.ResponseWriter, r *http.Request) {
 	rep := rollUp(k, devs, jobs, required, o)
 	rep.Labd, rep.Generated = r.Host, time.Now().UTC()
 	writeJSON(w, rep)
+}
+
+// exclusionBodyMax holds an exclusion's reason to something a report can
+// carry for every query.
+const exclusionBodyMax = 8 << 10
+
+// hExclude sets a finished job aside in lab gate until it is cleared (lab
+// exclude), say a failure the lab caused (an access point that went down
+// mid-test reads as crashed_or_hung): every gate report then lists it, with
+// who set it aside, why and when, and doesn't count it. It needs a reason.
+// The asker names themselves in by, but a tailnet admin is named by their
+// login. DELETE clears it. Both answer with the job.
+func (s *Server) hExclude(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	var x *api.GateExclusion
+	if r.Method == http.MethodPost {
+		var req api.ExcludeRequest
+		if !decodeBody(w, r, exclusionBodyMax, &req) {
+			return
+		}
+		if req.Reason = strings.TrimSpace(req.Reason); req.Reason == "" {
+			httpErr(w, 400, "say why job %s says nothing about its kernel: lab exclude %s --reason \"...\"", id, id)
+			return
+		}
+		by := strings.TrimSpace(req.By)
+		if _, who := s.access(r); who != "" {
+			by = who
+		}
+		x = &api.GateExclusion{By: orStr(by, "an admin"), Reason: req.Reason, Time: time.Now().UTC()}
+	}
+	// Under jobMu, so no other change to the job is lost, and without
+	// touching Updated: the gate takes that as when the job finished.
+	jobMu.Lock()
+	j, err := s.store.job(id)
+	if err == nil && j.State == api.JobDone {
+		j.GateExclusion = x
+		err = s.store.saveJob(j)
+	}
+	jobMu.Unlock()
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		httpErr(w, 404, "no job %s", id)
+		return
+	case err != nil:
+		httpErr(w, 500, "%v", err)
+		return
+	case j.State != api.JobDone:
+		httpErr(w, 409, "job %s is still %s: only a finished job counts in lab gate, so set it aside once it is done", id, j.State)
+		return
+	}
+	s.hub.publish("job", j.Spec.Device, map[string]any{"id": j.ID, "device": j.Spec.Device, "state": j.State, "outcome": j.Outcome})
+	if x != nil {
+		s.log.Printf("job %s: set aside in lab gate by %s: %s", id, x.By, x.Reason)
+	} else {
+		s.log.Printf("job %s: no longer set aside in lab gate", id)
+	}
+	writeJSON(w, j)
 }
