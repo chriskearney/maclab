@@ -471,7 +471,10 @@ bash's own error for its `test-<name>.sh`, exiting 126 for `Permission denied` (
 directory`. A test that ran and exited 126 or 127 itself, say for a binary it couldn't execute
 (`Exec format error`) or a command it couldn't find, failed like any other, and other trouble
 running a test (a script that didn't download, no desktop session) looks like the kernel's in the
-job's record, so it still counts as a failure. Every other outcome but `pass` is a failure.
+job's record, so it still counts as a failure. A job canceled after its kernel had already failed
+(a panic, a reboot or hang during a test, a test that failed by itself) keeps that failure as its
+outcome, with the cancel in its summary; tests the cancel cut short are the cancel's. Every other
+outcome but `pass` is a failure.
 
 Each job records its Mac as it was when the job was submitted: its chip family, whether it was a
 volunteer's, and whether labd ran `omarchy-m-test` in its jobs. The gate judges the job by that,

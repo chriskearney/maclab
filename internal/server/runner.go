@@ -32,6 +32,8 @@ type jobRun struct {
 	ir *installedRun // installed-kernel jobs only
 
 	omtRef []byte // a known-good run's omarchy-m-test reference, written only if the job passes
+
+	failedOwn int // tests that failed by themselves, not cut short by a cancel
 }
 
 func (r *jobRun) ev(format string, args ...any) {
@@ -158,10 +160,12 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 
 	outcome, summary := r.execute(ctx)
 	if ctx.Err() != nil && outcome != api.OutcomeCanceled {
-		outcome, summary = api.OutcomeCanceled, "canceled: "+summary
+		outcome, summary = r.canceledAfter(outcome, summary)
 	}
 	left := v.leaving()
 	if left != "" {
+		// Canceled whatever was seen: the agent stopping reads as the Mac
+		// going down, which the job can't tell from the kernel's doing.
 		outcome, summary = api.OutcomeCanceled, "canceled: "+left
 	}
 
@@ -201,6 +205,24 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		outcome, summary = r.ir.seal(outcome, summary, at)
 	}
 	r.finishAt(outcome, summary, at)
+}
+
+// canceledAfter is the outcome of a job canceled while it ran, given what
+// execute made of it. A kernel failure seen before the cancel (a panic, a
+// reboot or hang during a test, a test that failed by itself) is the
+// kernel's whatever came next: it stays the outcome, with the cancel in the
+// summary, so lab gate counts it and a retry's pass doesn't read as clean.
+// Anything else, tests the cancel cut short among it, is the cancel's.
+func (r *jobRun) canceledAfter(outcome, summary string) (string, string) {
+	kernel := gateResult(outcome) == api.GateFail
+	if outcome == api.OutcomeTestsFailed && r.failedOwn == 0 {
+		kernel = false // only tests the cancel cut short failed
+	}
+	if kernel {
+		r.ev("canceled after the kernel failed (%s): that stays the outcome", outcome)
+		return outcome, summary + "; then the job was canceled"
+	}
+	return api.OutcomeCanceled, "canceled: " + summary
 }
 
 func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, time.Now()) }
@@ -329,8 +351,12 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
 		}
+		cut := err != nil && ctx.Err() != nil // by a cancel
 		if err != nil {
 			tr = api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}
+		}
+		if cut {
+			tr.Error = "the job was canceled during this test"
 		}
 		if t.Builtin == omtTest && err == nil {
 			r.omtResult(&tr)
@@ -346,6 +372,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		if !tr.Passed {
 			failed++
+			if !cut {
+				r.failedOwn++
+			}
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.Tests = append(j.Result.Tests, tr) })
 		r.ev("test %s: %s", t.Name, testVerdict(tr))

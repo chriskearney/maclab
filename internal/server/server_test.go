@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1498,6 +1499,97 @@ func TestCancelWhileBootingRestoresKnownGood(t *testing.T) {
 	// The next job stages the same kernel without tripping over it.
 	l.sim.RebootDelay = 300 * time.Millisecond
 	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-slow behavior=ok")}), api.OutcomePass)
+}
+
+// cancelWhen cancels job id once one of its events contains msg.
+func (l *lab) cancelWhen(id, msg string) {
+	l.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		cur, _ := l.s.store.job(id)
+		if slices.ContainsFunc(cur.Events, func(e api.JobEvent) bool { return strings.Contains(e.Msg, msg) }) {
+			if r, body := l.get("POST", "/api/jobs/"+id+"/cancel"); r.StatusCode != 200 {
+				l.t.Fatalf("cancel: %s %s", r.Status, body)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cur, _ := l.s.store.job(id)
+	l.t.Fatalf("job %s never logged %q: %s %s, events %v", id, msg, cur.Outcome, cur.Summary, cur.Events)
+}
+
+// A cancel after the kernel failed keeps the failure as the outcome, so lab
+// gate counts it and a retry's pass reads as flaky, not clean. Tests the
+// cancel cut short are the cancel's, not the kernel's.
+func TestCancelKeepsKernelFailure(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	k := l.artifact("krel=7.2-oops behavior=crash-in-test")
+	// collecting the crashed boot's logs takes long enough to cancel meanwhile
+	l.sim.CollectHook = func(boot, outDir string) error {
+		if boot == "-1" {
+			time.Sleep(2 * time.Second)
+		}
+		return nil
+	}
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: k})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j.ID, "back after")
+	j = l.wait(j.ID, 60*time.Second)
+	l.expect(j, api.OutcomePanicked)
+	if !strings.Contains(j.Summary, "kernel crashed") || !strings.Contains(j.Summary, "then the job was canceled") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+
+	// A test that failed by itself before the cancel stands; one the cancel
+	// cut short doesn't.
+	l.sim.TestFiles = func(test, kernel string) map[string][]byte {
+		if strings.HasPrefix(test, "slow-") {
+			time.Sleep(3 * time.Second)
+		}
+		return nil
+	}
+	ok := l.artifact("krel=7.2-ok behavior=ok")
+	j2, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: ok, Tests: []api.TestSpec{{Name: "will-fail", Builtin: "x"}, {Name: "slow-check", Builtin: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j2.ID, "test slow-check: running")
+	j2 = l.wait(j2.ID, 60*time.Second)
+	l.expect(j2, api.OutcomeTestsFailed)
+	if !strings.Contains(j2.Summary, "then the job was canceled") || j2.Result.Tests[2].Error != "the job was canceled during this test" {
+		t.Fatalf("summary %s, tests %+v", j2.Summary, j2.Result.Tests)
+	}
+	j3, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: ok, Tests: []api.TestSpec{{Name: "slow-check", Builtin: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j3.ID, "test slow-check: running")
+	j3 = l.wait(j3.ID, 60*time.Second)
+	l.expect(j3, api.OutcomeCanceled)
+
+	// lab gate counts the kept failure against the kernel. (The sim has no
+	// chip family: make its jobs an M1's.)
+	m1 := gateDev(l.name, "t8103")
+	for _, j := range []*api.Job{j, j2, j3} {
+		j.DeviceAtSubmit.Family = "m1"
+	}
+	for _, c := range []struct {
+		job  *api.Job
+		kern string
+	}{{j, k}, {j2, ok}} {
+		r := rollUp(api.GateKernel{SHA256: c.kern}, []api.Device{m1}, []*api.Job{c.job}, []string{"m1"}, gateOpts{})
+		if r.Result != api.GateFail || len(r.Families[0].Runs) != 1 || r.Families[0].Runs[0].Result != api.GateFail {
+			t.Fatalf("gate on %s: %s", c.job.ID, r.Summary)
+		}
+	}
+	if r := rollUp(api.GateKernel{SHA256: ok}, []api.Device{m1}, []*api.Job{j3}, []string{"m1"}, gateOpts{}); gateResults(r)["m1"] != api.GateUntested {
+		t.Fatalf("gate on the canceled %s: %s", j3.ID, r.Summary)
+	}
 }
 
 // omarchy-m-test under another name in the job still runs as the builtin,
