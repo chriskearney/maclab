@@ -6,9 +6,10 @@
 #   ./volunteer leave    leave it: undoes everything joining did
 #
 # Joining installs and signs into Tailscale if needed, finds labd on the
-# tailnet, asks it for an enrollment token for this Mac, downloads labd's
-# lab-agent and runs `lab-agent setup` with them. MACLAB_SERVER=http://<host>:7770
-# skips the search.
+# tailnet, shows which machine answered and asks you to confirm it, asks it
+# for an enrollment token for this Mac, downloads labd's lab-agent and runs
+# `lab-agent setup` with them. MACLAB_SERVER=http://<host>:7770 skips the
+# search and the question.
 set -euo pipefail
 
 usage="Usage: ./volunteer          join the lab
@@ -20,14 +21,30 @@ die() {
 	exit 1
 }
 
-# find_labs prints the URL of every labd on the tailnet that lets this Mac in.
+# find_labs prints the tailnet address of every labd that lets this Mac in.
 find_labs() {
 	local ip
 	for ip in $(tailscale status --json | jq -r '.Peer[]? | select(.Online) | .TailscaleIPs[]? | select(startswith("100."))'); do
 		(curl -fsm 3 "http://$ip:7770/api/auth" 2>/dev/null | jq -e '.role == "viewer" or .role == "admin"' >/dev/null 2>&1 &&
-			echo "http://$ip:7770") &
+			echo "$ip") &
 	done
 	wait
+}
+
+# peer_name names the tailnet machine at address $1: its tailnet DNS name and
+# its host name, as tailscale status reports them.
+peer_name() {
+	local name
+	name=$(tailscale status --json | jq -r --arg ip "$1" 'first(.Peer[]? | select(any(.TailscaleIPs[]?; . == $ip))) |
+		"\(.DNSName // "" | rtrimstr(".") | if . == "" then "(no DNS name)" else . end) (host name \(.HostName // "unknown"))"')
+	echo "${name:-a machine missing from tailscale status}"
+}
+
+# confirm asks a question on the terminal; only y or yes goes ahead.
+confirm() {
+	local answer
+	read -r -p "$1 [y/N] " answer </dev/tty || return 1
+	[[ $answer == [yY] || $answer == [yY][eE][sS] ]]
 }
 
 join() {
@@ -60,7 +77,7 @@ Enter your password to go ahead, or press Ctrl-C to stop."
 		fresh=1
 	fi
 
-	local server=${MACLAB_SERVER:-} labs=""
+	local server=${MACLAB_SERVER:-} labs="" ip list=""
 	if [[ -z $server ]]; then
 		say "Looking for the lab on your tailnet..."
 		# Right after signing in, peers take a moment to show up.
@@ -69,15 +86,29 @@ Enter your password to go ahead, or press Ctrl-C to stop."
 			[[ -n $labs || -z $fresh ]] && break
 			sleep 3
 		done
-		# shellcheck disable=SC2086 # one URL per word
+		# shellcheck disable=SC2086 # one address per word
 		set -- $labs
 		case $# in
 		0) die "No lab found on your tailnet. Ask the lab's maintainer to share the lab machine
 with your Tailscale account, accept the share, and run ./volunteer again." ;;
-		1) server=$1 ;;
-		*) die "More than one lab is on your tailnet: $*
-Pick one: MACLAB_SERVER=<one of them> ./volunteer" ;;
+		1) ip=$1 ;;
+		*)
+			for ip in "$@"; do
+				list+=$'\n'"  http://$ip:7770  $(peer_name "$ip")"
+			done
+			die "More than one lab is on your tailnet:$list
+Pick one: MACLAB_SERVER=<one of them> ./volunteer"
+			;;
 		esac
+		# Any machine on the tailnet can answer like a lab, and the agent it
+		# hands out runs as root here: the person checks it is the lab.
+		say "A lab answered from this machine on your tailnet:
+  $(peer_name "$ip"), $ip
+The lab's agent comes from it and runs as root on this Mac. Go on only if
+it is the machine the lab's maintainer shared with you."
+		confirm "Is this the lab?" ||
+			die "Stopped before signing up. To name the lab yourself: MACLAB_SERVER=http://<host>:7770 ./volunteer"
+		server="http://$ip:7770"
 	fi
 
 	say "Found the lab at $server. Signing this Mac up..."

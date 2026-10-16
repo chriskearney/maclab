@@ -516,7 +516,11 @@ On an Apple Silicon Mac running Omarchy, in a clone of this repo:
 `./volunteer` installs Tailscale and signs in if needed, finds labd among the
 tailnet's online machines (port 7770), asks it for an enrollment token, downloads
 labd's lab-agent and runs `sudo lab-agent setup --server .. --token .. --gui-user <you>`
-with them. `MACLAB_SERVER=http://<host>:7770 ./volunteer` skips the search.
+with them. Any machine on the tailnet could answer like a lab, and its lab-agent
+runs as root, so before signing up it shows the machine that answered (its
+tailnet DNS name and host name) and goes on only when you answer `y`. It stops
+when more than one lab answers. `MACLAB_SERVER=http://<host>:7770 ./volunteer`
+skips the search and the question.
 
 The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
 keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
