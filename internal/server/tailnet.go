@@ -77,11 +77,12 @@ func (s *Server) access(r *http.Request) (a access, who string) {
 }
 
 // tokenless is the access a request gets without the admin token. With
-// Tailscale on, a trusted network gives nothing to tailnet traffic labd can
-// recognise: a tailnet peer address is judged by its identity, and a request
-// tailscale serve or Funnel proxied from this host gets no trust at all.
+// Tailscale on, a trusted network gives nothing to traffic that may be from
+// the tailnet, as far as labd can tell (see mayBeTailnet): a tailnet peer
+// address is judged by its identity, and a proxied request gets no trust at
+// all.
 func (s *Server) tokenless(r *http.Request) (access, string) {
-	if s.trusted(r) && !(s.cfg.Tailscale && fromTailnet(r)) {
+	if s.trusted(r) && !(s.cfg.Tailscale && mayBeTailnet(r)) {
 		return adminAccess, ""
 	}
 	if !s.cfg.Tailscale {
@@ -102,17 +103,22 @@ func (s *Server) tokenless(r *http.Request) (access, string) {
 	return viewAccess, p.Login
 }
 
-// serveHeaders are what tailscale serve sets on a request it proxies: the
-// identity of a tailnet user, or Funnel's marker for internet traffic. Tagged
-// nodes get none of them, only X-Forwarded-For with their tailnet address.
+// serveHeaders are what tailscale serve sets on a request it proxies, besides
+// X-Forwarded-For: the identity of a tailnet user, or Funnel's marker for
+// internet traffic. Tagged nodes get none of them.
 var serveHeaders = []string{"Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-User-Profile-Pic",
 	"Tailscale-Headers-Info", "Tailscale-App-Capabilities", "Tailscale-Funnel-Request"}
 
-// fromTailnet reports whether a request came from the tailnet as far as labd
-// can tell: from a tailnet address, or through tailscale serve or Funnel. A
-// proxied request arrives from 127.0.0.1 or this host's own address, so only
-// its headers give it away. Faking them only loses a client access.
-func fromTailnet(r *http.Request) bool {
+// mayBeTailnet reports whether a request may have come from the tailnet, as
+// far as labd can tell: it came from a tailnet address, or through an HTTP
+// proxy. tailscale serve and Funnel proxy from 127.0.0.1 or this host's own
+// address, so only headers give them away: serve's own, and the
+// X-Forwarded-For it always sets. Any X-Forwarded-* or Forwarded header
+// counts, whatever it says: labd can't tell which proxy set it, or where that
+// proxy's client came from. Faking one only loses a client access. Raw TCP
+// forwarding (tailscale serve --tcp or --tls-terminated-tcp, Funnel's TCP
+// mode) sets no header at all, and labd can't tell it from a local client.
+func mayBeTailnet(r *http.Request) bool {
 	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil && inTailnet(ap.Addr()) {
 		return true
 	}
@@ -121,11 +127,9 @@ func fromTailnet(r *http.Request) bool {
 			return true
 		}
 	}
-	for _, v := range r.Header.Values("X-Forwarded-For") {
-		for _, f := range strings.Split(v, ",") {
-			if ip, err := netip.ParseAddr(strings.TrimSpace(f)); err == nil && inTailnet(ip) {
-				return true
-			}
+	for h := range r.Header {
+		if strings.EqualFold(h, "Forwarded") || len(h) > len("X-Forwarded-") && strings.EqualFold(h[:len("X-Forwarded-")], "X-Forwarded-") {
+			return true
 		}
 	}
 	return false
@@ -139,8 +143,9 @@ func warnTrustedNetworks(cfg Config, logger *log.Logger) {
 	}
 	for _, n := range cfg.Trust {
 		logger.Printf("warning: --trust %s with --tailscale: tailnet traffic that reaches labd through %s gets admin with no token "+
-			"(a subnet router into it, Tailscale SSH onto a machine in it, tailscale serve or Funnel proxying from this host). "+
-			"labd refuses trust to requests carrying tailscale serve's headers, but can't tell the rest from local traffic", n, n)
+			"(a subnet router into it, Tailscale SSH onto a machine in it, tailscale serve --tcp or Funnel TCP forwarding from this host). "+
+			"labd refuses trust to requests carrying a proxy's headers (X-Forwarded-*, Forwarded, tailscale serve's), "+
+			"but can't tell the rest from local traffic", n, n)
 	}
 }
 

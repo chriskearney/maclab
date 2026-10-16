@@ -287,8 +287,10 @@ func TestParseWhoIs(t *testing.T) {
 }
 
 // With --tailscale, tailnet traffic gets no admin through --trust when labd
-// can tell it is tailnet traffic: tailscale serve and Funnel proxy from
-// 127.0.0.1 with their own headers, and tailnet peers are judged by identity.
+// can tell it may be tailnet traffic: tailscale serve and Funnel proxy from
+// 127.0.0.1 with their own headers and X-Forwarded-For, any other proxy's
+// headers count the same, and tailnet peers are judged by identity. Without
+// --tailscale, trust is by address only, whatever the headers say.
 func TestTrustYieldsToTailnet(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -316,7 +318,7 @@ func TestTrustYieldsToTailnet(t *testing.T) {
 			r.Header.Set("Authorization", "Bearer "+token)
 		}
 		for k, v := range headers {
-			r.Header.Set(k, v)
+			r.Header[k] = []string{v} // as given: net/http's own parsing leaves some names alone
 		}
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -342,8 +344,15 @@ func TestTrustYieldsToTailnet(t *testing.T) {
 		{"Funnel", "POST", "/api/jobs", loop, "", hdr{"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7"}, 401, past},
 		{"a tagged node through serve", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "100.64.0.3"}, 401, past},
 		{"serve on a LAN address", "POST", "/api/jobs", lan, "", hdr{"Tailscale-User-Name": "Visitor"}, 401, past},
-		{"a LAN proxy forwarding a LAN client", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, past, past},
+		{"a proxy forwarding a LAN client", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, 401, past},
+		{"only X-Forwarded-Host", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-Host": "labd.tail1234.ts.net"}, 401, past},
+		{"only X-Forwarded-Proto, from the LAN", "POST", "/api/jobs", lan, "", hdr{"X-Forwarded-Proto": "https"}, 401, past},
+		{"a lowercase header", "POST", "/api/jobs", loop, "", hdr{"x-forwarded-for": "127.0.0.1"}, 401, past},
+		{"RFC 7239 Forwarded", "POST", "/api/jobs", loop, "", hdr{"Forwarded": "for=192.0.2.60;proto=https"}, 401, past},
+		{"nor may a proxied request look", "GET", "/api/devices", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, 401, 200},
+		{"a header that only looks like one", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded": "1", "Forwarded-For": "1"}, past, past},
 		{"serve with the token", "POST", "/api/jobs", loop, "adm_secret", serveUser, past, past},
+		{"a proxy with the token", "POST", "/api/jobs", loop, "adm_secret", hdr{"X-Forwarded-Host": "labd"}, past, past},
 		{"a trusted tailnet peer is judged by identity", "POST", "/api/jobs", "100.64.0.3:1", "", nil, 403, past},
 	}
 	with, logs := newServer(true)

@@ -622,15 +622,24 @@ keeps working everywhere for `lab` and scripts.
 that reaches labd from a trusted address gets admin too, whoever sent it.
 With `--tailscale`, labd refuses that trust where it can tell: a tailnet
 address is judged by its identity even inside a trusted network, and a
-request proxied by `tailscale serve` or Funnel (it carries serve's
-`Tailscale-User-*`, `Tailscale-Headers-Info` or `Tailscale-Funnel-Request`
-headers, or an `X-Forwarded-For` naming a tailnet address) gets no trust and
-needs the token. labd can't see the rest: a subnet router that brings tailnet
-traffic into a trusted network, or someone who reaches a machine there over
-Tailscale SSH and connects from it, looks like local traffic. labd logs a
-warning at startup for each trusted network. With `--tailscale`, trust only
-networks no tailnet route leads into, or leave `--trust` off and use
-`--admins` and the token.
+request that came through an HTTP proxy gets no trust and needs the token.
+labd counts any request with an `X-Forwarded-*` or `Forwarded` header, or
+one of serve's `Tailscale-User-*`, `Tailscale-Headers-Info` or
+`Tailscale-Funnel-Request` headers, as proxied, whatever proxy set it:
+`tailscale serve` and Funnel always set `X-Forwarded-For`. Without
+`--tailscale`, headers change nothing and trust goes by address alone.
+
+labd can't see the rest, and can't be made to: raw TCP forwarding
+(`tailscale serve --tcp` or `--tls-terminated-tcp`, Funnel in TCP mode) adds
+no header at all, so a request it forwards from 127.0.0.1 or this host's LAN
+address looks local. So does traffic from a subnet router that brings
+tailnet traffic into a trusted network, or from someone who reaches a
+machine there over Tailscale SSH and connects from it. Trusting 127.0.0.1 or
+the lab LAN while also running `--tailscale` is safe only as long as nobody
+sets up TCP forwarding to labd on this host, or a route like those into that
+network. labd logs a warning at startup for each trusted network. With
+`--tailscale`, trust only networks no tailnet route leads into, or leave
+`--trust` off and use `--admins` and the token.
 
 To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
 Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short
