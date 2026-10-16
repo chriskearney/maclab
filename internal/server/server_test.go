@@ -975,7 +975,8 @@ func TestOmarchyMTestDriverNodes(t *testing.T) {
 	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
 	l.baseline()
 	var ref omtBaseline
-	if b, _ := os.ReadFile(l.s.omtBaselinePath("sim-mac")); json.Unmarshal(b, &ref) != nil || strings.Join(ref.Unclaimed, " ") != "apple,mesa-fingerprint apple,sep" {
+	if b, _ := os.ReadFile(l.s.omtBaselinePath("sim-mac")); json.Unmarshal(b, &ref) != nil || strings.Join(ref.Unclaimed, " ") != "apple,mesa-fingerprint apple,sep" ||
+		!reflect.DeepEqual(ref.UnclaimedNodes, map[string]int{"apple,mesa-fingerprint": 1, "apple,sep": 1}) {
 		t.Fatalf("reference %+v", ref)
 	}
 
@@ -1013,7 +1014,7 @@ func TestOmarchyMTestDriverNodes(t *testing.T) {
 	l.expect(j, api.OutcomeTestsFailed)
 
 	// A reference recorded before the lab kept its unclaimed nodes compares as before.
-	ref.Unclaimed = nil
+	ref.Unclaimed, ref.UnclaimedNodes = nil, nil
 	b, _ := json.Marshal(ref)
 	os.WriteFile(l.s.omtBaselinePath("sim-mac"), b, 0o644)
 	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ane4 behavior=ok")})

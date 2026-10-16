@@ -357,9 +357,11 @@ answered yes. The run takes 1 to 3 minutes.
   purpose names what it's expected to fail: `--omt-allow system.failed-units`,
   or `--omt-allow hardware.drivers:<compatible>` for one device-tree node, which
   still fails the job if any other node stops binding. When `hardware.drivers`
-  fails on both kernels, the unclaimed nodes are compared one by one: a node a
-  driver claims on the known-good kernel and not on the test kernel regresses as
-  `hardware.drivers:<compatible>`.
+  fails on both kernels, the unclaimed nodes are compared compatible by
+  compatible, counting nodes: more nodes of a compatible left unclaimed on the
+  test kernel than on the known-good one (none then, or 3 against 1) regress as
+  `hardware.drivers:<compatible>`, and fewer count as fixed. A reference
+  recorded before the lab counted nodes compares compatibles only.
 - **Publishing:** `lab run <mac> --publish`, `lab publish <job>`, or the job page's
   Publish button uploads the signed report to omarchy-m-testing.org. Only
   known-good runs qualify, because the site names a report's build from the
