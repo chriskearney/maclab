@@ -19,7 +19,9 @@ const (
 	StateNeedsHands DeviceState = "needs_hands" // waiting for a human power cycle
 	StateOffline    DeviceState = "offline"     // idle and not heartbeating
 	// StateLeft: lab-agent uninstall told labd the Mac is leaving the lab. Its
-	// jobs were canceled and nothing recovers it; it stays until lab forget.
+	// jobs were canceled and no automatic recovery touches it; it stays until
+	// lab forget, unless uninstall says it stays after all (LeaveRequest.Undo)
+	// or lab reset puts it back.
 	StateLeft DeviceState = "left"
 )
 
@@ -471,11 +473,17 @@ type DevicePatch struct {
 type LeaveRequest struct {
 	Reason string   `json:"reason"`         // what is taking it out, e.g. "lab-agent uninstall --force"
 	Jobs   []string `json:"jobs,omitempty"` // the jobs the Mac still had in flight, as it sees them
+	// Undo takes the leave back: uninstall failed, or was interrupted,
+	// before it stopped the agent, which runs on. The Mac stays in the lab.
+	Undo bool `json:"undo,omitempty"`
 }
 
 type LeaveResponse struct {
 	Name     string   `json:"name"`
 	Canceled []string `json:"canceled,omitempty"` // the Mac's running and queued jobs, canceled
+	// Back: the Mac is in the lab again (Undo). An older labd takes an undo
+	// for another leave, and says nothing.
+	Back bool `json:"back,omitempty"`
 }
 
 type LeaseRequest struct {

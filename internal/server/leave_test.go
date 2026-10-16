@@ -103,8 +103,8 @@ func TestLeaveMidJob(t *testing.T) {
 		t.Fatalf("device %s: %s", d.State, d.StateReason)
 	}
 
-	// Nothing recovers it: not the job, not a reset by hand.
-	steps, ok := l.s.dev(l.name).ladder(context.Background(), "reset requested by test", time.Second, true)
+	// Nothing recovers it on its own: not the job, nor the recovery ladder.
+	steps, ok := l.s.dev(l.name).ladder(context.Background(), "lost during a test", time.Second, true)
 	if ok || len(steps) != 1 || !strings.HasPrefix(steps[0], "not recovered: "+l.name+" left the lab") {
 		t.Fatalf("ladder: %v %v", ok, steps)
 	}
@@ -138,4 +138,66 @@ func (l *lab) job(id string) *api.Job {
 		l.t.Fatal(err)
 	}
 	return j
+}
+
+// leaveAgent tells labd, as the simulated Mac's lab-agent uninstall does,
+// that it is leaving, or with undo that it stays after all.
+func (l *lab) leaveAgent(undo bool) *api.LeaveResponse {
+	l.t.Helper()
+	resp, err := agent.Leave(&agent.Config{Server: l.url, Secret: l.secret}, api.LeaveRequest{Reason: "lab-agent uninstall", Undo: undo})
+	if err != nil {
+		l.t.Fatal(err)
+	}
+	return resp
+}
+
+// An uninstall that stops before it stops the agent takes its leave back:
+// the Mac is back in the pool, as it was, and runs jobs again.
+func TestLeaveUndo(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.leaveAgent(false)
+	if d := l.s.dev(l.name).snapshot(); d.State != api.StateLeft || !strings.Contains(d.StateReason, "`lab reset "+l.name+"` puts it back") {
+		t.Fatalf("after the leave: %s %s", d.State, d.StateReason)
+	}
+	if resp := l.leaveAgent(true); !resp.Back || resp.Name != l.name {
+		t.Fatalf("undo: %+v", resp)
+	}
+	if d := l.s.dev(l.name).snapshot(); d.State != api.StateReady || d.StateReason != "" {
+		t.Fatalf("after the undo: %s %s", d.State, d.StateReason)
+	}
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-back behavior=ok")}), api.OutcomePass)
+	// again, on a Mac in the lab: nothing to undo
+	if resp := l.leaveAgent(true); !resp.Back {
+		t.Fatalf("undo again: %+v", resp)
+	}
+	if d := l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady }); d.State != api.StateReady {
+		t.Fatalf("after another undo: %s", d.State)
+	}
+}
+
+// An admin's lab reset recovers a Mac that left the lab and then wedged (mid
+// uninstall, say): it puts it back in the lab and runs the recovery ladder,
+// out-of-band reset included. Only automatic recovery leaves it alone.
+func TestResetLeftMac(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.leaveAgent(false)
+	// It wedges: no check-ins.
+	go l.sim.Quiet(time.Minute)
+	l.waitDevice(func(d api.Device) bool { return time.Since(d.LastSeen) > 2*aliveWindow })
+	boot := l.s.dev(l.name).snapshot().BootID
+
+	resp, body := l.get("POST", "/api/devices/"+l.name+"/reset?by=alice")
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, "had left the lab") || !strings.Contains(body, "recovery started") {
+		t.Fatalf("reset: %d %s", resp.StatusCode, body)
+	}
+	d := l.waitDevice(func(d api.Device) bool { return d.BootID != boot && d.State == api.StateReady })
+	l.oob.mu.Lock()
+	resets := l.oob.resets
+	l.oob.mu.Unlock()
+	if resets != 1 {
+		t.Fatalf("%d out-of-band resets, want 1; device %s %s", resets, d.State, d.StateReason)
+	}
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-back behavior=ok")}), api.OutcomePass)
 }

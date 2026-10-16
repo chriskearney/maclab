@@ -54,7 +54,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab installed promote <device> --release R --job <id> --accepted-by <who>
                                       references + known-good, labd's and the agent's (Mac on that kernel, agent 0.7.3+)
   lab installed status --release R                   the frozen files of a release
-  lab reset <device>                  run the recovery ladder on an idle Mac by hand
+  lab reset <device>                  run the recovery ladder on an idle Mac by hand; a Mac that left
+                                      (lab-agent uninstall) goes back in the lab first
   lab shell <device>                  shell over the serial link: works with the Mac's network down (Ctrl-] exits)
   lab serial <device> [-n 100] | lab oob <device>
   lab upload <file>

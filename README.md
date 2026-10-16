@@ -270,8 +270,15 @@ To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `se
 tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, saying why, lists it as
 `left`, and from then on neither resets it nor asks for hands, as it otherwise would once the agent
 stops mid-job. If labd can't be reached, uninstall goes on, and says so and what to run on the
-controller instead (`lab cancel <job>`, then `lab forget <device>`). Then it stops
-and removes the agent and its config (with the device secret), clears a lab one-shot, removes the
+controller instead (`lab cancel <job>`, then `lab forget <device>`). Then it stops the agent. If
+that fails, or uninstall is interrupted (Ctrl-C) before it, the agent runs on and nothing else is
+changed: uninstall tells labd the Mac stays after all, and labd puts it back in the pool (its
+canceled jobs stay canceled). If labd doesn't hear that, uninstall says so: `lab reset <device>` on
+the controller puts a Mac that left back in the lab, and runs the recovery ladder on it, out-of-band
+reset included, as for any Mac (a Mac that wedged mid-uninstall, say). Only labd's own recovery
+leaves a Mac that left alone; for one whose uninstall finished, use `lab forget`, as with no agent
+to check in a reset ends in a call for hands. Once the agent is stopped, uninstall removes it
+and its config (with the device secret), clears a lab one-shot, removes the
 maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
 the modules the lab installed, and the panic, watchdog, serial-getty and autologin settings, and
 maclab's journald drop-in, if a newer setup wrote one. U-Boot's `ubootefi.var.pre-maclab` is kept,

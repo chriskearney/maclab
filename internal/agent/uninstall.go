@@ -26,7 +26,9 @@ type UninstallOptions struct {
 
 // Uninstall undoes everything setup did, so a volunteer's Mac leaves the lab
 // as it came. Like setup it is idempotent: it acts only on what is still there.
-func Uninstall(o UninstallOptions) error {
+// ctx ends when the person interrupts it (Ctrl-C): before the agent is
+// stopped, that stops uninstall, and the Mac stays in the lab.
+func Uninstall(ctx context.Context, o UninstallOptions) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("uninstall must run as root")
 	}
@@ -34,13 +36,14 @@ func Uninstall(o UninstallOptions) error {
 		return fmt.Errorf("run uninstall from a shell on the Mac, not through the lab: stopping lab-agent.service would kill it")
 	}
 	_, kernel, cmdline := (&Linux{}).Identity()
-	u := &uninstaller{dry: o.DryRun, force: o.Force, say: o.Log, running: kernel, cmdline: cmdline, cmd: runCmd, home: homeDir, bootTime: bootTime(), leave: Leave}
+	u := &uninstaller{ctx: ctx, dry: o.DryRun, force: o.Force, say: o.Log, running: kernel, cmdline: cmdline, cmd: runCmd, home: homeDir, bootTime: bootTime(), leave: Leave}
 	u.boot, u.bootErr = detectBootloader()
 	return u.uninstall()
 }
 
 // uninstaller undoes setup under root ("" on a Mac, a temp dir in tests).
 type uninstaller struct {
+	ctx     context.Context // ends when the person interrupts uninstall; nil: never
 	root    string
 	dry     bool
 	force   bool
@@ -61,8 +64,11 @@ type uninstaller struct {
 	leave func(cfg *Config, req api.LeaveRequest) (*api.LeaveResponse, error)
 	// heard is what labd made of it: "told", "forgotten" (it no longer knows
 	// the Mac), or "" when no one was asked or it couldn't be reached; then
-	// todo is what to run on the controller instead.
+	// todo is what to run on the controller instead. asked: labd was asked.
 	heard, todo string
+	asked       bool
+	// stopped: lab-agent.service is stopped and disabled, or was never there.
+	stopped bool
 }
 
 // Leave tells labd, with the device secret in cfg, that the Mac is leaving the
@@ -218,6 +224,7 @@ func (u *uninstaller) tellLabd(cfg *Config) {
 		u.say("would tell labd at %s that %s is leaving the lab", cfg.Server, cfg.Name)
 		return
 	}
+	u.asked = true
 	resp, err := u.leave(cfg, api.LeaveRequest{Reason: why, Jobs: jobs})
 	switch {
 	case err == nil:
@@ -235,6 +242,25 @@ func (u *uninstaller) tellLabd(cfg *Config) {
 		u.say("labd at %s was not told that %s is leaving the lab (%v): it may reset this Mac and ask for hands. On the controller, run %s",
 			cfg.Server, cfg.Name, err, u.todo)
 	}
+}
+
+// stayInLab takes tellLabd back when uninstall stops before the agent does.
+// The agent runs on, so labd must not keep the Mac as left, refusing every
+// job for it. It is best-effort, and says what to run on the controller if
+// labd doesn't hear it (labd may not have heard the leave either).
+func (u *uninstaller) stayInLab(cfg *Config) {
+	if !u.asked || u.heard == "forgotten" {
+		return
+	}
+	resp, err := u.leave(cfg, api.LeaveRequest{Reason: "lab-agent uninstall stopped before it stopped the agent", Undo: true})
+	if err == nil && !resp.Back {
+		err = errors.New("this labd can't take a leave back")
+	}
+	if err != nil {
+		u.say("labd at %s may still list %s as left, refusing its jobs (%v): on the controller, run `lab reset %s`", cfg.Server, cfg.Name, err, cfg.Name)
+		return
+	}
+	u.say("told labd at %s that %s stays in the lab after all", cfg.Server, cfg.Name)
 }
 
 // labdSteps is what to run on the controller when labd wasn't told.
@@ -293,8 +319,16 @@ func (u *uninstaller) uninstall() error {
 
 	u.tellLabd(cfg)
 	// A running agent could arm a one-shot or rewrite limine.conf
-	// mid-uninstall: nothing else changes until it is stopped.
+	// mid-uninstall: nothing else changes until it is stopped. Until then,
+	// an interrupt or a failure leaves the agent running, in the lab.
+	if u.ctx != nil && u.ctx.Err() != nil {
+		u.stayInLab(cfg)
+		return errors.New("interrupted before lab-agent.service was stopped: nothing was changed")
+	}
 	if err := u.service(); err != nil {
+		if !u.stopped {
+			u.stayInLab(cfg)
+		}
 		return fmt.Errorf("%w; uninstall stopped there and left the rest: run it again once lab-agent.service is stopped", err)
 	}
 	var errs []error
@@ -378,11 +412,13 @@ func (u *uninstaller) enrolled() error {
 func (u *uninstaller) service() error {
 	unit := u.path(unitPath)
 	if !exists(unit) {
+		u.stopped = true
 		return nil
 	}
 	if err := u.systemctl("disable", "--now", "lab-agent.service"); err != nil {
 		return err
 	}
+	u.stopped = true
 	if err := u.remove(unit, ""); err != nil {
 		return err
 	}

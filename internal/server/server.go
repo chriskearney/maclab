@@ -1061,6 +1061,10 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 }
 
 // hReset runs the recovery ladder by hand, e.g. for an idle Mac that is wedged.
+// A Mac that left the lab (lab-agent uninstall) is put back in it first: a
+// reset is how an admin recovers one that wedged mid-uninstall, or whose
+// agent still runs after an uninstall that failed. Only automatic recovery
+// leaves a Mac that left alone.
 func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 	v := s.devOr404(w, r)
 	if v == nil {
@@ -1080,10 +1084,18 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
 		return
 	}
+	back, err := s.rejoin(v, "reset requested by "+orStr(by, "an admin"))
+	if err != nil {
+		httpErr(w, 404, "%v", err)
+		return
+	}
 	go func() {
 		steps, ok := v.ladder(s.ctx, "reset requested by "+by, s.cfg.BootTimeout, true)
 		s.log.Printf("%s: manual reset: ok=%v steps=%v", v.d.Name, ok, steps)
 	}()
+	if back {
+		w.Write([]byte(v.d.Name + " had left the lab (lab-agent uninstall); the reset puts it back in. "))
+	}
 	w.Write([]byte("recovery started; watch `lab status " + v.d.Name + "`\n"))
 }
 

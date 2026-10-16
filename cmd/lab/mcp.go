@@ -267,7 +267,7 @@ func serveMCP(ctx context.Context) error {
 		func(ctx context.Context, _ *mcp.CallToolRequest, a devArg) (*mcp.CallToolResult, any, error) {
 			return text("released"), nil, c.Release(ctx, a.Device, who)
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_reset", Description: "Run the recovery ladder on an idle Mac that is wedged or offline (soft reboot, hard reset, then ask a human)."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_reset", Description: "Run the recovery ladder on an idle Mac that is wedged or offline (soft reboot, hard reset, then ask a human). A Mac that left the lab (lab-agent uninstall) goes back in it first."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a devArg) (*mcp.CallToolResult, any, error) {
 			out, err := c.Reset(ctx, a.Device, who)
 			return text(out), nil, err

@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -584,6 +585,7 @@ type fakeLabd struct {
 	auth    []string
 	stopped atomic.Bool // lab-agent.service was stopped
 	early   bool        // a call came before that
+	old     bool        // an older labd, which takes an undo for a leave
 }
 
 func newFakeLabd(t *testing.T) *fakeLabd {
@@ -599,7 +601,7 @@ func newFakeLabd(t *testing.T) *fakeLabd {
 		f.reqs, f.auth = append(f.reqs, req), append(f.auth, r.Header.Get("Authorization"))
 		f.early = !f.stopped.Load()
 		f.mu.Unlock()
-		json.NewEncoder(w).Encode(api.LeaveResponse{Name: "m1air", Canceled: req.Jobs})
+		json.NewEncoder(w).Encode(api.LeaveResponse{Name: "m1air", Canceled: req.Jobs, Back: req.Undo && !f.old})
 	}))
 	t.Cleanup(f.srv.Close)
 	return f
@@ -685,5 +687,73 @@ func TestUninstallLabdUnreachable(t *testing.T) {
 	}
 	if last := m.out[len(m.out)-1]; last != "uninstalled, but labd wasn't told: on the controller, run "+todo {
 		t.Errorf("last line %q", last)
+	}
+}
+
+// If uninstall stops after telling labd but before the agent is stopped (the
+// agent won't stop, or the person interrupts it), the agent runs on: uninstall
+// takes the leave back, so labd doesn't refuse its jobs for good. Once the
+// agent is stopped, a later failure leaves the Mac as left.
+func TestUninstallTakesBackItsLeave(t *testing.T) {
+	for _, c := range []struct {
+		name        string
+		fail        string // the systemctl command that fails
+		interrupted bool
+		old         bool // an older labd
+		undo        bool // took the leave back
+		err, said   string
+	}{
+		{"the agent won't stop", "disable --now lab-agent.service", false, false, true,
+			"uninstall stopped there", "told labd at <url> that m1air stays in the lab after all"},
+		{"interrupted", "", true, false, true,
+			"interrupted before lab-agent.service was stopped", "told labd at <url> that m1air stays in the lab after all"},
+		{"an older labd", "disable --now lab-agent.service", false, true, true,
+			"uninstall stopped there", "labd at <url> may still list m1air as left, refusing its jobs (this labd can't take a leave back): on the controller, run `lab reset m1air`"},
+		{"the agent stopped, then a step failed", "daemon-reload", false, false, false,
+			"uninstall stopped there", "told labd at <url> that m1air is leaving the lab; it canceled j1"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeLabd(t)
+			f.old = c.old
+			m := labMacFor(t, f.srv.URL, &f.stopped)
+			record := m.u.cmd
+			m.u.cmd = func(name string, args ...string) error {
+				if err := record(name, args...); err != nil {
+					return err
+				}
+				if strings.Join(args, " ") == c.fail {
+					return errors.New("exit status 1: Failed")
+				}
+				return nil
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			if c.interrupted {
+				cancel()
+			}
+			defer cancel()
+			m.u.ctx = ctx
+			before := snapshot(t, m.lim.ESP.Target)
+			err := m.u.uninstall()
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Fatalf("uninstall: %v, want %q", err, c.err)
+			}
+			f.mu.Lock()
+			reqs := f.reqs
+			f.mu.Unlock()
+			if len(reqs) == 0 || reqs[0].Undo {
+				t.Fatalf("told labd %+v; want the leave first", reqs)
+			}
+			if undone := len(reqs) == 2 && reqs[1].Undo; undone != c.undo || len(reqs) > 2 {
+				t.Errorf("told labd %+v; want the leave taken back: %v", reqs, c.undo)
+			}
+			if said := strings.ReplaceAll(c.said, "<url>", f.srv.URL); !slices.Contains(m.out, said) {
+				t.Errorf("didn't say %q:\n%s", said, strings.Join(m.out, "\n"))
+			}
+			// nothing past the agent changed
+			if after := snapshot(t, m.lim.ESP.Target); !reflect.DeepEqual(before, after) {
+				t.Error("changed the ESP")
+			}
+			m.kept(t, ConfigPath, workDir)
+		})
 	}
 }

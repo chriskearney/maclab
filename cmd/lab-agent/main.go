@@ -73,7 +73,7 @@ func main() {
 		dry := fs.Bool("dry-run", false, "print each action without taking it")
 		force := fs.Bool("force", false, "uninstall even with a job in flight, or with the bootloader not found")
 		fs.Parse(os.Args[2:])
-		err = agent.Uninstall(agent.UninstallOptions{DryRun: *dry, Force: *force,
+		err = agent.Uninstall(ctx, agent.UninstallOptions{DryRun: *dry, Force: *force,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "preflight":
 		l := &agent.Linux{WorkDir: "/var/lib/maclab"}
