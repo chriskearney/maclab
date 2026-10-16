@@ -301,6 +301,9 @@ func (s *Server) hLogs(w http.ResponseWriter, r *http.Request) {
 // capture saves a screenshot into the job's files. It is best effort: a Mac
 // without a GUI session just gets a note in the timeline.
 func (r *jobRun) capture(label string) {
+	if r.v.leaving() != "" {
+		return // its agent is stopping: nothing would answer
+	}
 	var res api.ScreenResult
 	ctx := r.s.ctx
 	err := r.v.call(ctx, api.CmdScreen, r.j.ID, api.ScreenArgs{Label: label, WaitSec: 45}, 90*time.Second, &res)

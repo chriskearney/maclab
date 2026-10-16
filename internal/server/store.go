@@ -3,6 +3,7 @@ package server
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -29,7 +30,24 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 	if err != nil {
 		return nil, err
 	}
+	// Tokens from before these columns read as an admin's, for a lab Mac.
+	if err := addColumn(db, "tokens", "volunteer", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return nil, err
+	}
+	if err := addColumn(db, "tokens", "requester", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return nil, err
+	}
 	return &store{db}, nil
+}
+
+// addColumn adds a column a table gained after labd first made it.
+func addColumn(db *sql.DB, table, col, def string) error {
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info(?) WHERE name=?`, table, col).Scan(&n); err != nil || n > 0 {
+		return err
+	}
+	_, err := db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + def)
+	return err
 }
 
 func (s *store) saveDevice(d *api.Device, secretHash string) error {
@@ -71,16 +89,50 @@ func (s *store) devices() ([]deviceRow, error) {
 	return out, rows.Err()
 }
 
+const insertToken = `INSERT INTO tokens(token_hash,name,label,model,volunteer,requester,expires) VALUES(?,?,?,?,?,?,?)`
+
 func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time) error {
-	_, err := s.db.Exec(`INSERT INTO tokens(token_hash,name,label,model,expires) VALUES(?,?,?,?,?)`, hash, req.Name, req.Label, req.Model, exp.Unix())
+	_, err := s.db.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, "", exp.Unix())
 	return err
 }
 
-// takeToken consumes a one-time enrollment token.
+// errVolunteerTokens turns a volunteer away while too many others hold
+// unused tokens.
+var errVolunteerTokens = errors.New("too many volunteers hold unused enrollment tokens")
+
+// addVolunteerToken stores a token for who, the tailnet viewer who asked for
+// it, in place of any unused one they still hold: nobody holds two, and
+// asking again after a setup that stopped half way just works. It refuses
+// with errVolunteerTokens while max others hold unused ones.
+func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who string, exp time.Time, max int) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM tokens WHERE requester != '' AND (requester=? OR expires<?)`, who, time.Now().Unix()); err != nil {
+		return err
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM tokens WHERE requester != ''`).Scan(&n); err != nil {
+		return err
+	}
+	if n >= max {
+		return errVolunteerTokens
+	}
+	if _, err := tx.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, who, exp.Unix()); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// takeToken consumes a one-time enrollment token. VolunteeredBy is the
+// login that asked for a volunteer token.
 func (s *store) takeToken(hash string) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,expires`, hash).Scan(&r.Name, &r.Label, &r.Model, &exp)
+	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,volunteer,requester,expires`, hash).
+		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &exp)
 	if err != nil {
 		return nil, err
 	}
@@ -104,6 +156,19 @@ func (s *store) job(id string) (*api.Job, error) {
 	}
 	var j api.Job
 	return &j, json.Unmarshal([]byte(data), &j)
+}
+
+// gateExclusion is the stored job id's GateExclusion, or nil.
+func (s *store) gateExclusion(id string) *api.GateExclusion {
+	var data sql.NullString
+	if s.db.QueryRow(`SELECT json_extract(data, '$.gate_exclusion') FROM jobs WHERE id=?`, id).Scan(&data) != nil || !data.Valid {
+		return nil
+	}
+	var x api.GateExclusion
+	if json.Unmarshal([]byte(data.String), &x) != nil {
+		return nil
+	}
+	return &x
 }
 
 func (s *store) jobs(device string, limit int, unfinished bool) ([]*api.Job, error) {

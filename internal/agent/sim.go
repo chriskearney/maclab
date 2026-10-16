@@ -27,7 +27,12 @@ import (
 // reboot-in-test (reboots with no kernel message) and hang-in-test (goes silent
 // for HangFor, then a watchdog resets it, again with no kernel message).
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
-// logind does; one named quiet-suspend-* sleeps without announcing it.
+// logind does; one named quiet-suspend-* sleeps without announcing it. The
+// builtin suspend-devices tells labd to expect QuietFor of silence first, as
+// the real one does, and then is quiet for SuspendFor, with no sleep
+// announcement (on a real Mac that rarely reaches labd), and then tells labd
+// it is back. A test named hang-* goes silent for HangFor, and then a
+// watchdog resets the Mac, as hang-in-test does.
 type Sim struct {
 	RebootDelay time.Duration
 	OnBoot      func() // called when the machine goes down, like a dropped connection
@@ -35,6 +40,7 @@ type Sim struct {
 	Serial      func(line string) // wired to a fake OOB controller
 	WorkDir     string
 	SuspendFor  time.Duration
+	QuietFor    time.Duration
 	HangFor     time.Duration
 
 	mu           sync.Mutex
@@ -329,7 +335,7 @@ func (s *Sim) suspend(d time.Duration, announce bool) {
 	}
 }
 
-func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult {
+func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	s.mu.Lock()
 	b := s.behavior
 	s.mu.Unlock()
@@ -344,7 +350,12 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 		os.WriteFile(filepath.Join(outDir, "observed.json"), obs, 0o644)
 		return api.TestResult{Name: t.Name, Passed: true, Seconds: 0.01, Tail: "sim identity " + t.Name}
 	}
-	if strings.HasPrefix(t.Name, "suspend-") || strings.HasPrefix(t.Name, "quiet-suspend-") {
+	switch {
+	case t.Builtin == suspendDevicesTest:
+		quiet(ctx, s.QuietFor) // the real test carries on if labd didn't hear it, too
+		s.suspend(s.SuspendFor, false)
+		quiet(ctx, 0) // the network is back
+	case strings.HasPrefix(t.Name, "suspend-") || strings.HasPrefix(t.Name, "quiet-suspend-"):
 		s.suspend(s.SuspendFor, strings.HasPrefix(t.Name, "suspend-"))
 	}
 	if b == "crash-in-test" {
@@ -354,8 +365,8 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 		<-ctx.Done()
 		return api.TestResult{Name: t.Name, Error: "machine went away"}
 	}
-	if b == "reboot-in-test" || b == "hang-in-test" {
-		if b == "hang-in-test" {
+	if hang := b == "hang-in-test" || strings.HasPrefix(t.Name, "hang-"); hang || b == "reboot-in-test" {
+		if hang {
 			s.mu.Lock()
 			s.alive = false
 			s.mu.Unlock()

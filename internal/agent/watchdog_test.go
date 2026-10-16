@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,11 +13,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -78,11 +83,11 @@ func TestLabWatchdogBudgets(t *testing.T) {
 	fed(false, "11 minutes after the last check-in")
 
 	d.idle()
-	done := d.test(2 * time.Minute) // the test's budget replaces the idle one
+	done := d.test(clock.now(), 2*time.Minute) // the test's budget replaces the idle one
 	clock.add(time.Minute)
 	fed(true, "a minute into a 2-minute test")
 	d.idle() // check-ins carry on while the test hangs
-	second := d.test(time.Hour)
+	second := d.test(clock.now(), time.Hour)
 	clock.add(90 * time.Second)
 	fed(false, "past the test's budget, after a check-in and another test started")
 	second()
@@ -122,7 +127,7 @@ func TestLabWatchdogPID1(t *testing.T) {
 	clock.add(15 * time.Second)
 	answers(d, false)
 	fed(false, "PID 1 silent for 35 s, inside the idle budget")
-	done := d.test(time.Hour)
+	done := d.test(clock.now(), time.Hour)
 	fed(false, "PID 1 silent, inside a test's budget")
 	answers(d, true)
 	fed(true, "PID 1 answers again")
@@ -169,12 +174,12 @@ func TestTestBudget(t *testing.T) {
 func TestLabWatchdogNil(t *testing.T) {
 	var d *labWatchdog // a boot without the watchdog: no-ops, no panic
 	d.idle()
-	d.test(time.Minute)()
+	d.test(time.Now(), time.Minute)()
 }
 
 // wdSystem is a Sim whose watchdog the test sees, whose tests and execs run
 // until the test lets them finish, and whose script tests fetch the script
-// first, as on a real Mac.
+// first, as on a real Mac: not a builtin one, even if it names a script too.
 type wdSystem struct {
 	*Sim
 	dev      wdDevice
@@ -206,8 +211,8 @@ func (s *wdSystem) Facts() api.Facts {
 	return f
 }
 
-func (s *wdSystem) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult {
-	if t.Script != "" {
+func (s *wdSystem) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
+	if t.Builtin == "" && t.Script != "" {
 		if err := fetch(ctx, t.Script, filepath.Join(s.Sim.WorkDir, t.Name+".sh")); err != nil {
 			return api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}
 		}
@@ -267,8 +272,6 @@ func (l *wdLabd) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-const testBoot = "root=UUID=sim rw maclab.job=j1"
-
 func wdAgent(t *testing.T, cmdline string, lab *wdLabd) (*Agent, *wdSystem) {
 	t.Helper()
 	hs := httptest.NewServer(lab)
@@ -280,34 +283,91 @@ func wdAgent(t *testing.T, cmdline string, lab *wdLabd) (*Agent, *wdSystem) {
 	return a, sys
 }
 
+// labBoot is a test boot's command line, as testCmdline writes it, and
+// installedBoot an installed-mode boot's, which leaves the watchdog to systemd.
+const (
+	labBoot       = "root=UUID=sim rw panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.job=j1"
+	installedBoot = "root=UUID=sim rw quiet maclab.job=j1 panic=10"
+)
+
+// logBuf collects what an agent logs.
+type logBuf struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (l *logBuf) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuf) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// On a test boot the agent holds the watchdog. If it can't open it yet, it
+// tries again while it checks in, until watchdog.open_timeout has passed
+// since boot, and then says the Mac resets. Where the command line leaves
+// the watchdog to systemd, systemd holding it is no cause for a warning.
 func TestRunHoldsWatchdogOnTestBoot(t *testing.T) {
-	busy := errors.New("device or resource busy")
+	busy := &os.PathError{Op: "open", Path: watchdogDev, Err: unix.EBUSY}
+	missing := &os.PathError{Op: "open", Path: watchdogDev, Err: unix.ENOENT}
+	oldUptime, oldRetry := watchdogUptime, watchdogRetry
+	t.Cleanup(func() { watchdogUptime, watchdogRetry = oldUptime, oldRetry })
+	watchdogRetry = 10 * time.Millisecond
+	never := slices.Repeat([]error{missing}, 10000)
 	for _, c := range []struct {
 		name, cmdline string
+		uptime        time.Duration // when the agent starts
 		openErrs      []error
-		opened        int32
+		opened        int32 // 0 for none; -1 for more than 3
 		held          bool
+		log, quiet    string // logged; not logged
 	}{
-		{"test boot", testBoot, nil, 1, true},
-		{"known-good boot", "root=UUID=sim rw", nil, 0, false},
-		{"busy for a moment", testBoot, []error{busy}, 2, true},
-		{"systemd holds it", testBoot, []error{busy, busy}, 2, false},
+		{"test boot", labBoot, 10 * time.Second, nil, 1, true, "holding the hardware watchdog", "can't"},
+		{"known-good boot", "root=UUID=sim rw", 10 * time.Second, nil, 0, false, "", "watchdog"},
+		{"busy for a moment", labBoot, 10 * time.Second, []error{busy, missing, missing}, 4, true,
+			"holding the hardware watchdog", "resets"},
+		{"not there in time", labBoot, 119*time.Second + 800*time.Millisecond, never, -1, false,
+			"the Mac resets now that watchdog.open_timeout=120 has run out", "holding"},
+		{"started after the deadline", labBoot, 130 * time.Second, never, 1, false,
+			"the Mac resets now that watchdog.open_timeout=120 has run out", "holding"},
+		{"systemd holds it", installedBoot, 10 * time.Second, []error{busy, busy}, 1, false,
+			"systemd holds the hardware watchdog and feeds it", "resets"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			lab := &wdLabd{checkins: make(chan api.Checkin, 100), hold: 10 * time.Millisecond}
 			a, sys := wdAgent(t, c.cmdline, lab)
+			var logged logBuf
+			a.log = log.New(&logged, "", 0)
 			sys.openErrs = c.openErrs
+			watchdogUptime = func() time.Duration { return c.uptime }
 			ctx, cancel := context.WithCancel(context.Background())
 			ran := make(chan error, 1)
 			go func() { ran <- a.Run(ctx) }()
 
-			select {
-			case ci := <-lab.checkins:
-				if ci.Facts == nil || ci.Facts.WatchdogArmed != c.held {
+			// labd hears it from the first check-in on, or once the agent holds it.
+			armed := false
+			for first, start := true, time.Now(); ; first = false {
+				var ci api.Checkin
+				select {
+				case ci = <-lab.checkins:
+				case <-time.After(5 * time.Second):
+					t.Fatal("no check-in")
+				}
+				armed = ci.Facts != nil && ci.Facts.WatchdogArmed
+				if first && c.opened == 1 && armed != c.held {
 					t.Errorf("first check-in's facts: %+v, want watchdog_armed %v", ci.Facts, c.held)
 				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("no check-in")
+				if armed || !c.held || time.Since(start) > 5*time.Second {
+					break
+				}
+			}
+			if armed != c.held {
+				t.Errorf("watchdog_armed %v, want %v", armed, c.held)
 			}
 			if c.held {
 				for start := time.Now(); sys.dev.feeds.Load() == 0 || sys.pinged.Load() == 0; time.Sleep(time.Millisecond) {
@@ -316,15 +376,50 @@ func TestRunHoldsWatchdogOnTestBoot(t *testing.T) {
 					}
 				}
 			}
+			for start := time.Now(); !strings.Contains(logged.String(), c.log); time.Sleep(time.Millisecond) {
+				if time.Since(start) > 5*time.Second {
+					t.Fatalf("didn't log %q:\n%s", c.log, logged.String())
+				}
+			}
 			cancel()
 			<-ran
-			if n := sys.opened.Load(); n != c.opened {
+			switch n := sys.opened.Load(); {
+			case c.opened >= 0 && n != c.opened, c.opened < 0 && n <= 3:
 				t.Errorf("opened the watchdog %d times, want %d", n, c.opened)
 			}
-			if (a.wd != nil) != c.held || !c.held && sys.dev.feeds.Load() != 0 {
-				t.Errorf("holding %v with %d feeds, want holding %v", a.wd != nil, sys.dev.feeds.Load(), c.held)
+			if (a.wd.Load() != nil) != c.held || !c.held && sys.dev.feeds.Load() != 0 {
+				t.Errorf("holding %v with %d feeds, want holding %v", a.wd.Load() != nil, sys.dev.feeds.Load(), c.held)
+			}
+			if strings.Contains(logged.String(), c.quiet) {
+				t.Errorf("logged %q:\n%s", c.quiet, logged.String())
 			}
 		})
+	}
+}
+
+// A test boot's deadline is half of labd's boot timeout, so the reset and
+// the fallback boot have the other half and labd sees the fallback, with a
+// margin that grows with the timeout; and never less than 120 s.
+func TestBootDeadline(t *testing.T) {
+	for _, c := range []struct{ boot, want time.Duration }{
+		{0, 120 * time.Second}, // an older labd
+		{4 * time.Minute, 120 * time.Second},
+		{5 * time.Minute, 150 * time.Second},
+		{10 * time.Minute, 5 * time.Minute}, // reset by 330 s, not at 510 s mid-fallback
+		{time.Hour, 30 * time.Minute},
+		{2 * time.Minute, 120 * time.Second},
+		{4 * time.Second, 120 * time.Second},
+	} {
+		if got := bootDeadline(c.boot); got != c.want {
+			t.Errorf("boot timeout %s: deadline %s, want %s", c.boot, got, c.want)
+		}
+		cmdline := testCmdline("root=UUID=x rw watchdog.open_timeout=5", api.StageArgs{BootTimeoutSec: int(c.boot / time.Second)}, "j1")
+		if got := openDeadline(cmdline); got != c.want {
+			t.Errorf("boot timeout %s: %q gives the agent %s, want %s", c.boot, cmdline, got, c.want)
+		}
+	}
+	if got := openDeadline("root=UUID=x rw maclab.job=j1"); got != labBootDeadline {
+		t.Errorf("no watchdog.open_timeout: %s", got)
 	}
 }
 
@@ -340,22 +435,36 @@ type wdHarness struct {
 }
 
 func newWDHarness(t *testing.T) *wdHarness {
-	lab := &wdLabd{}
-	a, sys := wdAgent(t, testBoot, lab)
-	h := &wdHarness{t: t, a: a, sys: sys, lab: lab, clock: &wdClock{t: time.Unix(1_000_000, 0)}}
-	a.wd = newLabWatchdog(&sys.dev, h.clock.now)
+	h := unheldWDHarness(t)
+	h.open()
 	return h
+}
+
+// unheldWDHarness is a wdHarness whose agent has yet to open the watchdog.
+func unheldWDHarness(t *testing.T) *wdHarness {
+	lab := &wdLabd{}
+	a, sys := wdAgent(t, labBoot, lab)
+	h := &wdHarness{t: t, a: a, sys: sys, lab: lab, clock: &wdClock{t: time.Unix(1_000_000, 0)}}
+	a.now = h.clock.now
+	return h
+}
+
+// open has the agent open the watchdog now.
+func (h *wdHarness) open() {
+	h.a.armWatchdog(newLabWatchdog(&h.sys.dev, h.clock.now))
 }
 
 // at moves the clock on by d, with PID 1 answering then.
 func (h *wdHarness) at(d time.Duration) {
 	h.clock.add(d)
-	answers(h.a.wd, true)
+	if wd := h.a.wd.Load(); wd != nil {
+		answers(wd, true)
+	}
 }
 
 func (h *wdHarness) fed(want bool, when string) {
 	h.t.Helper()
-	if got := h.a.wd.tick(); got != want {
+	if got := h.a.wd.Load().tick(); got != want {
 		h.t.Fatalf("%s: fed %v, want %v", when, got, want)
 	}
 }
@@ -453,7 +562,7 @@ func TestWatchdogIdleWhileUploading(t *testing.T) {
 	var uploading atomic.Bool
 	h.lab.onUpload = func() {
 		h.at(5 * time.Minute)
-		uploading.Store(h.a.wd.tick())
+		uploading.Store(h.a.wd.Load().tick())
 	}
 	test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Builtin: "x", TimeoutSec: 60})
 	<-h.sys.running
@@ -463,6 +572,104 @@ func TestWatchdogIdleWhileUploading(t *testing.T) {
 	if !uploading.Load() {
 		t.Fatal("not fed 5 minutes into uploading the output of a test with an 80 s budget")
 	}
+}
+
+// A test's budget starts once its script has downloaded, as the test's own
+// timeout does: the download runs on the idle budget, and a slow one leaves
+// the test all of its time.
+func TestWatchdogBudgetAfterDownload(t *testing.T) {
+	h := newWDHarness(t)
+	h.lab.art = []byte("echo ok\n")
+	sum := sha256.Sum256(h.lab.art)
+	var downloading atomic.Bool
+	h.lab.onFetch = func() {
+		h.at(5 * time.Minute)
+		downloading.Store(h.a.wd.Load().tick())
+	}
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Script: hex.EncodeToString(sum[:]), TimeoutSec: 60})
+	<-h.sys.running
+	if !downloading.Load() {
+		t.Fatal("not fed 5 minutes into downloading the script of a test with an 80 s budget")
+	}
+	h.at(70 * time.Second)
+	h.fed(true, "70 s into a test with an 80 s budget, after a 5-minute download")
+	h.at(15 * time.Second)
+	h.fed(false, "85 s into a test with an 80 s budget")
+	h.sys.finish <- struct{}{}
+	h.finished(test)
+}
+
+// A builtin test downloads nothing, even one that names a script too
+// (Builtin wins): its budget starts with it.
+func TestWatchdogBudgetBuiltinWithScript(t *testing.T) {
+	h := newWDHarness(t)
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "both", Builtin: "x", Script: strings.Repeat("0", 64), TimeoutSec: 60})
+	<-h.sys.running
+	h.at(70 * time.Second)
+	h.fed(true, "70 s into a builtin test with an 80 s budget")
+	h.at(15 * time.Second)
+	h.checkin()
+	h.fed(false, "85 s into a builtin test with an 80 s budget, after a check-in")
+	h.sys.finish <- struct{}{}
+	h.finished(test)
+	h.fed(true, "after the test ended")
+}
+
+// A test already running when the agent opens the watchdog (the first open
+// failed, a retry worked) is held to its budget, counted from when it
+// started: one past it is reset at once, however often the agent checks in.
+func TestWatchdogOpenedMidTest(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		into time.Duration // how long the test has run when the watchdog opens
+	}{
+		{"30 minutes into a 60 s test", 30 * time.Minute},
+		{"30 s into a 60 s test", 30 * time.Second},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			h := unheldWDHarness(t)
+			test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Builtin: "x", TimeoutSec: 60})
+			<-h.sys.running
+			h.at(c.into)
+			h.open()
+			h.checkin()
+			left := 80*time.Second - c.into
+			if left > 0 {
+				h.fed(true, "inside the budget, after a check-in")
+				h.at(left - time.Second)
+				h.checkin()
+				h.fed(true, "a second inside the budget, after a check-in")
+				h.at(2 * time.Second)
+			}
+			h.fed(false, "past the test's budget")
+			h.checkin()
+			h.fed(false, "past the test's budget, after a check-in")
+			h.sys.finish <- struct{}{}
+			h.finished(test)
+			h.fed(true, "after the test ended")
+		})
+	}
+}
+
+// A script still downloading when the agent opens the watchdog starts its
+// budget once it is in place, as it would have with the watchdog held.
+func TestWatchdogOpenedMidDownload(t *testing.T) {
+	h := unheldWDHarness(t)
+	h.lab.art = []byte("echo ok\n")
+	sum := sha256.Sum256(h.lab.art)
+	h.lab.onFetch = func() {
+		h.open()
+		h.at(5 * time.Minute)
+	}
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "short", Script: hex.EncodeToString(sum[:]), TimeoutSec: 60})
+	<-h.sys.running
+	h.at(70 * time.Second)
+	h.fed(true, "70 s into a test with an 80 s budget, after a 5-minute download")
+	h.at(15 * time.Second)
+	h.checkin()
+	h.fed(false, "85 s into a test with an 80 s budget")
+	h.sys.finish <- struct{}{}
+	h.finished(test)
 }
 
 // PingInit asks PID 1 over systemctl.

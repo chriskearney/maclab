@@ -141,6 +141,7 @@ function applyTheme() {
 const STATE = {
   ready: ['c-ok', 'Ready'], busy: ['c-info live', 'Testing'], recovering: ['c-warn live', 'Recovering'],
   needs_hands: ['c-bad live', 'Needs hands'], offline: ['c-dim', 'Offline'], new: ['c-odd', 'Needs baseline'],
+  left: ['c-dim', 'Left the lab'],
 };
 const OUTCOME = {
   pass: ['c-ok', 'check', 'Passed'], tests_failed: ['c-warn', 'close', 'Tests failed'],
@@ -609,7 +610,7 @@ function overview(j) {
   return `
     ${r.tests?.length ? `<div class="section"><div class="h">Tests</div><div class="tests">${r.tests.map(t => `
       <details class="test"><summary><span class="st ${t.passed ? 'ok' : 'bad'}">${I[t.passed ? 'check' : t.timed_out ? 'sand' : 'close']}</span>
-        <span class="nm">${esc(t.name)}</span><span class="tm">${t.passed ? `passed · ${dur(t.seconds)}` : t.timed_out ? 'timed out' : t.error ? esc(t.error) : `exit ${t.exit_code}`}</span></summary>
+        <span class="nm">${esc(t.name)}</span><span class="tm">${t.passed ? `passed · ${dur(t.seconds)}` : t.skipped ? `skipped: ${esc(t.error)}` : t.timed_out ? 'timed out' : t.error ? esc(t.error) : `exit ${t.exit_code}`}</span></summary>
         ${t.tail ? `<pre class="term plain">${t.tail.split('\n').map(l => `<span class="l k-${lineKind(l)}">${esc(l)}</span>`).join('')}</pre>` : ''}
       </details>`).join('')}</div></div>` : ''}
     ${r.recovery?.length ? `<div class="section"><div class="h">Recovery</div><ul class="lines">${r.recovery.map(x => `<li style="--c:var(--warn)">${esc(x)}</li>`).join('')}</ul></div>`
@@ -1752,16 +1753,19 @@ document.addEventListener('keydown', e => {
 (async function start() {
   shell();
   await Promise.all([loadThemes(), logoSVG()]);
+  // refused: labd was opened by a name it doesn't know as its own, which gets no access without a token.
+  let refused = '';
   try {
     const a = await (await fetch('/api/auth')).json();
     S.open = !a.token_required;
     S.viewer = a.role === 'viewer';
+    refused = a.refused || '';
   } catch { S.open = false; }
-  if (!S.open && !S.token) {
+  if (!S.open && !S.token && !refused) {
     // An older labd has no /api/auth: try without a token before asking for one.
     S.open = (await fetch('/api/devices').catch(() => null))?.ok || false;
   }
-  if (!S.open && !S.token) { lock(); return; }
+  if (!S.open && !S.token) { lock(refused); return; }
   route();
   stream();
 })();

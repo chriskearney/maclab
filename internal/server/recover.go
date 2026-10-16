@@ -64,7 +64,13 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 
 // ladder is the recovery ladder: soft reboot, hard reset (twice), then a
 // human. It returns the steps taken and whether the Mac came back.
+//
+// A Mac that left the lab (lab-agent uninstall) is never reset or handed to a
+// human: its agent stopped on purpose.
 func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Duration, trySoft bool) ([]string, bool) {
+	if why := v.leaving(); why != "" {
+		return []string{"not recovered: " + why}, false
+	}
 	v.mu.Lock()
 	stuck := v.d.BootID
 	alive := trySoft && v.aliveLocked()
@@ -98,6 +104,9 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 			if ctx.Err() != nil {
 				return steps, false
 			}
+			if why := v.leaving(); why != "" {
+				return append(steps, "stopped: "+why), false
+			}
 			t0 := time.Now()
 			steps = append(steps, fmt.Sprintf("hard reset %d via %s", i, ctl.Name()))
 			rctx, cancel := context.WithTimeout(ctx, time.Minute)
@@ -115,6 +124,9 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 	}
 	if ctx.Err() != nil {
 		return steps, false
+	}
+	if why := v.leaving(); why != "" {
+		return append(steps, "stopped: "+why), false
 	}
 	v.mu.Lock()
 	act := humanAction(v.d, reason, v.lastLogLocked())

@@ -32,9 +32,14 @@ var omtPackagingChecks = map[string]bool{"boot.files": true, "boot.kernel-packag
 
 const (
 	omtTest     = "omarchy-m-test"
-	omtFile     = "test-" + omtTest + "/omt-report.json"
-	omtMinAgent = "0.3.0" // first agent with the builtin test
+	omtFile     = "test-" + omtTest + "/omt-report.json" // omtReportFile(omtTest)
+	omtMinAgent = "0.3.0"                                // first agent with the builtin test
 )
+
+// omtReportFile is where a job keeps the report of its omarchy-m-test run
+// named name: the agent uploads a test's files under test-<name>/. The test
+// is the builtin omarchy-m-test whatever its name in the job.
+func omtReportFile(name string) string { return "test-" + name + "/omt-report.json" }
 
 // omtReport is the part of a report the lab reads; the file itself is kept whole.
 type omtReport struct {
@@ -48,6 +53,7 @@ type omtReport struct {
 	Inventory struct {
 		Unclaimed []struct {
 			Compatible string `json:"compatible"`
+			Count      int    `json:"count"` // its nodes no driver claimed
 			Outcome    string `json:"outcome"`
 		} `json:"unclaimed"`
 	} `json:"inventory"`
@@ -69,6 +75,9 @@ type omtBaseline struct {
 	Tool      string            `json:"tool"`
 	Status    map[string]string `json:"status"`              // check id -> pass, fail or skip
 	Unclaimed []string          `json:"unclaimed,omitempty"` // compatibles of the device-tree nodes no driver claimed
+	// UnclaimedNodes counts those nodes per compatible. References from
+	// before it was kept have only Unclaimed.
+	UnclaimedNodes map[string]int `json:"unclaimed_nodes,omitempty"`
 }
 
 func (s *Server) omtBaselinePath(device string) string {
@@ -102,7 +111,8 @@ func omtSpec() api.TestSpec {
 // baseline when this run was on the known-good kernel.
 func (r *jobRun) omtResult(tr *api.TestResult) {
 	j := r.j
-	path := filepath.Join(r.s.jobDir(j.ID), omtFile)
+	file := omtReportFile(tr.Name)
+	path := filepath.Join(r.s.jobDir(j.ID), file)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if tr.Passed {
@@ -115,7 +125,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		tr.Passed, tr.Error = false, "omarchy-m-test report is not JSON: "+err.Error()
 		return
 	}
-	res := &api.OMTResult{Report: omtFile, Tool: rep.Tool.Version, Catalogue: rep.Catalogue, Kernel: rep.Machine.Kernel,
+	res := &api.OMTResult{Report: file, Tool: rep.Tool.Version, Catalogue: rep.Catalogue, Kernel: rep.Machine.Kernel,
 		KnownGood: j.Spec.Kernel == "" && j.Spec.Source == ""}
 	status := map[string]string{}
 	byID := map[string]api.OMTCheck{}
@@ -142,6 +152,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		unclaimed = append(unclaimed, u.Compatible)
 	}
 	sort.Strings(unclaimed)
+	nodes := unclaimedNodes(rep)
 	if r.ir != nil {
 		// an installed run is judged against the frozen pre-install report and
 		// never becomes a reference
@@ -159,7 +170,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 			res.Regressions, res.Fixed = omtDiff(base.Status, status, byID)
 			nr, nf := omtNodes(base, status, rep)
 			res.Regressions, res.Fixed = append(res.Regressions, nr...), append(res.Fixed, nf...)
-			res.ComparedTo = "the previous known-good run " + base.Job
+			res.ComparedTo, res.BaselineJob = "the previous known-good run "+base.Job, base.Job
 		}
 	case base == nil:
 		res.ComparedTo = "no known-good run of omarchy-m-test on this Mac yet (lab baseline makes one)"
@@ -177,7 +188,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		}
 		res.Regressions = kept
 		res.Regressions, res.Allowed = omtAllowed(res.Regressions, j.Spec.OMTAllow, rep)
-		res.ComparedTo = "known-good run " + base.Job + " on " + base.Kernel
+		res.ComparedTo, res.BaselineJob = "known-good run "+base.Job+" on "+base.Kernel, base.Job
 		if base.Tool != res.Tool {
 			res.ComparedTo += fmt.Sprintf(" (omarchy-m-test %s then, %s now)", base.Tool, res.Tool)
 		}
@@ -204,7 +215,8 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		switch {
 		case j.Spec.Baseline:
 			// lab baseline is how a person sets the references on purpose
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status, Unclaimed: unclaimed}, "", "  ")
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
+				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
 			res.Reference = "a baseline: becomes the reference if it passes"
 		case len(res.Regressions) > 0:
 			res.Reference = fmt.Sprintf("kept %s: %s regressed since", base.Job, strings.Join(omtIDs(res.Regressions), ", "))
@@ -213,7 +225,8 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		case j.Spec.Cmdline != "" || len(j.Spec.CmdlineStrip) > 0 || (j.Spec.CmdlineBase != "" && j.Spec.CmdlineBase != "known-good"):
 			res.Reference = "not a reference: the job changed the known-good cmdline"
 		default:
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status, Unclaimed: unclaimed}, "", "  ")
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
+				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
 			res.Reference = "becomes the reference if the job passes"
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
@@ -285,10 +298,23 @@ func omtDiff(before, after map[string]string, byID map[string]api.OMTCheck) (reg
 	return
 }
 
-// omtNodes compares the device-tree nodes no driver claims, node by node, when
-// hardware.drivers fails on both runs and omtDiff sees no change: a compatible
-// unclaimed now but claimed on the known-good run regresses as
-// "hardware.drivers:<compatible>", and one claimed now but not then is fixed.
+// unclaimedNodes counts a report's unclaimed device-tree nodes per
+// compatible. A report that gives no count lists each one as one node.
+func unclaimedNodes(rep omtReport) map[string]int {
+	n := map[string]int{}
+	for _, u := range rep.Inventory.Unclaimed {
+		n[u.Compatible] += max(u.Count, 1)
+	}
+	return n
+}
+
+// omtNodes compares the device-tree nodes no driver claims, compatible by
+// compatible, when hardware.drivers fails on both runs and omtDiff sees no
+// change. More nodes of a compatible unclaimed now than on the known-good run
+// (none then, or 3 against 1) regress as "hardware.drivers:<compatible>";
+// fewer are fixed. A reference from before the lab counted nodes has only
+// their compatibles: then a compatible regresses only if it wasn't unclaimed
+// at all, and is fixed only once none is.
 func omtNodes(base *omtBaseline, status map[string]string, rep omtReport) (regressed, fixed []api.OMTCheck) {
 	if base.Status["hardware.drivers"] != "fail" || status["hardware.drivers"] != "fail" ||
 		len(base.Unclaimed) == 0 || len(rep.Inventory.Unclaimed) == 0 {
@@ -300,29 +326,47 @@ func omtNodes(base *omtBaseline, status map[string]string, rep omtReport) (regre
 			evidence = c.Evidence
 		}
 	}
-	before, now := map[string]bool{}, map[string]bool{}
+	counted := base.UnclaimedNodes != nil
+	before := map[string]int{}
 	for _, c := range base.Unclaimed {
-		before[c] = true
+		before[c] = 1
 	}
+	for c, n := range base.UnclaimedNodes {
+		before[c] = n
+	}
+	now := unclaimedNodes(rep)
+	seen := map[string]bool{}
 	for _, u := range rep.Inventory.Unclaimed {
-		if now[u.Compatible] {
+		c := u.Compatible
+		if seen[c] {
 			continue
 		}
-		now[u.Compatible] = true
-		if before[u.Compatible] {
+		seen[c] = true
+		if b := before[c]; b > 0 && (!counted || now[c] <= b) {
 			continue
 		}
-		chk := api.OMTCheck{ID: "hardware.drivers:" + u.Compatible, Outcome: u.Outcome}
+		chk := api.OMTCheck{ID: "hardware.drivers:" + c, Outcome: u.Outcome}
 		for _, e := range evidence {
-			if strings.HasPrefix(e, "unclaimed: "+u.Compatible+" ") {
+			if strings.HasPrefix(e, "unclaimed: "+c+" ") {
 				chk.Evidence = e
 			}
 		}
+		if b := before[c]; b > 0 {
+			chk.Evidence = strings.TrimSuffix(fmt.Sprintf("%d nodes unclaimed, %d on the known-good kernel; %s", now[c], b, chk.Evidence), "; ")
+		}
 		regressed = append(regressed, chk)
 	}
+	seen = map[string]bool{}
 	for _, c := range base.Unclaimed {
-		if !now[c] {
+		if seen[c] {
+			continue
+		}
+		seen[c] = true
+		switch n, b := now[c], before[c]; {
+		case n == 0:
 			fixed = append(fixed, api.OMTCheck{ID: "hardware.drivers:" + c, Evidence: "claimed by a driver now"})
+		case counted && n < b:
+			fixed = append(fixed, api.OMTCheck{ID: "hardware.drivers:" + c, Evidence: fmt.Sprintf("%d of its %d nodes claimed by a driver now", b-n, b)})
 		}
 	}
 	return regressed, fixed

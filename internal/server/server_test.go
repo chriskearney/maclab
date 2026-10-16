@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -69,6 +70,7 @@ type lab struct {
 	cancel context.CancelFunc
 	url    string
 	name   string // the simulated Mac
+	secret string // its device secret
 }
 
 func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "sim-mac") }
@@ -120,6 +122,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 	if err != nil {
 		t.Fatal(err)
 	}
+	l.secret = resp.Secret
 	a := agent.New(&agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir()}, sim, quiet)
 	go a.Run(ctx)
 	if withOOB {
@@ -752,6 +755,137 @@ func TestShortQuietSpellDuringTest(t *testing.T) {
 	}
 }
 
+// suspend-devices tells labd, before it suspends, how long the Mac may be off
+// the network. labd waits that out on that boot, past quietGrace, and the
+// job passes with no recovery. The spell was for that boot only.
+func TestAnnouncedQuietSpellDuringTest(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.SuspendFor, l.sim.QuietFor = 5*time.Second, 8*time.Second // past quietGrace, inside what it announced
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"),
+		Tests: []api.TestSpec{{Name: "suspend-devices", Builtin: "suspend-devices"}, {Name: "after-resume", Builtin: "x"}}})
+	l.expect(j, api.OutcomePass)
+	var back bool
+	for _, e := range j.Events {
+		back = back || strings.Contains(e.Msg, "back on the same boot after")
+	}
+	if !back || len(j.Result.Recovery) != 0 || len(j.Result.Tests) != 3 {
+		t.Fatalf("back=%v recovery=%v tests=%+v events %v", back, j.Result.Recovery, j.Result.Tests, j.Events)
+	}
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	quiet := v.quietLocked(time.Now())
+	v.mu.Unlock()
+	if quiet {
+		t.Error("the known-good boot after the job is within the test boot's quiet spell")
+	}
+}
+
+// A Mac silent on the same boot is lost after quietGrace, unless it said it
+// may be off the network for longer on that boot (up to maxQuiet): then once
+// that spell is over.
+func TestQuietSpellWindow(t *testing.T) {
+	v := newDev(&Server{log: log.New(io.Discard, "", 0)}, api.Device{Name: "m1air", BootID: "b1"}, "")
+	now := time.Now()
+	v.d.LastSeen = now.Add(-quietGrace - time.Second)
+	lost := func(want bool, at time.Duration, when string) {
+		t.Helper()
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		if got := v.lostLocked(now.Add(at)); got != want {
+			t.Errorf("%s: lost %v, want %v", when, got, want)
+		}
+	}
+	lost(true, 0, "silent past quietGrace")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b0", Seconds: 600}})
+	lost(true, 0, "a spell announced for another boot")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 600}})
+	lost(false, 0, "within the spell")
+	lost(false, 9*time.Minute, "9 minutes into a 10-minute spell")
+	lost(true, 11*time.Minute, "after the spell")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 86400}})
+	lost(false, maxQuiet-time.Minute, "a day's spell, a minute inside maxQuiet")
+	lost(true, maxQuiet+time.Minute, "a day's spell, past maxQuiet")
+	v.d.BootID = "b2"
+	lost(true, 0, "on the next boot")
+
+	// Back on the network, the agent ends the spell, on its own boot only,
+	// and labd has just heard from it: from then on quietGrace counts.
+	v.d.BootID = "b1"
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 600}})
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b0", Seconds: 0}})
+	lost(false, 9*time.Minute, "9 minutes into a spell, after another boot's ended")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 0}})
+	lost(false, 0, "just back on the network")
+	lost(true, quietGrace+time.Second, "silent past quietGrace once back, inside the spell it ended")
+}
+
+// suspend-devices tells labd once the Mac is back on the network, ending the
+// spell it announced, so a hang in the next test is caught after quietGrace,
+// not once the spell would have ended.
+func TestQuietSpellEndsWhenTheMacIsBack(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	// The spell outlasts the hang, which ends in a reset that labd would
+	// otherwise see first.
+	l.sim.SuspendFor, l.sim.QuietFor, l.sim.HangFor = time.Second, 30*time.Second, 12*time.Second
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"),
+		Tests: []api.TestSpec{{Name: "suspend-devices", Builtin: "suspend-devices"}, {Name: "hang-after-resume", Builtin: "x"}}})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	var started, lost time.Time
+	for _, e := range j.Events {
+		switch {
+		case e.Msg == "test hang-after-resume: running":
+			started = e.Time
+		case strings.HasPrefix(e.Msg, "lost the Mac during test hang-after-resume"):
+			lost = e.Time
+		}
+	}
+	if started.IsZero() || lost.IsZero() {
+		t.Fatalf("events %v", j.Events)
+	}
+	// quietGrace (3 s here) of silence, and a tick or two
+	if took := lost.Sub(started); took > quietGrace+3*time.Second {
+		t.Fatalf("lost the Mac %s into the hung test: labd waited out the spell after the Mac was back", took)
+	}
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	quiet := v.quietLocked(time.Now())
+	v.mu.Unlock()
+	if quiet {
+		t.Error("the known-good boot after the job is within a quiet spell")
+	}
+}
+
+// A test boot's watchdog deadline comes from the job's boot timeout: half
+// of it, leaving the other half for the reset and the fallback boot, and at
+// least 120 s.
+func TestTestBootWatchdogDeadline(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	for _, c := range []struct {
+		boot int
+		want string
+	}{
+		{0, "watchdog.open_timeout=120"}, // labd's 4 s in these tests
+		{600, "watchdog.open_timeout=300"},
+	} {
+		j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), BootTimeoutSec: c.boot})
+		l.expect(j, api.OutcomePass)
+		if !strings.Contains(j.Result.BootCmdline+" ", " "+c.want+" ") {
+			t.Errorf("boot timeout %ds: cmdline %q, want %s", c.boot, j.Result.BootCmdline, c.want)
+		}
+	}
+}
+
+// A skipped test isn't a pass: the job fails, and labd says it was skipped.
+func TestSkippedTestVerdict(t *testing.T) {
+	tr := api.TestResult{Name: "suspend-devices", Skipped: true, ExitCode: -1, Error: "the kernel has no pm_test devices mode (CONFIG_PM_DEBUG): no /sys/power/pm_test"}
+	if v := testVerdict(tr); v != "skipped (not a pass): "+tr.Error {
+		t.Errorf("verdict %q", v)
+	}
+}
+
 // A test that really suspends an Apple Silicon Mac needs a person to wake it;
 // suspend-devices (pm_test) and other Macs don't.
 func TestRealSleepNote(t *testing.T) {
@@ -889,7 +1023,8 @@ func TestOmarchyMTestDriverNodes(t *testing.T) {
 	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
 	l.baseline()
 	var ref omtBaseline
-	if b, _ := os.ReadFile(l.s.omtBaselinePath("sim-mac")); json.Unmarshal(b, &ref) != nil || strings.Join(ref.Unclaimed, " ") != "apple,mesa-fingerprint apple,sep" {
+	if b, _ := os.ReadFile(l.s.omtBaselinePath("sim-mac")); json.Unmarshal(b, &ref) != nil || strings.Join(ref.Unclaimed, " ") != "apple,mesa-fingerprint apple,sep" ||
+		!reflect.DeepEqual(ref.UnclaimedNodes, map[string]int{"apple,mesa-fingerprint": 1, "apple,sep": 1}) {
 		t.Fatalf("reference %+v", ref)
 	}
 
@@ -927,7 +1062,7 @@ func TestOmarchyMTestDriverNodes(t *testing.T) {
 	l.expect(j, api.OutcomeTestsFailed)
 
 	// A reference recorded before the lab kept its unclaimed nodes compares as before.
-	ref.Unclaimed = nil
+	ref.Unclaimed, ref.UnclaimedNodes = nil, nil
 	b, _ := json.Marshal(ref)
 	os.WriteFile(l.s.omtBaselinePath("sim-mac"), b, 0o644)
 	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ane4 behavior=ok")})
@@ -1106,7 +1241,7 @@ func TestRetryJob(t *testing.T) {
 	json.Unmarshal([]byte(body), &n)
 	want := j.Spec
 	want.Holder = "second"
-	if n.ID == j.ID || !reflect.DeepEqual(n.Spec, want) || n.Events[0].Msg != "queued: a retry of job "+j.ID {
+	if n.ID == j.ID || !reflect.DeepEqual(n.Spec, want) || n.Events[0].Msg != "queued: a retry of job "+j.ID || n.RetryOf != j.ID {
 		t.Fatalf("retry of %s: %s %+v %v", j.ID, n.ID, n.Spec, n.Events)
 	}
 	l.expect(l.wait(n.ID, 60*time.Second), api.OutcomePass)
@@ -1147,9 +1282,102 @@ func TestRetryJob(t *testing.T) {
 	if err := l.s.store.saveJob(src); err != nil {
 		t.Fatal(err)
 	}
-	if _, code, err := l.s.Retry(src.ID, ""); code != 400 || err == nil || !strings.Contains(err.Error(), "config artifact "+gc) {
+	l.s.saveBuild(&api.Build{ID: "b1", Key: "k1", Source: api.Source{Repo: "https://github.com/o/r", Ref: "b", SHA: strings.Repeat("e", 40)},
+		ConfigSHA: gc, State: api.BuildDone, Created: time.Now()})
+	if _, code, err := l.s.Retry(src.ID, ""); code != 409 || err == nil || !strings.Contains(err.Error(), "built with config "+gc[:8]+", which has been collected since") {
 		t.Fatalf("retry needing a collected config: %d %v", code, err)
 	}
+}
+
+// A retry whose first kernel was collected builds the commit the first build
+// recorded, not wherever the branch it was given points now. With no
+// commit recorded it is refused.
+func TestRetryPinsCommit(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builds := 0
+	go l.fakeBuilder(ctx, &builds)
+
+	src := gitRepo(t) // file://<dir>@main
+	j := l.run(api.JobSpec{Source: src})
+	l.expect(j, api.OutcomePass)
+	first, err := l.s.getBuild(j.Spec.Build)
+	if err != nil || first.Source.SHA == "" {
+		t.Fatalf("build %+v %v", first, err)
+	}
+	// main moves on, and the kernel the first job booted is collected
+	dir := strings.TrimSuffix(strings.TrimPrefix(src, "file://"), "@main")
+	commit := exec.Command("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved on")
+	commit.Dir = dir
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v %s", err, out)
+	}
+	if now, _ := resolve(ctx, mustParse(t, src)); now.SHA == first.Source.SHA {
+		t.Fatal("main did not move")
+	}
+	if err := os.Remove(l.s.artifactPath(j.Spec.Kernel)); err != nil {
+		t.Fatal(err)
+	}
+
+	// and the Mac's config moves on too, as it does with a new known-good kernel
+	moved := l.artifact("CONFIG_MOVED_ON=y\n")
+	if err := l.s.store.setConfig(l.name, agent.SimKnownGood, moved); err != nil {
+		t.Fatal(err)
+	}
+	if now, _ := l.s.deviceConfig(ctx, l.name); now != moved || now == first.ConfigSHA {
+		t.Fatalf("the Mac's config is %s, want %s", now, moved)
+	}
+
+	r, _, err := l.s.Retry(j.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "file://" + dir + "#" + first.Source.SHA; r.Spec.Source != want || r.Spec.Kernel != "" || r.Spec.Build != "" || r.Spec.Config != first.ConfigSHA || r.RetryOf != j.ID {
+		t.Fatalf("retry %+v, want source %s and config %s", r, want, first.ConfigSHA)
+	}
+	if len(r.Events) != 2 || !strings.Contains(r.Events[1].Msg, "builds with the config build "+first.ID+" used") {
+		t.Fatalf("retry events %v", r.Events)
+	}
+	r = l.wait(r.ID, 60*time.Second)
+	l.expect(r, api.OutcomePass)
+	again, err := l.s.getBuild(r.Spec.Build)
+	if err != nil || again.ID == first.ID || again.Source.SHA != first.Source.SHA || again.ConfigSHA != first.ConfigSHA || builds != 2 {
+		t.Fatalf("the retry built %+v (%d builds), want commit %s with config %s", again, builds, first.Source.SHA, first.ConfigSHA)
+	}
+
+	// With the config the first build used collected too, the same kernel
+	// can't be built again: refused, not built from the Mac's config now.
+	if err := os.Remove(l.s.artifactPath(r.Spec.Kernel)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(l.s.artifactPath(first.ConfigSHA)); err != nil {
+		t.Fatal(err)
+	}
+	if _, code, err := l.s.Retry(r.ID, ""); code != 409 || err == nil || !strings.Contains(err.Error(), "built with config "+first.ConfigSHA[:8]+", which has been collected since") {
+		t.Fatalf("retry with its config collected: %d %v", code, err)
+	}
+
+	// No commit to pin: refused, not rebuilt from the moving branch.
+	for _, c := range []struct{ id, build string }{{"jnobuild", ""}, {"jgone", "b-collected"}} {
+		old := &api.Job{ID: c.id, Spec: api.JobSpec{Device: l.name, Source: src, Build: c.build}, State: api.JobDone, Outcome: api.OutcomeBuildFailed}
+		if err := l.s.store.saveJob(old); err != nil {
+			t.Fatal(err)
+		}
+		if _, code, err := l.s.Retry(c.id, ""); code != 409 || err == nil || !strings.Contains(err.Error(), "lab run "+l.name+" --kernel "+src) {
+			t.Fatalf("retry of %s: %d %v", c.id, code, err)
+		}
+	}
+}
+
+func mustParse(t *testing.T, source string) api.Source {
+	t.Helper()
+	s, err := parseSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 // Without a serial console a test boot keeps the base's quiet and splash,
@@ -1271,6 +1499,116 @@ func TestCancelWhileBootingRestoresKnownGood(t *testing.T) {
 	// The next job stages the same kernel without tripping over it.
 	l.sim.RebootDelay = 300 * time.Millisecond
 	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-slow behavior=ok")}), api.OutcomePass)
+}
+
+// cancelWhen cancels job id once one of its events contains msg.
+func (l *lab) cancelWhen(id, msg string) {
+	l.t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		cur, _ := l.s.store.job(id)
+		if slices.ContainsFunc(cur.Events, func(e api.JobEvent) bool { return strings.Contains(e.Msg, msg) }) {
+			if r, body := l.get("POST", "/api/jobs/"+id+"/cancel"); r.StatusCode != 200 {
+				l.t.Fatalf("cancel: %s %s", r.Status, body)
+			}
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cur, _ := l.s.store.job(id)
+	l.t.Fatalf("job %s never logged %q: %s %s, events %v", id, msg, cur.Outcome, cur.Summary, cur.Events)
+}
+
+// A cancel after the kernel failed keeps the failure as the outcome, so lab
+// gate counts it and a retry's pass reads as flaky, not clean. Tests the
+// cancel cut short are the cancel's, not the kernel's.
+func TestCancelKeepsKernelFailure(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	k := l.artifact("krel=7.2-oops behavior=crash-in-test")
+	// collecting the crashed boot's logs takes long enough to cancel meanwhile
+	l.sim.CollectHook = func(boot, outDir string) error {
+		if boot == "-1" {
+			time.Sleep(2 * time.Second)
+		}
+		return nil
+	}
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: k})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j.ID, "back after")
+	j = l.wait(j.ID, 60*time.Second)
+	l.expect(j, api.OutcomePanicked)
+	if !strings.Contains(j.Summary, "kernel crashed") || !strings.Contains(j.Summary, "then the job was canceled") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+
+	// A test that failed by itself before the cancel stands; one the cancel
+	// cut short doesn't.
+	l.sim.TestFiles = func(test, kernel string) map[string][]byte {
+		if strings.HasPrefix(test, "slow-") {
+			time.Sleep(3 * time.Second)
+		}
+		return nil
+	}
+	ok := l.artifact("krel=7.2-ok behavior=ok")
+	j2, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: ok, Tests: []api.TestSpec{{Name: "will-fail", Builtin: "x"}, {Name: "slow-check", Builtin: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j2.ID, "test slow-check: running")
+	j2 = l.wait(j2.ID, 60*time.Second)
+	l.expect(j2, api.OutcomeTestsFailed)
+	if !strings.Contains(j2.Summary, "then the job was canceled") || j2.Result.Tests[2].Error != "the job was canceled during this test" {
+		t.Fatalf("summary %s, tests %+v", j2.Summary, j2.Result.Tests)
+	}
+	j3, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: ok, Tests: []api.TestSpec{{Name: "slow-check", Builtin: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j3.ID, "test slow-check: running")
+	j3 = l.wait(j3.ID, 60*time.Second)
+	l.expect(j3, api.OutcomeCanceled)
+
+	// lab gate counts the kept failure against the kernel. (The sim has no
+	// chip family: make its jobs an M1's.)
+	m1 := gateDev(l.name, "t8103")
+	for _, j := range []*api.Job{j, j2, j3} {
+		j.DeviceAtSubmit.Family = "m1"
+	}
+	for _, c := range []struct {
+		job  *api.Job
+		kern string
+	}{{j, k}, {j2, ok}} {
+		r := rollUp(api.GateKernel{SHA256: c.kern}, []api.Device{m1}, []*api.Job{c.job}, []string{"m1"}, gateOpts{})
+		if r.Result != api.GateFail || len(r.Families[0].Runs) != 1 || r.Families[0].Runs[0].Result != api.GateFail {
+			t.Fatalf("gate on %s: %s", c.job.ID, r.Summary)
+		}
+	}
+	if r := rollUp(api.GateKernel{SHA256: ok}, []api.Device{m1}, []*api.Job{j3}, []string{"m1"}, gateOpts{}); gateResults(r)["m1"] != api.GateUntested {
+		t.Fatalf("gate on the canceled %s: %s", j3.ID, r.Summary)
+	}
+}
+
+// omarchy-m-test under another name in the job still runs as the builtin,
+// and its report is read from where that test's files went.
+func TestOmarchyMTestRenamed(t *testing.T) {
+	l := newLab(t, true)
+	l.s.cfg.OMT = true
+	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "omt", Builtin: omtTest}}})
+	l.expect(j, api.OutcomePass)
+	if o := j.Result.OMT; o == nil || o.Report != "test-omt/omt-report.json" || o.BaselineJob == "" || len(j.Result.Tests) != 2 {
+		t.Fatalf("omt %+v, tests %+v", j.Result.OMT, j.Result.Tests)
+	}
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-bad behavior=omt-regress"), Tests: []api.TestSpec{{Name: "omt", Builtin: omtTest}}})
+	l.expect(j, api.OutcomeTestsFailed)
+	if o := j.Result.OMT; o == nil || len(o.Regressions) != 1 || o.Regressions[0].ID != "wifi.connected" {
+		t.Fatalf("regressed omt %+v", j.Result.OMT)
+	}
 }
 
 func TestBaselinePublishesWhenKnownGoodChanges(t *testing.T) {

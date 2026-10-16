@@ -22,6 +22,9 @@ var errDeviceLost = errors.New("device stopped responding or rebooted")
 type dev struct {
 	s          *Server
 	secretHash string
+	// volunteeredBy is d.VolunteeredBy, which never changes: labd counts a
+	// volunteer's Macs under s.mu alone, without each Mac's mu.
+	volunteeredBy string
 
 	mu       sync.Mutex
 	d        api.Device
@@ -42,6 +45,9 @@ type dev struct {
 	// forgotten: lab forget deleted the device's row. Set under mu, which
 	// every save holds, so nothing still holding the device writes it back.
 	forgotten bool
+	// leftBy is what took the Mac out of the lab ("lab-agent uninstall
+	// --force"), set with StateLeft; empty after labd restarts.
+	leftBy string
 
 	shotMu     sync.Mutex
 	screenAt   time.Time
@@ -55,9 +61,14 @@ type dev struct {
 
 	asleep time.Time // when the agent said the Mac is going to sleep; zero while awake
 	awoke  time.Time // when it said it woke up: quietGrace counts from here
+	// The agent said boot quietBoot may be off the network until quietUntil
+	// (api.Quiet): until then its silence doesn't make it lost or offline.
+	quietBoot  string
+	quietUntil time.Time
 
-	// heard is the last check-in from the Mac itself. LastSeen also moves when
-	// labd answers a held check-in, which a Mac that just died can't hear.
+	// heard is the last check-in from the Mac itself, or its report that it
+	// is back on the network. LastSeen also moves when labd answers a held
+	// check-in, which a Mac that just died can't hear.
 	heard time.Time
 	// The last reboot labd saw: the boot that ended, the last check-in heard
 	// from it, and the first check-in of the boot after it.
@@ -66,7 +77,7 @@ type dev struct {
 }
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
-	v := &dev{s: s, d: d, secretHash: secretHash, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
+	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
 		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{})}
 	return v
 }
@@ -102,6 +113,17 @@ func (v *dev) saveLocked() {
 	}
 }
 
+// leaving says that lab-agent uninstall took the Mac out of the lab, and
+// how, or "" while it is still in the lab.
+func (v *dev) leaving() string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.d.State != api.StateLeft {
+		return ""
+	}
+	return fmt.Sprintf("%s left the lab (%s)", v.d.Name, orStr(v.leftBy, "lab-agent uninstall"))
+}
+
 func (v *dev) aliveLocked() bool {
 	return !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) < aliveWindow
 }
@@ -114,6 +136,11 @@ func (v *dev) setState(st api.DeviceState, reason string) {
 
 func (v *dev) setStateLocked(st api.DeviceState, reason string) {
 	if v.d.State == st && v.d.StateReason == reason {
+		return
+	}
+	// A Mac that left the lab stays left until lab forget: a job ending or a
+	// recovery finishing must not put it back in the pool.
+	if v.d.State == api.StateLeft {
 		return
 	}
 	v.d.State, v.d.StateReason = st, reason
@@ -240,6 +267,21 @@ func (v *dev) deliver(bootID string) api.CheckinResponse {
 func (v *dev) report(rep api.Report) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID {
+		switch now := time.Now(); {
+		case q.Seconds > 0:
+			d := min(time.Duration(q.Seconds)*time.Second, maxQuiet)
+			v.quietBoot, v.quietUntil = q.BootID, now.Add(d)
+			v.s.log.Printf("%s: may be off the network for up to %s on boot %s", v.d.Name, d, short(q.BootID))
+		case v.quietLocked(now):
+			// Back on the network: from now on a silence is quietGrace's
+			// again, so a hang in the next step shows at once. The report
+			// is the Mac itself, heard now, maybe before its next check-in.
+			v.quietBoot, v.quietUntil = "", time.Time{}
+			v.d.LastSeen, v.heard = now, now
+			v.s.log.Printf("%s: back on the network on boot %s; no longer waiting out its spell off it", v.d.Name, short(q.BootID))
+		}
+	}
 	for _, r := range rep.Results {
 		if _, ok := v.inflight[r.ID]; ok {
 			delete(v.inflight, r.ID)
@@ -390,11 +432,30 @@ var quietGrace = 60 * time.Second
 // maxSleep is how long a command waits for a Mac that went to sleep.
 var maxSleep = time.Hour
 
+// maxQuiet is the longest spell off the network an agent can announce
+// (api.Quiet) that labd honours.
+var maxQuiet = 15 * time.Minute
+
+// quietLocked is whether the Mac is within a spell off the network it
+// announced for the boot it is on. Caller holds mu.
+func (v *dev) quietLocked(now time.Time) bool {
+	return v.quietBoot != "" && v.quietBoot == v.d.BootID && now.Before(v.quietUntil)
+}
+
+// lostLocked is whether a Mac silent on the same boot, and not asleep, has
+// been silent too long: quietGrace from its last check-in and from its last
+// wake-up, and past any spell off the network it announced for this boot.
+// Caller holds mu.
+func (v *dev) lostLocked(now time.Time) bool {
+	return now.Sub(v.d.LastSeen) > quietGrace && now.Sub(v.awoke) > quietGrace && !v.quietLocked(now)
+}
+
 // callNote is call for commands that may outlive a quiet spell. A Mac that
 // goes quiet on the same boot is asleep or off the network, and the command
 // is still running there: it waits, with the command's clock stopped, for as
-// long as the Mac said it is asleep (up to maxSleep), and quietGrace
-// otherwise. note, if set, hears about sleeping and waking.
+// long as the Mac said it is asleep (up to maxSleep), as long as it said it
+// may be off the network (up to maxQuiet), and quietGrace otherwise. note, if
+// set, hears about sleeping and waking.
 func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout time.Duration, out any, note func(string)) error {
 	v.mu.Lock()
 	boot := v.d.BootID
@@ -460,7 +521,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 				}
 				return false
 			}
-			if now.Sub(v.d.LastSeen) > quietGrace && now.Sub(v.awoke) > quietGrace {
+			if v.lostLocked(now) {
 				lost = true
 				return true
 			}

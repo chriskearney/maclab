@@ -117,6 +117,10 @@ type fakeSuspend struct {
 	lockAtSuspend           string   // the unit's state when systemctl suspend ran
 	modeAtLockStart         string   // pm_test when the unit was started again
 	lockStartedAfterSuspend bool
+
+	// The deadlines systemctl suspend and the lock unit's start ran with;
+	// zero for none.
+	suspendDeadline, lockStartDeadline time.Time
 }
 
 func newFakeSuspend(t *testing.T, pmTest string) *fakeSuspend {
@@ -166,6 +170,7 @@ func newFakeSuspend(t *testing.T, pmTest string) *fakeSuspend {
 				return "", nil
 			case c == "start "+lockUnit:
 				f.modeAtLockStart, f.lockStartedAfterSuspend = mode(), f.suspends > 0
+				f.lockStartDeadline, _ = ctx.Deadline()
 				if f.failLockStart {
 					return "Job for " + lockUnit + " failed because the control process exited with error code.\n", errors.New("exit status 1")
 				}
@@ -200,6 +205,7 @@ func newFakeSuspend(t *testing.T, pmTest string) *fakeSuspend {
 			return "b false\n", nil
 		case "systemctl suspend":
 			f.modeSeen, f.lockAtSuspend = mode(), f.lock
+			f.suspendDeadline, _ = ctx.Deadline()
 			f.suspends++
 			if f.failStart != nil {
 				return "Call to Suspend failed: Access denied\n", f.failStart
@@ -239,9 +245,15 @@ func (f *fakeSuspend) lockPausedForSuspend(t *testing.T, want string) {
 // runSuspendDevices runs the builtin on a Mac whose GUI user is gui.
 func runSuspendDevices(t *testing.T, gui string, spec api.TestSpec) api.TestResult {
 	t.Helper()
+	return runSuspendDevicesQuiet(t, gui, spec, nil)
+}
+
+// runSuspendDevicesQuiet runs it telling labd through quiet.
+func runSuspendDevicesQuiet(t *testing.T, gui string, spec api.TestSpec, quiet Quieter) api.TestResult {
+	t.Helper()
 	spec.Name, spec.Builtin = "suspend-devices", "suspend-devices"
 	l := &Linux{WorkDir: t.TempDir(), GUIUser: gui}
-	return l.RunTest(context.Background(), "j1", spec, nil, t.TempDir())
+	return l.RunTest(context.Background(), "j1", spec, nil, quiet, t.TempDir())
 }
 
 func pmTestNow(t *testing.T) string {
@@ -252,16 +264,20 @@ func pmTestNow(t *testing.T) string {
 
 const pmTestModes = "[none] core processors platform devices freezer"
 
+// A kernel without pm_test's devices mode can't run the test: it is
+// skipped, which is not a pass, and nothing is suspended.
 func TestSuspendDevicesSkips(t *testing.T) {
+	const why = "the kernel has no pm_test devices mode (CONFIG_PM_DEBUG): "
 	for _, c := range []struct{ name, pmTest, want string }{
-		{"no pm_test", "", "SKIP: no "},
-		{"no devices mode", "[none] core processors", "SKIP: "},
+		{"no pm_test", "", why + "no "},
+		{"no devices mode", "[none] core processors", why},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newFakeSuspend(t, c.pmTest)
 			r := runSuspendDevices(t, "lab", api.TestSpec{})
-			if !r.Passed || !strings.Contains(r.Tail, c.want) || f.suspends != 0 || len(f.lockCmds) != 0 {
-				t.Fatalf("passed=%v suspends=%d lock commands %q tail:\n%s", r.Passed, f.suspends, f.lockCmds, r.Tail)
+			if r.Passed || !r.Skipped || r.TimedOut || !strings.HasPrefix(r.Error, c.want) || !strings.Contains(r.Tail, "SKIP: "+c.want) ||
+				f.suspends != 0 || len(f.lockCmds) != 0 {
+				t.Fatalf("passed=%v skipped=%v error %q suspends=%d lock commands %q tail:\n%s", r.Passed, r.Skipped, r.Error, f.suspends, f.lockCmds, r.Tail)
 			}
 			if c.pmTest == "" {
 				if _, err := os.Stat(pmTestPath); !os.IsNotExist(err) {
@@ -341,7 +357,8 @@ func TestSuspendDevicesFails(t *testing.T) {
 }
 
 // A device that fails is the verdict, also when the test's time runs out
-// while pm_test waits for logind to be done with the suspend.
+// while pm_test waits for logind to be done with the suspend. The wait ends
+// with the test's time, and pm_test stays at devices.
 func TestSuspendDevicesFailureIsNotATimeout(t *testing.T) {
 	f := newFakeSuspend(t, pmTestModes)
 	f.cycle, f.preparing = devicesFailedCycle, 150 // 1.5s of polls, past the test's 1s
@@ -350,13 +367,133 @@ func TestSuspendDevicesFailureIsNotATimeout(t *testing.T) {
 	if r.Passed || r.TimedOut || r.ExitCode != 1 || !strings.Contains(r.Tail, "FAIL: the kernel logged: macsmc-rtc") {
 		t.Fatalf("passed=%v timed out=%v exit=%d after %.1fs, tail:\n%s", r.Passed, r.TimedOut, r.ExitCode, r.Seconds, r.Tail)
 	}
-	if r.Seconds < 1 {
-		t.Fatalf("the test's time didn't run out (%.1fs)", r.Seconds)
+	if r.Seconds < 0.9 || r.Seconds > 1.3 {
+		t.Fatalf("took %.1fs, want the test's 1s", r.Seconds)
 	}
-	if m := pmTestNow(t); m != "none" || f.modeAtSleep != "devices" {
-		t.Errorf("pm_test %q after the test, %q at logind's late suspend", m, f.modeAtSleep)
+	if !strings.Contains(r.Tail, "left pm_test at devices, so that a later suspend isn't a real one: as the test's time ran out, logind is preparing for sleep") {
+		t.Errorf("tail:\n%s", r.Tail)
 	}
-	f.lockPausedForSuspend(t, "none")
+	if m := pmTestNow(t); m != "devices" {
+		t.Errorf("pm_test %q after the test", m)
+	}
+	f.lockPausedForSuspend(t, "devices")
+}
+
+// The test always has a deadline, 5 minutes without a timeout of its own,
+// and the cycle leaves part of it for putting things back, which ends by the
+// test's deadline too (each step there has 30 s at most).
+func TestSuspendDevicesDeadline(t *testing.T) {
+	for _, c := range []struct {
+		spec          api.TestSpec
+		cycle, tidied time.Duration // the deadlines from the start
+	}{
+		{api.TestSpec{}, 5*time.Minute - suspendTidyWait, 30 * time.Second},
+		{api.TestSpec{TimeoutSec: 600}, 10*time.Minute - suspendTidyWait, 30 * time.Second},
+		{api.TestSpec{TimeoutSec: 20}, 10 * time.Second, 20 * time.Second},
+	} {
+		f := newFakeSuspend(t, pmTestModes)
+		start := time.Now()
+		r := runSuspendDevices(t, "lab", c.spec)
+		if !r.Passed {
+			t.Fatalf("timeout %ds: failed, tail:\n%s", c.spec.TimeoutSec, r.Tail)
+		}
+		near := func(what string, got time.Time, want time.Duration) {
+			if got.IsZero() || got.Sub(start) < want-time.Second || got.Sub(start) > want+time.Second {
+				t.Errorf("timeout %ds: %s with deadline %v, want %s from the start", c.spec.TimeoutSec, what, got.Sub(start), want)
+			}
+		}
+		near("systemctl suspend", f.suspendDeadline, c.cycle)
+		near("starting the lock unit again", f.lockStartDeadline, c.tidied)
+	}
+}
+
+// However slowly a cycle fails, the test ends within its timeout, putting
+// things back too, and so inside the watchdog's budget for it: a suspend
+// that never ends, and never settles once cancelled.
+func TestSuspendDevicesSlowFailureEndsInTime(t *testing.T) {
+	f := newFakeSuspend(t, pmTestModes)
+	f.cycle, f.jobs, f.lateSleep = "", "1062 systemd-suspend.service start running\n", -1
+	suspendResumeWait, suspendSettleWait, suspendNetWait = time.Minute, 5*time.Second, time.Minute
+	spec := api.TestSpec{TimeoutSec: 2}
+	r := runSuspendDevices(t, "lab", spec)
+	if r.Passed || !r.TimedOut {
+		t.Fatalf("passed=%v timed out=%v tail:\n%s", r.Passed, r.TimedOut, r.Tail)
+	}
+	if took := time.Duration(r.Seconds * float64(time.Second)); took > testTimeout(spec)+300*time.Millisecond {
+		t.Fatalf("took %s with a %s timeout (watchdog budget %s), tail:\n%s", took, testTimeout(spec), testBudget(spec), r.Tail)
+	}
+	for _, want := range []string{"FAIL: no suspend cycle ended before the test stopped (context deadline exceeded); cancelled sleep jobs 1062",
+		"left pm_test at devices, so that a later suspend isn't a real one: as the test's time ran out, systemd-suspend.service is activating"} {
+		if !strings.Contains(r.Tail, want) {
+			t.Errorf("tail lacks %q:\n%s", want, r.Tail)
+		}
+	}
+	if m := pmTestNow(t); m != "devices" {
+		t.Errorf("pm_test %q after the test", m)
+	}
+}
+
+// Just before it suspends, with pm_test at devices, the test tells labd how
+// long the Mac may be off the network: until the cycle, its settling and the
+// network have had their time, or the test's time is up. Once the network is
+// back it tells labd so (0), ending that spell; without the network labd
+// waits the spell out. If labd doesn't hear it, the test carries on.
+func TestSuspendDevicesTellsLabd(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		spec      api.TestSpec
+		net       time.Duration
+		routeDown int // as fakeSuspend's
+		fail      error
+		min, max  time.Duration
+		passed    bool
+		want      []string // in the log
+		back      bool     // told labd the Mac is back
+	}{
+		{"waits", api.TestSpec{}, 300 * time.Millisecond, 0, nil, 900 * time.Millisecond, 900 * time.Millisecond, true,
+			[]string{"told labd the Mac may be off the network for up to 1s", "told labd the Mac is back on the network"}, true},
+		{"time left", api.TestSpec{TimeoutSec: 2}, time.Minute, 0, nil, 1500 * time.Millisecond, 2 * time.Second, true,
+			[]string{"told labd the Mac may be off the network for up to 2s", "told labd the Mac is back on the network"}, true},
+		{"route back late", api.TestSpec{}, 300 * time.Millisecond, 3, nil, 900 * time.Millisecond, 900 * time.Millisecond, true,
+			[]string{"default route back", "told labd the Mac is back on the network"}, true},
+		{"network never back", api.TestSpec{}, 300 * time.Millisecond, -1, nil, 900 * time.Millisecond, 900 * time.Millisecond, false,
+			[]string{"no default route 300ms after resuming"}, false},
+		{"labd unreachable", api.TestSpec{}, 300 * time.Millisecond, 0, errors.New("connection refused"), 900 * time.Millisecond, 900 * time.Millisecond, true,
+			[]string{"could not tell labd the Mac may be off the network for 1s: connection refused",
+				"could not tell labd the Mac is back on the network: connection refused; it waits out the spell instead"}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeSuspend(t, pmTestModes)
+			suspendNetWait = c.net
+			f.routeDown = c.routeDown
+			var told []time.Duration
+			var modes []string
+			var suspended []int
+			r := runSuspendDevicesQuiet(t, "lab", c.spec, func(ctx context.Context, d time.Duration) error {
+				f.mu.Lock()
+				defer f.mu.Unlock()
+				told, modes, suspended = append(told, d), append(modes, pmTestNow(t)), append(suspended, f.suspends)
+				return c.fail
+			})
+			if r.Passed != c.passed {
+				t.Fatalf("passed=%v, want %v; tail:\n%s", r.Passed, c.passed, r.Tail)
+			}
+			for _, w := range c.want {
+				if !strings.Contains(r.Tail, w) {
+					t.Errorf("log lacks %q:\n%s", w, r.Tail)
+				}
+			}
+			if len(told) == 0 || told[0] < c.min || told[0] > c.max || modes[0] != "devices" || suspended[0] != 0 {
+				t.Fatalf("told labd %v, with pm_test=%q after %v suspends; want first %s to %s, devices, before suspending", told, modes, suspended, c.min, c.max)
+			}
+			switch {
+			case !c.back && len(told) != 1:
+				t.Errorf("told labd %v with the network not back; want only the spell", told)
+			case c.back && (len(told) != 2 || told[1] != 0 || suspended[1] != 1 || modes[1] != "none"):
+				t.Errorf("told labd %v, with pm_test=%q after %v suspends; want the spell, then 0 once the cycle was over", told, modes, suspended)
+			}
+		})
+	}
 }
 
 // A suspend that hasn't ended in time is cancelled, and pm_test stays at

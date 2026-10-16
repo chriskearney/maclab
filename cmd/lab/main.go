@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -41,18 +42,25 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab crashtest <device>              deliberately panic the Mac and check it recovers by itself
   lab pack --build <O= dir> [-o kernel.tar.zst]    package a kernel build for lab run
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
-  lab gate <kernel> [--families m1,m2] [--evidence file]
-                                      did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not
-  lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel, tests and cmdline
+  lab gate <kernel> [--families m1,m2] [--volunteers] [--exclude job,..] [--evidence file]
+                                      did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not.
+                                      A family is pass, fail, flaky (passed and failed: not a pass), stage_failed or untested.
+                                      --exclude sets jobs aside for this report only, e.g. a failure the lab caused
+  lab exclude <job> --reason "..." | lab exclude <job> --clear
+                                      set a finished job aside in every lab gate report, e.g. a failure the lab
+                                      caused; the gate lists who set it aside, why and when. --clear counts it again
+  lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
-  lab forget <device>                 take a Mac out of the lab (after lab-agent uninstall); its jobs stay
+  lab forget <device> [--force]       take a Mac out of the lab (after lab-agent uninstall); its jobs stay.
+                                      Refused while someone else leases it or its agent checks in, unless --force
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
   lab installed freeze-entry <device> --release R    freeze the installer's boot entry, after the install
   lab installed promote <device> --release R --job <id> --accepted-by <who>
                                       references + known-good, labd's and the agent's (Mac on that kernel, agent 0.7.3+)
   lab installed status --release R                   the frozen files of a release
-  lab reset <device>                  run the recovery ladder on an idle Mac by hand
+  lab reset <device>                  run the recovery ladder on an idle Mac by hand; a Mac that left
+                                      (lab-agent uninstall) goes back in the lab first
   lab shell <device>                  shell over the serial link: works with the Mac's network down (Ctrl-] exits)
   lab serial <device> [-n 100] | lab oob <device>
   lab upload <file>
@@ -429,15 +437,20 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 	case "gate":
 		fams := fs.String("families", "", "chip families that must pass, comma-separated (default all: m1,m1-pro,m2,m2-pro,m3,m3-pro)")
 		evidence := fs.String("evidence", "", "write the report to this file as a JSON evidence record")
+		volunteers := fs.Bool("volunteers", false, "count volunteers' Macs (enrolled with ./volunteer) too; by default they're listed, not counted")
+		exclude := fs.String("exclude", "", "jobs to set aside for this report only, comma-separated, e.g. a failure the lab caused; they're listed as excluded")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--evidence file]"); err != nil {
+		if err := need(pos, 1, "lab gate <kernel> [--families m1,m2] [--volunteers] [--exclude job,..] [--evidence file]"); err != nil {
 			return err
 		}
-		var list []string
+		var list, excluded []string
 		if *fams != "" {
 			list = strings.Split(*fams, ",")
 		}
-		rep, err := c.Gate(ctx, pos[0], list)
+		if *exclude != "" {
+			excluded = strings.Split(*exclude, ",")
+		}
+		rep, err := c.Gate(ctx, pos[0], list, *volunteers, excluded)
 		if err != nil {
 			return err
 		}
@@ -451,6 +464,39 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if rep.Result != api.GatePass {
 			os.Exit(3)
 		}
+		return nil
+
+	case "exclude":
+		reason := fs.String("reason", "", "why the job says nothing about its kernel, e.g. \"the access point went down mid-test\" (required)")
+		again := fs.Bool("clear", false, "count the job in lab gate again")
+		pos := parse(fs, args)
+		const use = `lab exclude <job> --reason "..." | lab exclude <job> --clear`
+		if err := need(pos, 1, use); err != nil {
+			return err
+		}
+		if *again {
+			if *reason != "" {
+				return fmt.Errorf("--clear takes no --reason; usage: %s", use)
+			}
+			if _, err := c.ClearExclusion(ctx, pos[0]); err != nil {
+				return err
+			}
+			fmt.Printf("job %s counts in lab gate again\n", pos[0])
+			return nil
+		}
+		if strings.TrimSpace(*reason) == "" {
+			return fmt.Errorf("say why with --reason; usage: %s", use)
+		}
+		j, err := c.Exclude(ctx, pos[0], *reason, holder())
+		if err != nil {
+			return err
+		}
+		x := j.GateExclusion
+		if x == nil {
+			return fmt.Errorf("labd answered, but didn't keep the exclusion: is it older than lab exclude?")
+		}
+		fmt.Printf("job %s (%s on %s) is set aside in every lab gate report, by %s at %s: %s. `lab exclude %s --clear` counts it again.\n",
+			j.ID, j.Outcome, j.Spec.Device, x.By, x.Time.Local().Format(time.DateTime), x.Reason, j.ID)
 		return nil
 
 	case "publish":
@@ -532,11 +578,19 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		return nil
 
 	case "forget":
+		force := fs.Bool("force", false, "forget it even while someone else holds a lease on it, or its lab-agent still checks in")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab forget <device>"); err != nil {
+		if err := need(pos, 1, "lab forget <device> [--force]"); err != nil {
 			return err
 		}
-		if err := c.ForgetDevice(ctx, pos[0]); err != nil {
+		err := c.ForgetDevice(ctx, pos[0], holder(), *force)
+		// a forget run twice, or after a forget that timed out, is done already
+		var se *client.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			fmt.Printf("%s is not in the lab: nothing to forget\n", pos[0])
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Printf("forgot %s; its jobs stay. `lab enroll %s` adds it again.\n", pos[0], pos[0])
@@ -660,6 +714,9 @@ func printJob(j *api.Job, events bool) {
 	if j.Summary != "" {
 		fmt.Printf("  %s\n", j.Summary)
 	}
+	if x := j.GateExclusion; x != nil {
+		fmt.Printf("  set aside in lab gate by %s at %s: %s\n", x.By, x.Time.Local().Format(time.DateTime), x.Reason)
+	}
 	r := j.Result
 	if r.Booted {
 		fmt.Printf("  booted %s in %.0fs\n", r.BootKernel, r.BootSeconds)
@@ -747,23 +804,86 @@ func printGate(r *api.GateReport) {
 			if i > 0 {
 				fam, name, res = "", "", ""
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fam, name, res, run.Device, run.Job, run.Outcome)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fam, name, res, run.Device, gateJob(run), run.Outcome)
 		}
 	}
 	w.Flush()
 	for _, l := range unstaged {
 		fmt.Println(l)
 	}
+	// Runs that decide nothing, the excluded ones and the volunteers' Macs' apart.
+	var other, excluded, vol []string
+	add := func(fam string, run api.GateRun) {
+		l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", fam, run.Device, gateJob(run), run.Outcome, run.NotCounted)
+		switch {
+		case run.Excluded:
+			excluded = append(excluded, l)
+		case run.Volunteer:
+			vol = append(vol, l)
+		default:
+			other = append(other, l)
+		}
+	}
+	for _, f := range r.Families {
+		for _, run := range f.NotCounted {
+			add(f.Family, run)
+		}
+	}
+	for _, run := range r.NotCounted {
+		add("?", run) // no family known
+	}
+	section := func(title string, lines []string) {
+		if len(lines) == 0 {
+			return
+		}
+		fmt.Println(title)
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		for _, l := range lines {
+			fmt.Fprintln(w, l)
+		}
+		w.Flush()
+	}
+	section("not counted:", other)
+	if len(r.Excluded) > 0 {
+		fmt.Printf("excluded for this report (--exclude): %s\n", strings.Join(r.Excluded, ", "))
+	}
+	if len(r.Exclusions) > 0 {
+		fmt.Println("set aside with lab exclude (`lab exclude <job> --clear` counts one again):")
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		for _, x := range r.Exclusions {
+			fmt.Fprintf(w, "  %s\t%s\t%s\tby %s\t%s\t%s\n", x.Job, x.Device, x.Outcome, x.By, x.Time.Local().Format(time.DateTime), x.Reason)
+		}
+		w.Flush()
+	}
+	section("excluded runs, not counted:", excluded)
+	switch {
+	case len(r.Volunteers) == 0:
+	case r.VolunteersCounted:
+		fmt.Printf("volunteers' Macs, counted: %s\n", strings.Join(r.Volunteers, ", "))
+	default:
+		fmt.Printf("volunteers' Macs, not counted (--volunteers counts them): %s\n", strings.Join(r.Volunteers, ", "))
+	}
+	section("volunteers' runs, not counted:", vol)
 	if len(r.Unclassified) > 0 {
 		fmt.Printf("not counted (no supported chip family known): %s\n", strings.Join(r.Unclassified, ", "))
 	}
 	fmt.Println(r.Summary)
 }
 
+// gateJob is a gate run's job, and the job it retries if it is a retry.
+func gateJob(run api.GateRun) string {
+	if run.RetryOf != "" {
+		return run.Job + " (retry of " + run.RetryOf + ")"
+	}
+	return run.Job
+}
+
 func verdict(t api.TestResult) string {
 	switch {
 	case t.Passed:
 		return fmt.Sprintf("pass  (%.0fs)", t.Seconds)
+	case t.Skipped:
+		return "SKIPPED " + t.Error
 	case t.TimedOut:
 		return "TIMED OUT"
 	case t.Error != "":
@@ -813,6 +933,9 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 		fmt.Printf("\n>>> %s\n%s\n\n", strings.ToUpper(d.Action.Title), indent(d.Action.Text()))
 	}
 	fmt.Printf("  model:       %s, %s\n", d.Facts.DTModel, orDash(d.Label, "no label"))
+	if d.Volunteer {
+		fmt.Printf("  volunteer:   enrolled with ./volunteer; lab gate counts it only with --volunteers\n")
+	}
 	fmt.Printf("  kernel:      %s (known-good: %s)\n", d.Kernel, orDash(d.KnownGood, "no baseline yet"))
 	fmt.Printf("  last seen:   %s, uptime %.0fs, systemd %s\n", ago(d.LastSeen), d.Health.Uptime, d.Health.SystemState)
 	tiers := []string{"panic reboot + one-shot fallback", "+ hardware watchdog", "+ out-of-band reset and serial"}

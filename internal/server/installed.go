@@ -386,7 +386,7 @@ func (ir *installedRun) omt(tr *api.TestResult, res *api.OMTResult, report []byt
 	}
 	c := installed.CompareOMT(ir.r.j.ID, ir.r.j.Spec.Device,
 		installed.OMTSide{Job: ir.c.frozenJob, Report: ir.c.omtReport, ReportSHA256: ir.c.omtSHA, Tool: ir.c.omtTool, Kernel: ir.c.omtKernel}, ir.c.omtStatus,
-		installed.OMTSide{Job: ir.r.j.ID, Report: filepath.Join(ir.r.s.jobDir(ir.r.j.ID), omtFile), ReportSHA256: installed.SHA256(report), Tool: tool, Kernel: kernel}, cur)
+		installed.OMTSide{Job: ir.r.j.ID, Report: filepath.Join(ir.r.s.jobDir(ir.r.j.ID), res.Report), ReportSHA256: installed.SHA256(report), Tool: tool, Kernel: kernel}, cur)
 	ir.write("omt-compare.json", c)
 	ir.res.OMT = c.Verdict
 	res.ComparedTo = "the frozen pre-install run " + ir.c.frozenJob + " (" + ir.c.release + ")"
@@ -834,7 +834,11 @@ func (s *Server) hPromote(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "job %s's frozen copy: %v", j.ID, err)
 		return
 	}
-	report, err := os.ReadFile(filepath.Join(s.jobDir(j.ID), omtFile))
+	file := omtFile // jobs from before the report's place was recorded
+	if j.Result.OMT != nil && j.Result.OMT.Report != "" {
+		file = j.Result.OMT.Report
+	}
+	report, err := os.ReadFile(filepath.Join(s.jobDir(j.ID), file))
 	if err != nil {
 		httpErr(w, 409, "job %s has no omarchy-m-test report: %v", j.ID, err)
 		return

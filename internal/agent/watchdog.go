@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,9 +27,10 @@ import (
 //     pings it only until watchdog.open_timeout, and systemd.watchdog_sec=0
 //     keeps systemd, in the initramfs too, from taking it over. A boot that
 //     hasn't opened it by then is reset within 30 s, a healthy one too, so
-//     the agent must open it on every test boot; a boot that hangs, or stays
-//     alive but stuck before the agent runs (waiting forever for its root
-//     device, say), is reset.
+//     the agent must open it on every test boot, and keeps trying until that
+//     deadline has passed; a boot that hangs, or stays alive but stuck before
+//     the agent runs (waiting forever for its root device, say), is reset.
+//     The deadline comes from labd's boot timeout (bootDeadline).
 //   - Once up, the agent holds /dev/watchdog0 itself and feeds it only while
 //     PID 1 answers and the current step is within its budget. A test that
 //     hangs where its own timeout can't reach it (a process stuck in the
@@ -42,13 +46,13 @@ import (
 // was reset and back 113 s after it froze.
 const (
 	watchdogDev = "/dev/watchdog0"
-	// labBootDeadline is watchdog.open_timeout on test boots: the time from
-	// apple_wdt probing to the agent opening the watchdog (5 s on an M1 Air).
-	// The kernel stops pinging it then, and apple_wdt's 30 s boot timeout
-	// resets the Mac within 30 s. On an M1 Air a boot stuck at 150 s was back
-	// on the known-good kernel 228 s after the reboot, 12 s inside labd's
-	// default 4-minute --boot-timeout; 120 s leaves room for slower firmware,
-	// so labd sees the fallback before it would call for a person.
+	// labBootDeadline is watchdog.open_timeout on a test boot when labd
+	// doesn't say how long it waits for the boot (an older labd), and the
+	// least any test boot gets: the time from apple_wdt probing to the agent
+	// opening the watchdog (5 s on an M1 Air; lab-agent starts only after
+	// network-online.target). The kernel stops pinging it then, and
+	// apple_wdt's 30 s boot timeout resets the Mac within 30 s. It is what
+	// bootDeadline makes of labd's default 4-minute --boot-timeout.
 	labBootDeadline = 120 * time.Second
 	// watchdogTimeout is the hardware timeout once the agent holds it.
 	watchdogTimeout = 60 * time.Second
@@ -116,7 +120,8 @@ func newLabWatchdog(w io.Writer, now func() time.Time) *labWatchdog {
 }
 
 // OpenWatchdog opens the watchdog device and sets its timeout. It fails with
-// EBUSY if systemd still holds it (a test boot staged by an older agent).
+// EBUSY if systemd holds it (an installed-mode boot, or a test boot staged by
+// an older agent).
 func (l *Linux) OpenWatchdog() (io.Writer, error) {
 	f, err := os.OpenFile(watchdogDev, os.O_WRONLY, 0)
 	if err != nil {
@@ -130,6 +135,49 @@ func (l *Linux) OpenWatchdog() (io.Writer, error) {
 // systemctl runs systemctl; tests stand in for it.
 var systemctl = func(ctx context.Context, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, "systemctl", args...).CombinedOutput()
+}
+
+// Tests stand in for the time since boot and how often the agent tries to
+// open the watchdog again.
+var (
+	watchdogUptime = uptime
+	watchdogRetry  = time.Second
+)
+
+// bootDeadline is watchdog.open_timeout for a test boot that labd waits up to
+// boot for: half of it, and at least labBootDeadline. The other half is left
+// for the reset (up to 30 s) and the known-good kernel's boot after it, so
+// labd sees the fallback before it gives up on the boot and resets the Mac
+// itself, mid-fallback. That margin grows with the timeout, as slower
+// firmware and boots are what a longer timeout is for. On an M1 Air, with a
+// 120 s deadline, a boot stuck at 150 s was back on the known-good kernel
+// 228 s after the reboot, 12 s inside labd's default 4-minute --boot-timeout.
+// A boot slow to start the agent (a probe timing out, a nofail mount or
+// network-online.target waiting) gets as long as that, however short labd's
+// timeout.
+func bootDeadline(boot time.Duration) time.Duration {
+	return max(boot/2, labBootDeadline)
+}
+
+// openDeadline is the boot's watchdog.open_timeout, or labBootDeadline if its
+// command line has none.
+func openDeadline(cmdline string) time.Duration {
+	d := labBootDeadline
+	for _, f := range strings.Fields(cmdline) {
+		if v, ok := strings.CutPrefix(f, "watchdog.open_timeout="); ok {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				d = time.Duration(n) * time.Second
+			}
+		}
+	}
+	return d
+}
+
+// leavesWatchdog is whether the command line keeps systemd off the watchdog,
+// for the agent to hold, as a test boot's does (testCmdline). An
+// installed-mode boot's doesn't: systemd holds the watchdog there.
+func leavesWatchdog(cmdline string) bool {
+	return slices.Contains(strings.Fields(cmdline), "systemd.watchdog_sec=0")
 }
 
 // PingInit asks systemd for its version. Run as root, systemctl asks PID 1
@@ -162,18 +210,18 @@ func (d *labWatchdog) idleLocked() {
 // pid1Locked is whether PID 1 answered within pid1Silence. d.mu is held.
 func (d *labWatchdog) pid1Locked() bool { return d.now().Sub(d.pid1At) < pid1Silence }
 
-// test feeds the watchdog for a test's budget and returns the func that ends
-// the test. labd runs one test at a time, so a test that starts while another
-// still runs (one labd gave up waiting for) gets no time of its own: the stuck
-// one still ends in a reset.
-func (d *labWatchdog) test(budget time.Duration) (done func()) {
+// test feeds the watchdog for a test's budget, counted from start, and
+// returns the func that ends the test. labd runs one test at a time, so a
+// test that starts while another still runs (one labd gave up waiting for)
+// gets no time of its own: the stuck one still ends in a reset.
+func (d *labWatchdog) test(start time.Time, budget time.Duration) (done func()) {
 	if d == nil {
 		return func() {}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.tests == 0 {
-		d.until = d.now().Add(budget)
+		d.until = start.Add(budget)
 	}
 	d.tests++
 	return func() {

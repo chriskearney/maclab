@@ -18,6 +18,11 @@ const (
 	StateRecovering DeviceState = "recovering"  // walking the recovery ladder
 	StateNeedsHands DeviceState = "needs_hands" // waiting for a human power cycle
 	StateOffline    DeviceState = "offline"     // idle and not heartbeating
+	// StateLeft: lab-agent uninstall told labd the Mac is leaving the lab. Its
+	// jobs were canceled and no automatic recovery touches it; it stays until
+	// lab forget, unless uninstall says it stays after all (LeaveRequest.Undo)
+	// or lab reset puts it back.
+	StateLeft DeviceState = "left"
 )
 
 // Model decides which human instructions a device gets.
@@ -52,6 +57,7 @@ type Device struct {
 	Name        string       `json:"name"`
 	Label       string       `json:"label"` // physical description for humans
 	Model       string       `json:"model"`
+	Volunteer   bool         `json:"volunteer,omitempty"` // enrolled with ./volunteer: an agent the lab doesn't control, so lab gate leaves it out
 	OOB         *OOBConfig   `json:"oob,omitempty"`
 	State       DeviceState  `json:"state"`
 	StateReason string       `json:"state_reason,omitempty"`
@@ -65,6 +71,11 @@ type Device struct {
 	Health      Health       `json:"health"`
 	Lease       *Lease       `json:"lease,omitempty"`
 	ActiveJob   string       `json:"active_job,omitempty"`
+
+	// VolunteeredBy is the tailnet login whose ./volunteer token enrolled the
+	// Mac, lowercased; empty for a token an admin asked for. It counts toward
+	// that login's limit of Macs (see POST /api/volunteer).
+	VolunteeredBy string `json:"volunteered_by,omitempty"`
 }
 
 // Tier is how much of the recovery ladder a device supports: 0 panic reboot only,
@@ -130,6 +141,17 @@ type Checkin struct {
 type Report struct {
 	Results []CommandResult `json:"results,omitempty"`
 	Events  []KernelEvent   `json:"events,omitempty"`
+	Quiet   *Quiet          `json:"quiet,omitempty"`
+}
+
+// Quiet is the agent saying, while it can, that the Mac is about to go off
+// the network on boot BootID for up to Seconds from now (suspend-devices,
+// whose suspend takes Wi-Fi down). labd waits that out on that boot before
+// it counts the Mac as lost. Seconds 0, sent once the Mac is back, ends that
+// spell: a silence after it is no longer the spell's.
+type Quiet struct {
+	BootID  string `json:"boot_id"`
+	Seconds int    `json:"seconds"`
 }
 
 type CheckinResponse struct {
@@ -188,6 +210,10 @@ type StageArgs struct {
 	// Installed boots an installed release through its installer-made Limine
 	// entry instead of staging a kernel (the installed-kernel job mode).
 	Installed *InstalledStage `json:"installed,omitempty"`
+	// BootTimeoutSec is how long labd waits for the test boot to check in.
+	// The agent takes the boot's watchdog deadline from it; 0 (an older
+	// labd) leaves the agent's default.
+	BootTimeoutSec int `json:"boot_timeout_sec,omitempty"`
 }
 
 // InstalledStage points a one-shot lab entry at the installer's own UKI, with
@@ -255,14 +281,18 @@ type TestSpec struct {
 }
 
 type TestResult struct {
-	Name     string   `json:"name"`
-	Passed   bool     `json:"passed"`
-	ExitCode int      `json:"exit_code"`
-	Seconds  float64  `json:"seconds"`
-	TimedOut bool     `json:"timed_out,omitempty"`
-	Tail     string   `json:"tail,omitempty"`
-	Files    []string `json:"files,omitempty"`
-	Error    string   `json:"error,omitempty"`
+	Name     string  `json:"name"`
+	Passed   bool    `json:"passed"`
+	ExitCode int     `json:"exit_code"`
+	Seconds  float64 `json:"seconds"`
+	TimedOut bool    `json:"timed_out,omitempty"`
+	// Skipped: the test couldn't run on this Mac (its kernel lacks what the
+	// test needs), and Error says why. A skipped test is never Passed, so it
+	// fails the job like any other test that didn't pass.
+	Skipped bool     `json:"skipped,omitempty"`
+	Tail    string   `json:"tail,omitempty"`
+	Files   []string `json:"files,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 type JobState string
@@ -378,6 +408,7 @@ type OMTResult struct {
 	LabBoot     []OMTCheck `json:"lab_boot,omitempty"`     // regressed only because a lab kernel isn't an installed package
 	Allowed     []OMTCheck `json:"allowed,omitempty"`      // regressed, but the job said this kernel is expected to (omt_allow)
 	ComparedTo  string     `json:"compared_to,omitempty"`  // the baseline job, or why there was no comparison
+	BaselineJob string     `json:"baseline_job,omitempty"` // the known-good run it was compared with; "" for none, and then Regressions says nothing
 	Published   string     `json:"published,omitempty"`    // the report's page on omarchy-m-testing.org
 	PublishNote string     `json:"publish_note,omitempty"` // why it wasn't published, or the site's error
 	Reference   string     `json:"reference,omitempty"`    // a known-good run: whether it became the reference, or why not
@@ -400,6 +431,38 @@ type Job struct {
 	Events   []JobEvent `json:"events"`
 	Result   JobResult  `json:"result"`
 	Canceled bool       `json:"canceled,omitempty"`
+	// RetryOf is the job this one retries (lab retry).
+	RetryOf string `json:"retry_of,omitempty"`
+	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
+	// Jobs from before labd kept it have none.
+	DeviceAtSubmit *DeviceSnapshot `json:"device_at_submit,omitempty"`
+	// GateExclusion sets the job aside in every lab gate report until it is
+	// cleared (lab exclude), say a failure the lab caused. Jobs without one,
+	// those from before labd kept it among them, count as usual.
+	GateExclusion *GateExclusion `json:"gate_exclusion,omitempty"`
+}
+
+// GateExclusion is an admin's lasting word that a finished job says nothing
+// about its kernel: who said it, why and when.
+type GateExclusion struct {
+	By     string    `json:"by"`
+	Reason string    `json:"reason"`
+	Time   time.Time `json:"time"`
+}
+
+// ExcludeRequest sets a job aside in lab gate (POST /api/jobs/{id}/exclude).
+type ExcludeRequest struct {
+	Reason string `json:"reason"`       // required
+	By     string `json:"by,omitempty"` // who asks; labd names a tailnet admin by their login itself
+}
+
+// DeviceSnapshot is what lab gate needs to know about a job's Mac, as it was
+// when the job was submitted: the gate judges an old job by the Mac it ran
+// on, not by the device record as it is now.
+type DeviceSnapshot struct {
+	Family    string `json:"family,omitempty"`    // chip family (m1, m1-pro, ...); "" for one lab gate doesn't cover
+	Volunteer bool   `json:"volunteer,omitempty"` // a volunteer's Mac (Device.Volunteer)
+	OMT       bool   `json:"omt,omitempty"`       // labd ran omarchy-m-test in every job on it
 }
 
 type EnrollRequest struct {
@@ -417,6 +480,12 @@ type EnrollTokenRequest struct {
 	Name  string `json:"name"`
 	Label string `json:"label"`
 	Model string `json:"model"`
+	// Volunteer makes the Mac a volunteer's (see Device.Volunteer). labd sets
+	// it on every POST /api/volunteer token, whatever the request says.
+	Volunteer bool `json:"volunteer,omitempty"`
+	// VolunteeredBy is the login that asked for a volunteer token, set by
+	// labd only (see Device.VolunteeredBy).
+	VolunteeredBy string `json:"-"`
 }
 
 type EnrollTokenResponse struct {
@@ -430,6 +499,24 @@ type DevicePatch struct {
 	Model *string    `json:"model,omitempty"`
 	OOB   *OOBConfig `json:"oob,omitempty"`
 	NoOOB bool       `json:"no_oob,omitempty"`
+}
+
+// LeaveRequest is lab-agent uninstall telling labd, before it undoes
+// anything, that the Mac is leaving the lab.
+type LeaveRequest struct {
+	Reason string   `json:"reason"`         // what is taking it out, e.g. "lab-agent uninstall --force"
+	Jobs   []string `json:"jobs,omitempty"` // the jobs the Mac still had in flight, as it sees them
+	// Undo takes the leave back: uninstall failed, or was interrupted,
+	// before it stopped the agent, which runs on. The Mac stays in the lab.
+	Undo bool `json:"undo,omitempty"`
+}
+
+type LeaveResponse struct {
+	Name     string   `json:"name"`
+	Canceled []string `json:"canceled,omitempty"` // the Mac's running and queued jobs, canceled
+	// Back: the Mac is in the lab again (Undo). An older labd takes an undo
+	// for another leave, and says nothing.
+	Back bool `json:"back,omitempty"`
 }
 
 type LeaseRequest struct {
@@ -578,6 +665,10 @@ const (
 	// the Mac (e.g. a full boot partition). It says nothing about the kernel,
 	// but the gate stays shut until a run gives a result.
 	GateStageFailed = "stage_failed"
+	// GateFlaky: a Mac both passed and failed on the kernel, e.g. a retry
+	// passed after a failure. It doesn't pass: a script that looks for "fail"
+	// must treat it as not passing too.
+	GateFlaky = "flaky"
 )
 
 type GateKernel struct {
@@ -591,22 +682,42 @@ type GateTest struct {
 	Result string `json:"result"` // pass or fail
 }
 
-// GateRun is the job that decides one Mac's result on the kernel.
+// GateRun is the job that decides one Mac's result on the kernel; a flaky
+// Mac has two, its failure and then its pass. In a family's not_counted it is
+// a run that decides nothing, and NotCounted says why.
 type GateRun struct {
-	Device   string     `json:"device"`
-	Job      string     `json:"job"`
-	Outcome  string     `json:"outcome"`
-	Result   string     `json:"result"`           // pass, fail or stage_failed
-	Reason   string     `json:"reason,omitempty"` // stage_failed: the job's summary
-	Finished time.Time  `json:"finished"`
-	Tests    []GateTest `json:"tests,omitempty"`
+	Device     string     `json:"device"`
+	Job        string     `json:"job"`
+	Outcome    string     `json:"outcome"`
+	Result     string     `json:"result"`           // pass, fail, flaky or stage_failed
+	Reason     string     `json:"reason,omitempty"` // stage_failed: the job's summary; flaky: the Mac's other result
+	Finished   time.Time  `json:"finished"`
+	Tests      []GateTest `json:"tests,omitempty"`
+	Volunteer  bool       `json:"volunteer,omitempty"`   // the Mac is a volunteer's (Device.Volunteer)
+	NotCounted string     `json:"not_counted,omitempty"` // why the run doesn't count
+	RetryOf    string     `json:"retry_of,omitempty"`    // the job this one retries (lab retry)
+	Excluded   bool       `json:"excluded,omitempty"`    // the query (?exclude=, lab gate --exclude) or lab exclude set it aside
+	// Exclusion is the lab exclude mark that set the run aside, if one did.
+	Exclusion *GateExclusion `json:"exclusion,omitempty"`
+}
+
+// GateExcluded is one of a kernel's jobs that lab exclude set aside.
+type GateExcluded struct {
+	Job     string `json:"job"`
+	Device  string `json:"device"`
+	Outcome string `json:"outcome"`
+	GateExclusion
 }
 
 type GateFamily struct {
 	Family string    `json:"family"`         // m1, m1-pro, ...
 	Name   string    `json:"name"`           // M1 Pro/Max/Ultra
-	Result string    `json:"result"`         // pass, fail, stage_failed or untested
+	Result string    `json:"result"`         // pass, fail, flaky, stage_failed or untested
 	Runs   []GateRun `json:"runs,omitempty"` // the deciding run first
+	// NotCounted holds the runs that decide nothing: volunteers' Macs, Macs
+	// labd no longer has, runs that weren't plain, passes with no
+	// omarchy-m-test reference, tests that couldn't run, excluded jobs.
+	NotCounted []GateRun `json:"not_counted,omitempty"`
 }
 
 // GateReport says whether a kernel passed on real hardware for every required
@@ -621,4 +732,19 @@ type GateReport struct {
 	Unclassified []string     `json:"unclassified,omitempty"` // Macs of no supported family, or too old an agent to say
 	Labd         string       `json:"labd"`
 	Generated    time.Time    `json:"generated"`
+	// Volunteers lists the volunteers' Macs. Their runs count only when
+	// VolunteersCounted (?volunteers=1, lab gate --volunteers).
+	Volunteers        []string `json:"volunteers,omitempty"`
+	VolunteersCounted bool     `json:"volunteers_counted,omitempty"`
+	// Excluded lists the jobs the query set aside (?exclude=, lab gate
+	// --exclude), say a failure the lab caused that reads as the kernel's.
+	// Each one that would have counted is in its family's not_counted.
+	Excluded []string `json:"excluded,omitempty"`
+	// Exclusions lists the kernel's jobs set aside until cleared (lab
+	// exclude), with who set each aside, why and when. Each one that would
+	// have counted is in its family's not_counted too.
+	Exclusions []GateExcluded `json:"exclusions,omitempty"`
+	// NotCounted holds the runs no family can take: those of Macs labd no
+	// longer has (lab forget) from jobs that didn't record their chip family.
+	NotCounted []GateRun `json:"not_counted,omitempty"`
 }

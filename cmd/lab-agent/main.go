@@ -2,9 +2,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -12,14 +14,16 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/iconidentify/maclab/internal/agent"
 )
 
 const usage = `lab-agent: the Mac side of the test lab
 
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin] [--volatile-journal]
-        [--tailscale-authkey tskey-auth-... [--tailscale-hostname name]]
-  sudo lab-agent uninstall [--dry-run] [--force]   undo everything setup did
+        [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
+  sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)
@@ -32,7 +36,7 @@ func main() {
 		fmt.Print(usage)
 		os.Exit(2)
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	ctx, stop := signalContext()
 	defer stop()
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
 	var err error
@@ -43,17 +47,33 @@ func main() {
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
 		volatile := fs.Bool("volatile-journal", false, "leave journald alone: a failed lab boot's journal is lost")
-		tsKey := fs.String("tailscale-authkey", "", "join the lab's tailnet first with this one-off auth key (tagged tag:maclab, Tailscale SSH on); never stored")
+		tsKeyFile := fs.String("tailscale-authkey-file", "", "join the lab's tailnet first with the one-off auth key in this file (tagged tag:maclab, Tailscale SSH on); never stored")
+		tsKey := fs.String("tailscale-authkey", "", "- to read the one-off auth key from stdin; the key itself is refused here, since the process list and sudo's journal show it")
 		tsHost := fs.String("tailscale-hostname", "", "name on the tailnet (default maclab-<device name>, else this machine's hostname)")
 		fs.Parse(os.Args[2:])
+		var stdin io.Reader = os.Stdin
+		if *tsKey == "-" && term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprint(os.Stderr, "Tailscale auth key: ")
+			b, e := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(os.Stderr)
+			if e != nil {
+				log.Fatal(e)
+			}
+			stdin = bytes.NewReader(b)
+		}
+		key, e := agent.AuthKey(*tsKey, *tsKeyFile, stdin)
+		if e != nil {
+			err = e
+			break
+		}
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, VolatileJournal: *volatile,
-			TailscaleAuthKey: *tsKey, TailscaleHostname: *tsHost,
+			TailscaleAuthKey: key, TailscaleHostname: *tsHost,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "uninstall":
 		dry := fs.Bool("dry-run", false, "print each action without taking it")
 		force := fs.Bool("force", false, "uninstall even with a job in flight, or with the bootloader not found")
 		fs.Parse(os.Args[2:])
-		err = agent.Uninstall(agent.UninstallOptions{DryRun: *dry, Force: *force,
+		err = agent.Uninstall(ctx, agent.UninstallOptions{DryRun: *dry, Force: *force,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "preflight":
 		l := &agent.Linux{WorkDir: "/var/lib/maclab"}
@@ -107,4 +127,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "lab-agent:", err)
 		os.Exit(1)
 	}
+}
+
+// signalContext ends when lab-agent is told to stop: Ctrl-C, systemd, or
+// the terminal going away (SIGHUP, as when the SSH session that runs setup
+// drops). Each ends ctx instead of killing the process, so what setup has
+// to undo, such as the Tailscale key file, gets undone.
+func signalContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -41,7 +42,7 @@ func serveMCP(ctx context.Context) error {
 	}
 
 	type none struct{}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_devices", Description: "List test Macs: state (ready, busy, recovering, needs_hands, offline, new), recovery tier, running kernel, lease, and any action a human must take."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_devices", Description: "List test Macs: state (ready, busy, recovering, needs_hands, offline, new, left), recovery tier, running kernel, lease, and any action a human must take."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ none) (*mcp.CallToolResult, any, error) {
 			d, err := c.Devices(ctx)
 			return text(d), nil, err
@@ -167,7 +168,7 @@ func serveMCP(ctx context.Context) error {
 		JobID   string `json:"job_id"`
 		WaitSec int    `json:"wait_sec,omitempty" jsonschema:"wait up to this long for the result (max 900); 0 returns once queued"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_retry", Description: "Run a finished job again as a new job: same Mac, kernel, tests and cmdline. A stage_failed job's summary says why, and whether labd already tried it again (up to 3 attempts); retry it once that cause is fixed. Returns the new job; use lab_wait for the result."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_retry", Description: "Run a finished job again as a new job: same Mac, kernel (for a source job, the same commit), tests and cmdline. A stage_failed job's summary says why, and whether labd already tried it again (up to 3 attempts); retry it once that cause is fixed. Returns the new job; use lab_wait for the result."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a retryArg) (*mcp.CallToolResult, any, error) {
 			j, err := c.Retry(ctx, a.JobID, who)
 			if err != nil {
@@ -192,13 +193,33 @@ func serveMCP(ctx context.Context) error {
 		})
 
 	type gateArg struct {
-		Kernel   string   `json:"kernel" jsonschema:"the candidate kernel: a build id, or its artifact sha256 or a prefix of it"`
-		Families []string `json:"families,omitempty" jsonschema:"chip families that must pass (default all: m1, m1-pro, m2, m2-pro, m3, m3-pro)"`
+		Kernel     string   `json:"kernel" jsonschema:"the candidate kernel: a build id, or its artifact sha256 or a prefix of it"`
+		Families   []string `json:"families,omitempty" jsonschema:"chip families that must pass (default all: m1, m1-pro, m2, m2-pro, m3, m3-pro)"`
+		Volunteers bool     `json:"volunteers,omitempty" jsonschema:"count volunteers' Macs (enrolled with ./volunteer, agents the lab doesn't control) too; by default their runs are listed under not_counted"`
+		Exclude    []string `json:"exclude,omitempty" jsonschema:"job ids of this kernel to set aside for this report only, e.g. a failure the lab caused (an access point outage reads as crashed_or_hung); the report lists them in excluded, and in not_counted marked excluded. Nothing is kept: lab_exclude sets a job aside for every report"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_gate", Description: "Release gate: whether a kernel passed on real hardware for every required chip family, from each Mac's latest pass or failure on it (a Mac that couldn't stage the kernel counts only when it has neither). A family fails if any of its Macs' latest runs failed, passes if one passed and none failed, is stage_failed if its only results are Macs that couldn't stage the kernel (each such run gives the job's reason; run it again once that's fixed), and is untested if none has a result; result is pass only when every required family passed."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_gate", Description: "Release gate: whether a kernel passed on real hardware for every required chip family, from each Mac's plain runs on it: the known-good cmdline, at least the tests every job on that Mac runs, no omt_allow, and, where the Mac runs omarchy-m-test, a comparison with its known-good run (a pass with no OMT reference is not counted). Each job is judged by its Mac as it was when the job was submitted (chip family, volunteer, omarchy-m-test); a Mac labd no longer has (lab forget) is listed as device gone, not counted. A run with a changed cmdline counts neither way; one that tested less counts only if it failed. Canceled, infra_error and crash-test runs, and tests_failed runs whose failed tests never started (bash couldn't open the test script: exit 126 Permission denied or 127 No such file or directory for test-<name>.sh), say nothing; a test that ran and exited 126 or 127 itself is a failure. A job canceled after its kernel had already failed keeps that failure as its outcome. A Mac fails if it failed, passes if it passed, and is flaky (not a pass) if it did both, so a retry's pass doesn't hide a failure (retry_of links a retry to the job it retries); a Mac that couldn't stage the kernel counts only when it has neither. A family's result is one of pass, fail, flaky, stage_failed or untested: fail if any Mac failed, flaky if any is flaky, pass if one passed, stage_failed if its only results are Macs that couldn't stage the kernel (each such run gives the job's reason; run it again once that's fixed), and untested if none has a result. Anything checking results for \"fail\" must treat \"flaky\" as not passing too. Runs that don't count are in each family's not_counted with the reason (and the report's not_counted when no family is known); volunteers' Macs are there too unless volunteers is set, and excluded jobs, marked excluded. Jobs set aside with lab_exclude are excluded in every report: exclusions lists them with who set each aside, why and when, and their not_counted runs carry the same as exclusion. result is pass only when every required family passed."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a gateArg) (*mcp.CallToolResult, any, error) {
-			r, err := c.Gate(ctx, a.Kernel, a.Families)
+			r, err := c.Gate(ctx, a.Kernel, a.Families, a.Volunteers, a.Exclude)
 			return text(r), nil, err
+		})
+
+	type excludeArg struct {
+		JobID  string `json:"job_id"`
+		Reason string `json:"reason,omitempty" jsonschema:"why the job says nothing about its kernel, e.g. the access point went down mid-test; required unless clear"`
+		Clear  bool   `json:"clear,omitempty" jsonschema:"count the job in lab_gate again"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_exclude", Description: "Set a finished job aside in every lab_gate report until cleared, say a failure the lab caused (an access point outage reads as crashed_or_hung, which would keep its family flaky for good). Needs a lab admin and a reason; the gate lists the job in exclusions with who set it aside, why and when. Only for a failure that isn't the kernel's: never to make a gate pass. clear counts the job again. Returns the job."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, a excludeArg) (*mcp.CallToolResult, any, error) {
+			if a.Clear {
+				j, err := c.ClearExclusion(ctx, a.JobID)
+				return text(j), nil, err
+			}
+			if strings.TrimSpace(a.Reason) == "" {
+				return nil, nil, errors.New("give a reason: why the job says nothing about its kernel")
+			}
+			j, err := c.Exclude(ctx, a.JobID, a.Reason, who)
+			return text(j), nil, err
 		})
 
 	type logArg struct {
@@ -266,7 +287,7 @@ func serveMCP(ctx context.Context) error {
 		func(ctx context.Context, _ *mcp.CallToolRequest, a devArg) (*mcp.CallToolResult, any, error) {
 			return text("released"), nil, c.Release(ctx, a.Device, who)
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_reset", Description: "Run the recovery ladder on an idle Mac that is wedged or offline (soft reboot, hard reset, then ask a human)."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_reset", Description: "Run the recovery ladder on an idle Mac that is wedged or offline (soft reboot, hard reset, then ask a human). A Mac that left the lab (lab-agent uninstall) goes back in it first."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a devArg) (*mcp.CallToolResult, any, error) {
 			out, err := c.Reset(ctx, a.Device, who)
 			return text(out), nil, err

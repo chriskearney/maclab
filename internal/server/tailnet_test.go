@@ -9,10 +9,14 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -42,7 +46,7 @@ func TestTailnetRoles(t *testing.T) {
 	}
 	h := s.Handler()
 	try := func(method, path, remote, token string) int {
-		r := httptest.NewRequest(method, path, strings.NewReader("{}"))
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader("{}"))
 		r.RemoteAddr = remote
 		if token != "" {
 			r.Header.Set("Authorization", "Bearer "+token)
@@ -103,7 +107,7 @@ func TestTailnetRoles(t *testing.T) {
 		TokenRequired bool `json:"token_required"`
 		Role, Login   string
 	}) {
-		r := httptest.NewRequest("GET", "/api/auth", nil)
+		r := httptest.NewRequest("GET", labdAt+"/api/auth", nil)
 		r.RemoteAddr = remote
 		for _, tok := range token {
 			r.Header.Set("Authorization", "Bearer "+tok)
@@ -186,7 +190,7 @@ func TestVolunteer(t *testing.T) {
 	h := s.Handler()
 	const peer = "100.64.0.2:40000"
 	do := func(method, path, remote, body string) *httptest.ResponseRecorder {
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader(body))
 		r.RemoteAddr = remote
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, r)
@@ -279,5 +283,217 @@ func TestParseWhoIs(t *testing.T) {
 	}
 	if _, err := parseWhoIs([]byte(`{}`)); err == nil {
 		t.Error("an answer naming no one accepted")
+	}
+}
+
+// With --tailscale, tailnet traffic gets no admin through --trust when labd
+// can tell it may be tailnet traffic: tailscale serve and Funnel proxy from
+// 127.0.0.1 with their own headers and X-Forwarded-For, any other proxy's
+// headers count the same, and tailnet peers are judged by identity. Without
+// --tailscale, trust is by address only, whatever the headers say.
+func TestTrustYieldsToTailnet(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	whois := func(ctx context.Context, ip string) (*TailnetPeer, error) {
+		if ip == "100.64.0.3" {
+			return &TailnetPeer{Login: "tagged-devices", Node: "maclab-m1air", Tags: []string{"tag:maclab"}}, nil
+		}
+		return nil, fmt.Errorf("no match for IP")
+	}
+	trust, _ := ParseTrust("10.1.1.0/24,127.0.0.1,100.64.0.3")
+	newServer := func(tailscale bool) (http.Handler, string) {
+		var logs strings.Builder
+		s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", Trust: trust,
+			Tailscale: tailscale, Admins: ParseAdmins("admin@github"), WhoIs: whois}, log.New(&logs, "", 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s.Handler(), logs.String()
+	}
+	type hdr = map[string]string
+	try := func(h http.Handler, method, path, remote, token string, headers hdr) int {
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader("{}"))
+		r.RemoteAddr = remote
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		for k, v := range headers {
+			r.Header[k] = []string{v} // as given: net/http's own parsing leaves some names alone
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+	const (
+		loop = "127.0.0.1:50000"
+		lan  = "10.1.1.42:50000"
+		past = 404 // through auth, then no such Mac
+	)
+	serveUser := hdr{"Tailscale-User-Login": "visitor@github", "Tailscale-User-Name": "Visitor",
+		"Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers", "X-Forwarded-For": "100.64.0.2"}
+	cases := []struct {
+		name, method, path, remote, token string
+		headers                           hdr
+		want, without                     int // with --tailscale, without it
+	}{
+		{"loopback", "POST", "/api/jobs", loop, "", nil, past, past},
+		{"the LAN", "POST", "/api/jobs", lan, "", nil, past, past},
+		{"a tailnet user through tailscale serve", "POST", "/api/jobs", loop, "", serveUser, 401, past},
+		{"nor may it look", "GET", "/api/devices", loop, "", serveUser, 401, 200},
+		{"only the login header", "POST", "/api/jobs", loop, "", hdr{"Tailscale-User-Login": "admin@github"}, 401, past},
+		{"Funnel", "POST", "/api/jobs", loop, "", hdr{"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7"}, 401, past},
+		{"a tagged node through serve", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "100.64.0.3"}, 401, past},
+		{"serve on a LAN address", "POST", "/api/jobs", lan, "", hdr{"Tailscale-User-Name": "Visitor"}, 401, past},
+		{"a proxy forwarding a LAN client", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, 401, past},
+		{"only X-Forwarded-Host", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-Host": "labd.tail1234.ts.net"}, 401, past},
+		{"only X-Forwarded-Proto, from the LAN", "POST", "/api/jobs", lan, "", hdr{"X-Forwarded-Proto": "https"}, 401, past},
+		{"a lowercase header", "POST", "/api/jobs", loop, "", hdr{"x-forwarded-for": "127.0.0.1"}, 401, past},
+		{"RFC 7239 Forwarded", "POST", "/api/jobs", loop, "", hdr{"Forwarded": "for=192.0.2.60;proto=https"}, 401, past},
+		{"nor may a proxied request look", "GET", "/api/devices", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, 401, 200},
+		{"a header that only looks like one", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded": "1", "Forwarded-For": "1"}, past, past},
+		{"serve with the token", "POST", "/api/jobs", loop, "adm_secret", serveUser, past, past},
+		{"a proxy with the token", "POST", "/api/jobs", loop, "adm_secret", hdr{"X-Forwarded-Host": "labd"}, past, past},
+		{"a trusted tailnet peer is judged by identity", "POST", "/api/jobs", "100.64.0.3:1", "", nil, 403, past},
+	}
+	with, logs := newServer(true)
+	without, quiet := newServer(false)
+	for _, c := range cases {
+		if got := try(with, c.method, c.path, c.remote, c.token, c.headers); got != c.want {
+			t.Errorf("%s with --tailscale: %s %s got %d, want %d", c.name, c.method, c.path, got, c.want)
+		}
+		if got := try(without, c.method, c.path, c.remote, c.token, c.headers); got != c.without {
+			t.Errorf("%s without --tailscale: %s %s got %d, want %d", c.name, c.method, c.path, got, c.without)
+		}
+	}
+
+	r := httptest.NewRequest("GET", labdAt+"/api/auth", nil)
+	r.RemoteAddr = loop
+	r.Header.Set("Tailscale-User-Login", "admin@github")
+	w := httptest.NewRecorder()
+	with.ServeHTTP(w, r)
+	var a struct {
+		Trusted       bool `json:"trusted"`
+		TokenRequired bool `json:"token_required"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &a)
+	if a.Trusted || !a.TokenRequired {
+		t.Errorf("/api/auth through tailscale serve: %s", w.Body)
+	}
+
+	for _, n := range []string{"10.1.1.0/24", "127.0.0.1/32", "100.64.0.3/32"} {
+		if !strings.Contains(logs, "warning: --trust "+n+" with --tailscale: tailnet traffic") {
+			t.Errorf("no startup warning for trusted network %s in:\n%s", n, logs)
+		}
+	}
+	if strings.Contains(quiet, "warning") {
+		t.Errorf("warned without --tailscale:\n%s", quiet)
+	}
+}
+
+func TestWhoisFailuresExpireSoon(t *testing.T) {
+	calls, up := 0, false
+	s := &Server{log: log.New(io.Discard, "", 0), cfg: Config{Tailscale: true, WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+		calls++
+		if !up {
+			return nil, fmt.Errorf("Failed to connect to local Tailscale daemon")
+		}
+		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+	}}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "100.64.0.1:1"
+	ip := netip.MustParseAddr("100.64.0.1")
+	age := func(d time.Duration) {
+		e := s.whoCache[ip]
+		e.at = e.at.Add(-d)
+		s.whoCache[ip] = e
+	}
+	if p := s.tailnetPeer(r); p != nil || calls != 1 {
+		t.Fatalf("tailscaled down: %+v after %d calls", p, calls)
+	}
+	if s.tailnetPeer(r); calls != 1 {
+		t.Errorf("a failure right away asked again: %d calls", calls)
+	}
+	up = true
+	age(whoisFailTTL + time.Second)
+	if p := s.tailnetPeer(r); p == nil || calls != 2 {
+		t.Fatalf("tailscaled back %v later: %+v after %d calls", whoisFailTTL+time.Second, p, calls)
+	}
+	age(whoisFailTTL + time.Second)
+	if s.tailnetPeer(r); calls != 2 {
+		t.Errorf("an answer was not kept: %d calls", calls)
+	}
+	age(whoisTTL)
+	if s.tailnetPeer(r); calls != 3 {
+		t.Errorf("an answer was kept past %v: %d calls", whoisTTL, calls)
+	}
+}
+
+func TestWhoisSingleFlight(t *testing.T) {
+	var calls atomic.Int32
+	release := make(chan struct{})
+	s := &Server{log: log.New(io.Discard, "", 0), cfg: Config{Tailscale: true, WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+		calls.Add(1)
+		<-release
+		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+	}}}
+	var wg sync.WaitGroup
+	got := make([]*TailnetPeer, 20)
+	for i := range got {
+		wg.Go(func() {
+			r := httptest.NewRequest("GET", "/", nil)
+			r.RemoteAddr = "100.64.0.1:" + fmt.Sprint(40000+i)
+			got[i] = s.tailnetPeer(r)
+		})
+	}
+	time.Sleep(50 * time.Millisecond) // let the burst pile up on the first lookup
+	close(release)
+	wg.Wait()
+	if n := calls.Load(); n != 1 {
+		t.Errorf("a burst of %d requests ran %d lookups", len(got), n)
+	}
+	for i, p := range got {
+		if p == nil || p.Login != "admin@github" {
+			t.Errorf("request %d got %+v", i, p)
+		}
+	}
+	if len(s.whoCalls) != 0 {
+		t.Errorf("lookups left in flight: %v", s.whoCalls)
+	}
+}
+
+// A lookup that panics is kept as a failure, for whoisFailTTL, not as an
+// answer for whoisTTL: a real admin is locked out for seconds, not a minute.
+func TestWhoisPanicExpiresSoon(t *testing.T) {
+	calls, broken := 0, true
+	s := &Server{log: log.New(io.Discard, "", 0), cfg: Config{Tailscale: true, WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+		calls++
+		if broken {
+			panic("whois blew up")
+		}
+		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+	}}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r.RemoteAddr = "100.64.0.1:1"
+	ip := netip.MustParseAddr("100.64.0.1")
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Error("the panic was swallowed")
+			}
+		}()
+		s.tailnetPeer(r)
+	}()
+	if e := s.whoCache[ip]; e.p != nil || e.ttl != whoisFailTTL {
+		t.Errorf("after a panic: cached %+v for %v, want nobody for %v", e.p, e.ttl, whoisFailTTL)
+	}
+	if len(s.whoCalls) != 0 {
+		t.Errorf("the panicked lookup is still in flight: %v", s.whoCalls)
+	}
+	broken = false
+	e := s.whoCache[ip]
+	e.at = e.at.Add(-(whoisFailTTL + time.Second))
+	s.whoCache[ip] = e
+	if p := s.tailnetPeer(r); p == nil || calls != 2 {
+		t.Errorf("%v after the panic: %+v after %d calls", whoisFailTTL+time.Second, p, calls)
 	}
 }

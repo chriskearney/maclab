@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"os/user"
@@ -38,7 +39,15 @@ var (
 	suspendSettleWait = 30 * time.Second
 	suspendNetWait    = 2 * time.Minute
 	suspendPoll       = 2 * time.Second
+	// suspendTidyWait is the part of the test's timeout the cycle leaves for
+	// putting things back after it: mostly waiting up to suspendSettleWait
+	// for a suspend cut short to settle. A short timeout leaves half of it.
+	suspendTidyWait = 45 * time.Second
 )
+
+// errNoPMTest is a kernel that can't run the test. It is skipped, which is
+// not a pass.
+var errNoPMTest = errors.New("the kernel has no pm_test devices mode (CONFIG_PM_DEBUG)")
 
 // sleepUnits are the units `systemctl suspend` runs.
 var sleepUnits = []string{"sleep.target", "suspend.target", "systemd-suspend.service"}
@@ -49,22 +58,30 @@ var sleepUnits = []string{"sleep.target", "suspend.target", "systemd-suspend.ser
 // unlocks it, and the lock screen turns the panel off 5s later.
 var sleepLockUnits = []string{"omarchy-sleep-lock.service"}
 
-// suspendDevices runs one pm_test=devices cycle, within the test's timeout if
-// it has one. On a kernel without pm_test it passes, saying SKIP in its log.
+// suspendDevices runs one pm_test=devices cycle. Everything it does ends
+// within the test's timeout (testTimeout), putting things back too, so that
+// a failure however slow ends as one, inside the watchdog's budget for the
+// test (testBudget). The cycle gets the timeout less suspendTidyWait, and
+// putting things back gets the rest, and runs even once the cycle's time is
+// up. A kernel without pm_test's devices mode skips the test, which fails
+// the job: the kernel wasn't tested.
 //
-// labd mostly doesn't hear of the suspend beforehand: NetworkManager takes the
-// network down as soon as logind announces it, so WatchSleep's report to labd
-// fails, after holding the suspend for 4s. labd just sees the Mac go quiet, for
-// 10-15s on an M1 Air (Wi-Fi is back a second after the resume). That is under
-// its aliveWindow (20s); a longer silence it waits out up to quietGrace (60s)
-// from the last check-in, and then it counts the Mac as lost.
-func suspendDevices(ctx context.Context, t api.TestSpec, outDir, gui string) api.TestResult {
+// labd mostly doesn't hear of the suspend from WatchSleep: NetworkManager
+// takes the network down as soon as logind announces it, so WatchSleep's
+// report to labd fails, after holding the suspend for 4s. So just before it
+// suspends, the test tells labd how long the Mac may be off the network
+// (quiet), and labd waits that long on this boot before it counts the Mac as
+// lost; once the network is back, it tells labd so (quiet 0), and labd stops
+// waiting. On an M1 Air the Mac is quiet for 10-15s (Wi-Fi is back a second
+// after the resume); without the warning labd would wait out up to
+// quietGrace (60s) from the last check-in.
+func suspendDevices(ctx context.Context, t api.TestSpec, outDir, gui string, quiet Quieter) api.TestResult {
 	res := api.TestResult{Name: t.Name}
-	if t.TimeoutSec > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(t.TimeoutSec)*time.Second)
-		defer cancel()
-	}
+	timeout := testTimeout(t)
+	tidy, cancelTidy := context.WithTimeout(context.Background(), timeout)
+	defer cancelTidy()
+	ctx, cancel := context.WithTimeout(ctx, timeout-min(suspendTidyWait, timeout/2))
+	defer cancel()
 	logPath := filepath.Join(outDir, "log.txt")
 	f, err := os.Create(logPath)
 	if err != nil {
@@ -73,8 +90,12 @@ func suspendDevices(ctx context.Context, t api.TestSpec, outDir, gui string) api
 	}
 	logf := func(format string, a ...any) { fmt.Fprintf(f, format+"\n", a...) }
 	start := time.Now()
-	err = suspendCycle(ctx, gui, logf)
-	if err != nil {
+	err = suspendCycle(ctx, tidy, gui, quiet, logf)
+	switch {
+	case errors.Is(err, errNoPMTest):
+		logf("SKIP: %v", err)
+		res.Skipped, res.Error, res.ExitCode = true, err.Error(), -1
+	case err != nil:
 		logf("FAIL: %v", err)
 		res.ExitCode = 1
 		// Only if time ran out before a verdict: a failure found in time stays
@@ -90,17 +111,19 @@ func suspendDevices(ctx context.Context, t api.TestSpec, outDir, gui string) api
 	return res
 }
 
-func suspendCycle(ctx context.Context, gui string, logf func(string, ...any)) error {
+// suspendCycle runs the cycle within ctx, and puts things back within tidy.
+func suspendCycle(ctx, tidy context.Context, gui string, quiet Quieter, logf func(string, ...any)) error {
 	b, err := os.ReadFile(pmTestPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("%w: no %s", errNoPMTest, pmTestPath)
+	}
 	if err != nil {
-		logf("SKIP: no %s (the kernel needs CONFIG_PM_DEBUG): %v", pmTestPath, err)
-		return nil
+		return err
 	}
 	shown := strings.TrimSpace(string(b))
 	modes, prev := parsePMTest(shown)
 	if !slices.Contains(modes, "devices") {
-		logf("SKIP: %s has no devices mode: %s", pmTestPath, shown)
-		return nil
+		return fmt.Errorf("%w: %s offers %s", errNoPMTest, pmTestPath, shown)
 	}
 	route := defaultRoute(ctx)
 	cycles, err := suspendLog(ctx)
@@ -108,11 +131,32 @@ func suspendCycle(ctx context.Context, gui string, logf func(string, ...any)) er
 		return fmt.Errorf("reading this boot's kernel log: %w", err)
 	}
 	logf("pm_test: %s; %d suspend cycles so far this boot; default route: %v", shown, len(cycles), route)
-	t0 := time.Now()
-	if err := pmTestDevices(ctx, gui, prev, len(cycles), logf); err != nil {
-		return err
+	told, tell := false, quiet // told: labd heard the Mac may go off the network
+	if quiet != nil {
+		tell = func(ctx context.Context, d time.Duration) error { told = true; return quiet(ctx, d) }
 	}
-	logf("devices suspended and resumed in %.0fs", time.Since(t0).Seconds())
+	t0 := time.Now()
+	err = pmTestDevices(ctx, tidy, gui, prev, len(cycles), tell, logf)
+	if err == nil {
+		logf("devices suspended and resumed in %.0fs", time.Since(t0).Seconds())
+		err = routeBack(ctx, route, logf)
+	}
+	// Once the network is back, the spell off it labd was told of is over,
+	// so that labd sees a hang in the next test at once, not once the spell
+	// would have ended. Without the network, labd waits the spell out.
+	if told && (err == nil || !route || defaultRoute(tidy)) {
+		if qerr := quiet(tidy, 0); qerr != nil {
+			logf("could not tell labd the Mac is back on the network: %v; it waits out the spell instead", qerr)
+		} else {
+			logf("told labd the Mac is back on the network")
+		}
+	}
+	return err
+}
+
+// routeBack waits for the default route to come back after the resume, if
+// there was one before the suspend.
+func routeBack(ctx context.Context, route bool, logf func(string, ...any)) error {
 	if !route {
 		logf("no default route before suspending; not waiting for one")
 		return nil
@@ -151,17 +195,31 @@ func parsePMTest(shown string) (modes []string, cur string) {
 // back to prev, but not to none while anything is left that could suspend the
 // Mac (restorePMTest): that would be a real suspend, and nothing but a key
 // press wakes the Mac. The GUI user's desktop lock is stopped for the cycle
-// (stopSleepLock) and started again after that.
-func pmTestDevices(ctx context.Context, gui, prev string, before int, logf func(string, ...any)) (err error) {
-	locks, err := stopSleepLock(gui, logf)
-	defer func() { err = joinErr(err, startSleepLock(gui, locks, logf)) }()
+// (stopSleepLock) and started again after that. Putting things back runs
+// within tidy, which outlasts ctx. Just before it suspends, it tells labd how
+// long the Mac may be off the network: until the cycle, its settling and the
+// network's return have had their time, or the test's time is up.
+func pmTestDevices(ctx, tidy context.Context, gui, prev string, before int, quiet Quieter, logf func(string, ...any)) (err error) {
+	locks, err := stopSleepLock(tidy, gui, logf)
+	defer func() { err = joinErr(err, startSleepLock(tidy, gui, locks, logf)) }()
 	if err != nil {
 		return err
 	}
 	if err := os.WriteFile(pmTestPath, []byte("devices"), 0o644); err != nil {
 		return fmt.Errorf("setting pm_test=devices: %w", err)
 	}
-	defer func() { err = joinErr(err, restorePMTest(prev, logf)) }()
+	defer func() { err = joinErr(err, restorePMTest(tidy, prev, logf)) }()
+	if quiet != nil {
+		off := suspendResumeWait + suspendSettleWait + suspendNetWait
+		if d, ok := tidy.Deadline(); ok {
+			off = min(off, time.Until(d))
+		}
+		if err := quiet(ctx, off); err != nil {
+			logf("could not tell labd the Mac may be off the network for %s: %v", off.Round(time.Second), err)
+		} else {
+			logf("told labd the Mac may be off the network for up to %s", off.Round(time.Second))
+		}
+	}
 	start := time.Now()
 	if out, err := suspendCmd(ctx, "systemctl", "suspend"); err != nil {
 		return fmt.Errorf("systemctl suspend: %w: %s", err, strings.TrimSpace(out))
@@ -181,7 +239,7 @@ func pmTestDevices(ctx context.Context, gui, prev string, before int, logf func(
 			sleepCtx(ctx, suspendPoll)
 			continue
 		}
-		jobs, cerr := cancelSleepJobs()
+		jobs, cerr := cancelSleepJobs(tidy)
 		switch {
 		case cerr != nil:
 			return fmt.Errorf("%w; cancelling the suspend failed: %v", why, cerr)
@@ -193,15 +251,21 @@ func pmTestDevices(ctx context.Context, gui, prev string, before int, logf func(
 }
 
 // restorePMTest puts pm_test back to prev once nothing is left that could
-// suspend the Mac, waiting up to suspendSettleWait for that. If something
-// still could and prev is none, pm_test stays at devices: a later suspend is
-// then a test one too, until sysfs resets on the next boot. Every other mode
-// stops short of sleeping too, so it goes back regardless. It has its own
-// context: the test's may be over.
-func restorePMTest(prev string, logf func(string, ...any)) error {
-	ctx, cancel := context.WithTimeout(context.Background(), suspendSettleWait+30*time.Second)
+// suspend the Mac, waiting up to suspendSettleWait for that, or until just
+// before ctx's deadline, whichever comes first. If something still could and
+// prev is none, pm_test stays at devices: a later suspend is then a test one
+// too, until sysfs resets on the next boot. Every other mode stops short of
+// sleeping too, so it goes back regardless. ctx is the test's tidy one: the
+// cycle's may be over.
+func restorePMTest(ctx context.Context, prev string, logf func(string, ...any)) error {
+	ctx, cancel := context.WithTimeout(ctx, suspendSettleWait+30*time.Second)
 	defer cancel()
-	deadline := time.Now().Add(suspendSettleWait)
+	deadline, waited := time.Now().Add(suspendSettleWait), "after "+suspendSettleWait.String()
+	// Stop two polls before ctx ends: the last look, which can come a poll
+	// after the deadline, still needs time to ask.
+	if d, ok := ctx.Deadline(); ok && d.Add(-2*suspendPoll).Before(deadline) {
+		deadline, waited = d.Add(-2*suspendPoll), "as the test's time ran out"
+	}
 	for {
 		pending, err := sleepPending(ctx)
 		if err != nil {
@@ -210,13 +274,13 @@ func restorePMTest(prev string, logf func(string, ...any)) error {
 		if pending == "" {
 			break
 		}
-		if time.Now().After(deadline) {
+		if !time.Now().Before(deadline) {
 			if prev != "none" {
-				logf("after %s, %s; with pm_test=%s that suspend wouldn't be a real one either", suspendSettleWait, pending, prev)
+				logf("%s, %s; with pm_test=%s that suspend wouldn't be a real one either", waited, pending, prev)
 				break
 			}
 			logf("left pm_test at devices: %s", pending)
-			return fmt.Errorf("left pm_test at devices, so that a later suspend isn't a real one: after %s, %s", suspendSettleWait, pending)
+			return fmt.Errorf("left pm_test at devices, so that a later suspend isn't a real one: %s, %s", waited, pending)
 		}
 		sleepCtx(ctx, suspendPoll)
 	}
@@ -277,9 +341,9 @@ func sleepJobs(ctx context.Context) ([]string, error) {
 }
 
 // cancelSleepJobs cancels queued or running sleep jobs, and returns their
-// ids. It has its own context: the test's may be over.
-func cancelSleepJobs() ([]string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+// ids. ctx is the test's tidy one: the cycle's may be over.
+func cancelSleepJobs(ctx context.Context) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	ids, err := sleepJobs(ctx)
 	if err != nil || len(ids) == 0 {
@@ -297,11 +361,11 @@ func cancelSleepJobs() ([]string, error) {
 // a service manager running for them, there is nothing to stop. If stopping
 // fails, the units are returned anyway: starting a unit that still runs does
 // nothing.
-func stopSleepLock(gui string, logf func(string, ...any)) ([]string, error) {
+func stopSleepLock(ctx context.Context, gui string, logf func(string, ...any)) ([]string, error) {
 	if gui == "" {
 		return nil, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	out, err := guiSystemctl(ctx, gui, append([]string{"is-active"}, sleepLockUnits...)...)
 	states := strings.Fields(out)
@@ -325,13 +389,13 @@ func stopSleepLock(gui string, logf func(string, ...any)) ([]string, error) {
 	return units, nil
 }
 
-// startSleepLock starts the units stopSleepLock returned. It has its own
-// context: the test's may be over.
-func startSleepLock(gui string, units []string, logf func(string, ...any)) error {
+// startSleepLock starts the units stopSleepLock returned. ctx is the test's
+// tidy one: the cycle's may be over.
+func startSleepLock(ctx context.Context, gui string, units []string, logf func(string, ...any)) error {
 	if len(units) == 0 {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if out, err := guiSystemctl(ctx, gui, append([]string{"start"}, units...)...); err != nil {
 		return fmt.Errorf("starting %s: %v: %s", strings.Join(units, " "), err, strings.TrimSpace(out))

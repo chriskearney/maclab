@@ -63,16 +63,23 @@ AI agents get the same operations over MCP (`lab mcp`).
    noirq phases, nor the sleep itself), waits 5 s and resumes them by itself.
    The test passes if that cycle's kernel log shows the wait (which comes only
    once those callbacks succeeded) and no device failing to suspend or resume,
-   and the default route comes back. On a kernel without `pm_test`
-   (`CONFIG_PM_DEBUG`) it passes, saying SKIP in its log. `pm_test` goes back to the mode it
+   and the default route comes back. On a kernel without `pm_test`'s `devices`
+   mode (`CONFIG_PM_DEBUG`) it is skipped, which is not a pass: the job ends
+   `tests_failed`. `pm_test` goes back to the mode it
    had, but to `none` only once nothing is left that could suspend the Mac; if
    a suspend that didn't finish in time never settles, it stays at `devices`
    until the next boot, so a later suspend is a test one too. Omarchy locks the
    desktop before every suspend, and only the user's password unlocks it, so
    the test stops the GUI user's `omarchy-sleep-lock.service` for the cycle and
-   starts it again after. The Mac goes quiet for 10-15 s (NetworkManager takes
-   Wi-Fi down for the suspend); labd waits out up to a minute of that, as it
-   would a Wi-Fi drop, before counting the Mac as lost. A real suspend can't be
+   starts it again after. All of it, putting things back too, ends within the
+   test's timeout (5 minutes by default). The Mac goes quiet for 10-15 s
+   (NetworkManager takes Wi-Fi down for the suspend), so just before it
+   suspends, the test tells labd how long the Mac may be off the network (3.5
+   minutes: the waits for the cycle, for it to settle and for the route, or
+   what is left of the timeout), and labd waits that out on that boot before
+   counting the Mac as lost. Once the network is back, the test tells labd
+   so, and labd stops waiting: a hang in the next test shows after the usual
+   60 s of silence. A real suspend can't be
    tested unattended: Apple Silicon's RTC has no wake alarm, so only a key
    press wakes the Mac (a reset ends the boot). labd warns when a test named
    `suspend-*` needs someone there.
@@ -130,10 +137,15 @@ while it's outstanding.
 
 A job that couldn't stage its kernel ends `stage_failed`, with the reason and
 `lab retry <job>` in its summary. `lab retry` (or Retry on a finished job's page)
-runs any finished job again as a new job: the same Mac, kernel, tests and cmdline.
-A source job whose built kernel has since been collected builds again from its
-source, which may have moved. `lab retry` holds the new job as you, and the web UI's
-Retry as `web`.
+runs any finished job again as a new job: the same Mac, kernel, tests and cmdline,
+and the new job records which one it retries (`retry_of`). A source job boots the
+kernel its first run built. Once that has been collected, the retry builds again
+from the exact commit and the config the first build recorded, not from wherever
+its branch or pull request points now or the Mac's config as it is now; a job
+that recorded no commit, or whose config has been collected too, can't be
+retried (a build from another config would be another kernel), and the refusal
+says to run it afresh with `lab run`.
+`lab retry` holds the new job as you, and the web UI's Retry as `web`.
 
 Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
 1 = + hardware watchdog (`apple_wdt`, armed through systemd),
@@ -157,13 +169,23 @@ job events, which name each test as labd starts it, show where a boot crashed.
 On a tier 1 Mac a test boot recovers from hangs without a controller Mac, once Linux runs.
 U-Boot leaves `apple_wdt` running into Linux (it feeds it itself while it or Limine waits,
 so a Mac sitting at a U-Boot prompt or the Limine menu is not reset). A test boot's
-command line adds `systemd.watchdog_sec=0 watchdog.open_timeout=120`: systemd, in the
-initramfs too, leaves the watchdog alone, and the kernel pings it only for 120 s. Any boot
-that hasn't opened it by then is reset within 30 s, a healthy one too, so lab-agent opens
-it on every test boot (about 5 s after the kernel starts, on an M1 Air; if it can't, it
-logs that the Mac will be reset): a boot that hung, or is alive but stuck before lab-agent
-runs (say waiting for its root device), is reset. lab-agent then holds the watchdog (so
-the Mac still shows tier 1) and feeds it only while:
+command line adds `systemd.watchdog_sec=0 watchdog.open_timeout=N`: systemd, in the
+initramfs too, leaves the watchdog alone, and the kernel pings it only for N seconds. N is
+half the job's boot timeout, and at least 120 (what an older labd, which doesn't send its
+timeout, gets too): 120 with labd's default 4-minute `--boot-timeout`, 300 with
+`lab run --boot-timeout 600`. The other half is left for the reset and the fallback boot, so labd
+sees the Mac back on its known-good kernel before it gives up and resets it mid-fallback,
+with a margin that grows with the timeout. A per-job `--boot-timeout` under 4 minutes still gets
+N = 120, which leaves the reset and the fallback boot less than half of it: they may not be done
+before labd stops waiting, and labd then resets the Mac mid-fallback. Any boot that hasn't opened the
+watchdog by then is reset within 30 s, a healthy one too, so lab-agent opens it on every
+test boot (about 5 s after the kernel starts, on an M1 Air). If it can't yet, it tries
+again every second, while it checks in, until N seconds after the kernel started, and then
+logs that the Mac will be reset: a boot that hung, or is alive but stuck before lab-agent
+runs (say waiting for its root device), is reset. An installed-mode boot doesn't hand the
+watchdog over (no `systemd.watchdog_sec=0`): systemd holds and feeds it as on any boot,
+and lab-agent just notes that. On a test boot lab-agent then holds the watchdog (so the
+Mac still shows tier 1) and feeds it only while:
 
 - PID 1 answers. lab-agent asks it for its version every 10 s, and 30 s without an answer
   stops the feeding, test or not. This stands in for systemd's own watchdog, which is off
@@ -171,9 +193,12 @@ the Mac still shows tier 1) and feeds it only while:
   `RuntimeWatchdogSec=30s` takes 30 s, and a PID 1 too busy to answer for 30 s counts as
   wedged, which lab-agent logs.
 - A test runs within its timeout plus 20 s (2 minutes more for a GUI test, as waiting for
-  the desktop session can outlast a short timeout). Nothing else extends that: a test that hangs where its timeout
-  can't reach it ends in a reset although lab-agent keeps checking in, while labd still
-  waits for it.
+  the desktop session can outlast a short timeout), counted, like the timeout, from when
+  its script has downloaded (a builtin test downloads nothing, even one that names a script
+  too). Nothing else extends that: a test that hangs where its timeout can't reach it ends
+  in a reset although lab-agent keeps checking in, while labd still waits for it. A test
+  already running when lab-agent opens the watchdog late (on a retry) gets the same budget,
+  counted from when it started, so one already past it is reset at once.
 - Outside tests, the last check-in that reached labd, or the last command starting or
   ending, was less than 10 minutes ago. A test boot stays up for as long as labd is in
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
@@ -214,10 +239,19 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
 - Installs and starts `lab-agent.service`.
 
 `setup` refuses, before changing anything, a Mac that can't reboot unattended:
-one whose disk needs a passphrase at boot (dm-crypt root, an `/etc/crypttab` or
-`/etc/crypttab.initramfs` entry unlocked at boot without a key file, or
-`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=` or `cryptdevice=` on
-the cmdline), or, under Limine, one with Limine config enrollment on. Limine then
+one whose disk needs a passphrase at boot, or, under Limine, one with Limine
+config enrollment on. An encrypted volume is fine when a key file unlocks it. For the
+volume under `/` (or an encrypted `/boot`), that must be a key file the initramfs can read
+before `/` is unlocked: one its `/etc/crypttab.initramfs` line names, or `rd.luks.key=` or
+`cryptkey=` on the cmdline, and not on that volume itself (as in
+`rd.luks.key=<file>:<device>` or `cryptkey=<device>:...` naming it, or `root=`). Keys in
+`/etc/crypttab` and `/etc/cryptsetup-keys.d/<name>.key` live on `/` and the initramfs
+reads neither, so they count only for other volumes; the `encrypt` hook (`cryptdevice=`)
+reads no crypttab at all, only `cryptkey=`. What is refused is a volume that would wait
+for a passphrase and that boot can't do without: the one under `/` or `/boot`, one the
+cmdline unlocks (`rd.luks.uuid=`, `rd.luks.name=`, `luks.uuid=`, `luks.name=`,
+`cryptdevice=`), or a crypttab entry without `nofail`. Under GRUB, a `/boot` on dm-crypt is
+refused whatever unlocks it later: GRUB asks for its passphrase itself. Limine then
 checks `limine.conf` against a checksum built into its EFI binary and stops
 booting once the lab edits `limine.conf`. Enrollment is on when
 `EFI/BOOT/BOOTAA64.EFI` or `EFI/limine/limine_aa64.efi` on the ESP holds a
@@ -237,8 +271,24 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 
 No other job runs on a Mac until its baseline passes.
 
-To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made: it stops
-and removes the agent and its config (with the device secret), clears a lab one-shot, removes the
+To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made. First it
+tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, saying why, lists it as
+`left`, and from then on neither resets it nor asks for hands, as it otherwise would once the agent
+stops mid-job. If labd can't be reached, uninstall goes on, and says so and what to run on the
+controller instead (`lab cancel <job>`, then `lab forget <device>`). Then it stops the agent. If
+that fails, or uninstall is interrupted (Ctrl-C) before it, nothing else is changed, and while the
+agent runs on, uninstall tells labd the Mac stays after all: labd puts it back in the pool (its
+canceled jobs stay canceled). But `systemctl disable --now` can fail, or die of a Ctrl-C, while
+systemd goes on to stop the agent, so uninstall first asks systemd whether `lab-agent.service` is
+still active or enabled. If it is neither, there is no agent to keep the Mac in the lab: uninstall
+leaves it `left`, says so, and finishes when run again. If labd doesn't hear that the Mac stays,
+uninstall says so: `lab reset <device>` on the controller puts a Mac that left back in the lab, and
+runs the recovery ladder on it, out-of-band reset included, as for any Mac (a Mac that wedged
+mid-uninstall, say). Only labd's own recovery leaves a Mac that left alone. Don't `lab reset` a Mac
+whose uninstall finished: it brings back a Mac with no agent, which then goes through recovery,
+out-of-band resets and all, and ends in a call for hands. Use `lab forget` for it instead. Once the
+agent is stopped, uninstall removes it
+and its config (with the device secret), clears a lab one-shot, removes the
 maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
 the modules the lab installed, and the panic, watchdog, serial-getty and autologin settings, and
 maclab's journald drop-in, if a newer setup wrote one. U-Boot's `ubootefi.var.pre-maclab` is kept,
@@ -250,7 +300,10 @@ Without `--force`, it refuses while a job is in flight or the bootloader can't b
 bootloader it can't find is left alone, and so is `/var/lib/maclab`. `--dry-run` prints each action,
 or the refusal, without taking it. labd still lists the Mac afterwards:
 `lab forget <device>` on the controller drops it (its jobs stay), so it can enroll again under the
-same name.
+same name. It refuses a Mac with a job running or queued, and, unless given `--force`, one that
+someone else holds a lease on (forgetting it would end their lease and cut their `lab shell`) or
+whose agent still checks in and never said it was leaving. Forgetting a Mac labd doesn't know is done
+already: `lab forget` says so and exits 0.
 
 ### Out-of-band control from a macOS host
 
@@ -332,9 +385,11 @@ answered yes. The run takes 1 to 3 minutes.
   purpose names what it's expected to fail: `--omt-allow system.failed-units`,
   or `--omt-allow hardware.drivers:<compatible>` for one device-tree node, which
   still fails the job if any other node stops binding. When `hardware.drivers`
-  fails on both kernels, the unclaimed nodes are compared one by one: a node a
-  driver claims on the known-good kernel and not on the test kernel regresses as
-  `hardware.drivers:<compatible>`.
+  fails on both kernels, the unclaimed nodes are compared compatible by
+  compatible, counting nodes: more nodes of a compatible left unclaimed on the
+  test kernel than on the known-good one (none then, or 3 against 1) regress as
+  `hardware.drivers:<compatible>`, and fewer count as fixed. A reference
+  recorded before the lab counted nodes compares compatibles only.
 - **Publishing:** `lab run <mac> --publish`, `lab publish <job>`, or the job page's
   Publish button uploads the signed report to omarchy-m-testing.org. Only
   known-good runs qualify, because the site names a report's build from the
@@ -397,6 +452,10 @@ U-Boot and device trees (see "Kernel artifacts"), so it says nothing about a boo
 ```sh
 lab gate <build-id | kernel sha256 prefix>                    # all six families must pass
 lab gate b1015-120000-ab12 --families m1,m2 --evidence gate.json
+lab gate b1015-120000-ab12 --volunteers                       # count volunteers' Macs too
+lab gate b1015-120000-ab12 --exclude j1015-093012-ab12        # set a lab-caused failure aside, this once
+lab exclude j1015-093012-ab12 --reason "the access point went down mid-test"   # ... in every report
+lab exclude j1015-093012-ab12 --clear                         # count it again
 ```
 
 Families come from the SoC compatible in each Mac's device tree (or, from an agent older than that
@@ -404,27 +463,89 @@ fact, its device-tree model): `m1` (t8103), `m1-pro` (M1 Pro/Max/Ultra: t6000-t6
 `m2-pro` (M2 Pro/Max/Ultra: t6020-t6022), `m3` (t8122) and `m3-pro` (M3 Pro/Max: t6030, t6031,
 t6034). M3 Ultra and M4 and later are not covered: those Macs are listed as not counted.
 
-For each Mac, only its latest pass or failure on that kernel counts. Canceled and `infra_error`
+Only plain runs count: ones that boot the Mac's known-good cmdline (no `--cmdline`,
+`--cmdline-strip` or `--cmdline-base` other than `known-good`; `--verbose-boot` is fine), run at
+least the tests every job on that Mac runs (`boot-health`, and `omarchy-m-test` where labd runs it,
+each known by its builtin whatever the job named it), and have no `--omt-allow`. Where labd runs
+`omarchy-m-test`, a pass counts only if its report was compared with the Mac's known-good run of
+it: with nothing to compare with, nothing could regress, so such a pass is listed as not counted
+("no OMT reference"; `lab baseline` makes the reference). A run with a changed cmdline boots
+something a release doesn't, so it counts neither way. A run that tested less counts when it
+failed, since it failed even so, but not when it passed. Canceled, `infra_error` and `build_failed`
 jobs say nothing about the kernel and are skipped, and so are crash tests, which crash it on
-purpose. `stage_failed` means the kernel never booted (the Mac couldn't stage it, e.g. its boot
-partition was full): it counts only for a Mac with no pass or failure on the kernel, so a run that
-couldn't stage never hides an earlier result. Every other outcome but `pass` is a
-failure. A family's result is decided in this order:
+purpose. So is a `tests_failed` job whose every failed test never started, because bash couldn't
+open the test's script, and whose kernel logged nothing fatal: the last thing the test printed is
+bash's own error for its `test-<name>.sh`, exiting 126 for `Permission denied` (as for
+`omarchy-m-test` when the desktop user can't read the job's directory) or 127 for `No such file or
+directory`. A test that ran and exited 126 or 127 itself, say for a binary it couldn't execute
+(`Exec format error`) or a command it couldn't find, failed like any other, and other trouble
+running a test (a script that didn't download, no desktop session) looks like the kernel's in the
+job's record, so it still counts as a failure. A job canceled after its kernel had already failed
+(a panic, a reboot or hang during a test, a test that failed by itself) keeps that failure as its
+outcome, with the cancel in its summary; tests the cancel cut short are the cancel's. Every other
+outcome but `pass` is a failure.
 
-1. **fail** when any of its Macs' latest runs failed;
-2. **pass** when at least one passed;
-3. **couldn't stage** (`stage_failed`) when its only results are Macs that couldn't stage the
+Each job records its Mac as it was when the job was submitted: its chip family, whether it was a
+volunteer's, and whether labd ran `omarchy-m-test` in its jobs. The gate judges the job by that,
+so what the Mac became since (or another Mac enrolled under its name after `lab forget`) doesn't
+change the verdict; a job from before labd recorded it is judged by the Mac as it is now. A Mac
+labd no longer has (`lab forget`) doesn't count: its runs are listed as not counted, "device gone",
+under their family, or under the report when the job didn't record its family.
+
+Each Mac fails when it failed on the kernel and never passed, passes when it passed and never
+failed, and is **flaky** when it did both, in either order: a `lab retry` that passes doesn't hide
+the failure before it, and the report lists both jobs, a retry naming the job it retries
+(`retry_of`). `stage_failed` means the kernel never booted (the Mac couldn't stage it, e.g. its
+boot partition was full): it counts only for a Mac with no pass or failure on the kernel, so a run
+that couldn't stage never hides another result. A family's result is decided in this order:
+
+1. **fail** when any of its Macs failed;
+2. **flaky** when any of its Macs both passed and failed;
+3. **pass** when at least one passed;
+4. **couldn't stage** (`stage_failed`) when its only results are Macs that couldn't stage the
    kernel: the gate stays shut, and the report gives the job's reason to fix before running it again;
-4. **untested** when none of its Macs has a result, including when it has no Mac in the lab.
+5. **untested** when none of its Macs has a result, including when it has no Mac in the lab.
 
-A staging problem on one Mac doesn't hide a pass or a failure on another. The gate is open only
-when every required family passed. `lab gate` exits 3 when it is shut.
+Volunteers' Macs (enrolled with `./volunteer`, see [Volunteer a Mac](#volunteer-a-mac)) run agents
+the lab doesn't control, so they count only with `--volunteers`; otherwise the report lists them
+and their runs apart. A staging problem on one Mac doesn't hide a pass or a failure on another.
+The gate is open only when every required family passed. `lab gate` exits 3 when it is shut.
+
+A failure the lab caused can read as the kernel's: an access point that goes down during a test
+makes the Mac look lost, `crashed_or_hung`, and that failure would keep its family flaky for good.
+`--exclude j1,j2` sets those jobs aside for that one report. They are listed as excluded, in
+`excluded` and, marked `excluded`, in their family's `not_counted`, and the summary names them, so
+the decision is on the record; nothing is kept, so a `lab gate` without it counts them again. Only
+finished jobs of the kernel can be excluded.
+
+`lab exclude <job> --reason "..."` keeps a job aside instead: labd marks the job (`gate_exclusion`:
+who set it aside, why and when), and every `lab gate` after that, release scripts' included, sets it
+aside as `--exclude` would, without being asked. The report lists each such job of the kernel in
+`exclusions`, with who, why and when, and the summary names them; a run it sets aside that would
+have counted is in its family's `not_counted`, marked `excluded`, with the mark as `exclusion`.
+`lab job` shows the mark too. It takes a lab admin and a reason, and only a finished job; the person
+is the `lab` user and host, or a tailnet admin's login. `lab exclude <job> --clear` takes it off, and
+the job counts again. It is for a failure the lab caused, never for one of the kernel's that would
+keep a release back. Jobs from before labd kept the mark have none, and count as before. The API is
+`POST /api/jobs/{id}/exclude` with `{"reason": "...", "by": "..."}`, and `DELETE` to clear; agents
+use `lab_exclude`.
+
+Results are strings: a family's is `pass`, `fail`, `flaky`, `stage_failed` or `untested`, and a
+run's `pass`, `fail`, `flaky` or `stage_failed`. A script that looks for `"fail"` must treat
+`"flaky"` as not passing too. The report's own `result` is only ever `pass` (the gate is open) or
+`fail`.
 
 `--evidence` writes the report as one JSON evidence record:
 the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family its result and
 runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
-couldn't stage), plus the labd host. The
-API is `GET /api/gate/{kernel}?families=m1,m2`; agents use `lab_gate`.
+couldn't stage, or a flaky Mac's other result; `retry_of` for a retry), and `not_counted`, the runs
+that decide nothing, each with its reason (`volunteer` marks a volunteer's Mac, `excluded` a job
+`--exclude` or `lab exclude` set aside, and `exclusion` the latter's mark). Then `volunteers` names
+the volunteers' Macs, `volunteers_counted` says whether they counted, `excluded` lists the jobs
+`--exclude` set aside, `exclusions` those `lab exclude` did (job, device, outcome, by, reason,
+time), `not_counted` holds the runs of forgotten Macs whose jobs didn't record their family, and the
+labd host. The API is
+`GET /api/gate/{kernel}?families=m1,m2&volunteers=1&exclude=j1,j2`; agents use `lab_gate`.
 
 ## Kernel artifacts
 
@@ -453,7 +574,7 @@ claude mcp add maclab -- lab mcp
 Tools: `lab_devices`, `lab_device`, `lab_run`, `lab_wait`, `lab_job`, `lab_jobs`,
 `lab_log`, `lab_screenshot`, `lab_baseline`, `lab_crashtest`, `lab_lease`,
 `lab_release`, `lab_reset`, `lab_serial`, `lab_exec`, `lab_cancel`, `lab_retry`, `lab_build`,
-`lab_build_status`, `lab_package`, `lab_publish` and `lab_gate`. A device in `needs_hands` is waiting for a
+`lab_build_status`, `lab_package`, `lab_publish`, `lab_gate` and `lab_exclude`. A device in `needs_hands` is waiting for a
 person. Tell the user; don't retry.
 
 A lab is worth describing to its agents once: which Macs you have, which one has
@@ -516,14 +637,27 @@ On an Apple Silicon Mac running Omarchy, in a clone of this repo:
 `./volunteer` installs Tailscale and signs in if needed, finds labd among the
 tailnet's online machines (port 7770), asks it for an enrollment token, downloads
 labd's lab-agent and runs `sudo lab-agent setup --server .. --token .. --gui-user <you>`
-with them. `MACLAB_SERVER=http://<host>:7770 ./volunteer` skips the search.
+with them. Any machine on the tailnet could answer like a lab, and its lab-agent
+runs as root, so before signing up it shows the machine that answered (its
+tailnet DNS name and host name, printable ASCII only, since the machine picks
+its own host name) and goes on only when you answer `y`. It stops
+when more than one lab answers. `MACLAB_SERVER=http://<host>:7770 ./volunteer`
+skips the search and the question.
 
 The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
 keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
 Then they share the labd machine with each volunteer's Tailscale account (admin
-console, Machines, Share), or invite them to the tailnet. Any tailnet peer labd
-lets look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
-name made from `<user>-<hostname>` and the volunteer's login as its label. Next
+console, Machines, Share), or invite them to the tailnet. Any person labd lets
+look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
+name made from `<user>-<hostname>` and the volunteer's login as its label, and
+is marked a volunteer's: `lab gate` leaves its results out unless asked (see
+[Release gate](#release-gate)). Tagged tailnet devices, lab Macs under `tag:maclab`
+among them, are machines and get no token. Each person holds at most one unused
+token: asking again replaces it, so running `./volunteer` again after a setup
+that stopped half way just works. At most 20 people hold one at once; the next
+gets a 429 until one is used or expires a day later. Each person may have at
+most 3 Macs in the lab, counted by tailnet login; a fourth gets a 409 until
+`lab forget` drops one of them. Admins aren't limited. Next
 comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 `lab forget <name>`.
 
@@ -538,6 +672,28 @@ network you'd hand a root shell to. A token still works from anywhere. On a
 phone the UI switches to a bottom tab bar and can be added to the home
 screen.
 
+A browser on a trusted network carries that access to every page it opens,
+so labd refuses (403) any request but GET, HEAD and OPTIONS whose `Origin`
+names another host or port than the `Host` it was sent to, or that comes with
+`Sec-Fetch-Site: cross-site` or `same-site` and no matching `Origin`. Another
+site's page can't run commands on the Macs, and labd's own UI, served from
+the address it calls, works as before. The lab CLI, agents, builders and
+curl send neither header and aren't affected. A proxy in front of labd must
+pass on the `Host` the browser asked for.
+
+A page can get past that check by DNS rebinding: its site points the page's
+own name at labd's address once the page is open, and then the page and labd
+are one origin to the browser. So access that comes with no token, from
+`--trust` or a tailnet login, counts only on a request that asked for labd by
+one of its own names: an IP address, `localhost`, this machine's host name
+(short, fully qualified and under `.local`) and, with `--tailscale`, its
+MagicDNS name. Any other name gets a 403 that names it, for GETs too, since a
+page could read the lab as well; the UI shows why and asks for the token. If
+browsers reach labd by another name, a DNS alias say, run labd with
+`--allow-host labd.lan` (repeatable, or a comma-separated list). The token,
+device secrets and the builder token work by any name, so the lab CLI, agents,
+builders and scripts with the token don't care.
+
 ## Tailscale
 
 Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while
@@ -550,27 +706,77 @@ labd --listen <labd tailnet IP>:7770 --tailscale --admins alice@github,bob@githu
 ```
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
-(`tailscale whois`, cached for a minute). Logins in `--admins` get admin
+(`tailscale whois`; answers are cached for a minute, failed lookups for 5
+seconds). Logins in `--admins` get admin
 access with no token. Every other peer, tagged devices included, may only
 look: the dashboard, Macs, jobs, builds, logs and saved screens, including
 the console output in the live view and in each job's logs. Anything that
 changes the lab, the console itself (`lab shell`), the Mac's stored serial
 log and new screenshots answer 403, and device views never carry the
 controller's token. Peers off the tailnet still need the admin token, which
-keeps working everywhere for `lab` and scripts. `--trust` works as before.
+keeps working everywhere for `lab` and scripts.
+
+`--trust` still gives admin by the connection's address, so tailnet traffic
+that reaches labd from a trusted address gets admin too, whoever sent it.
+With `--tailscale`, labd refuses that trust where it can tell: a tailnet
+address is judged by its identity even inside a trusted network, and a
+request that came through an HTTP proxy gets no trust and needs the token.
+labd counts any request with an `X-Forwarded-*` or `Forwarded` header, or
+one of serve's `Tailscale-User-*`, `Tailscale-Headers-Info` or
+`Tailscale-Funnel-Request` headers, as proxied, whatever proxy set it:
+`tailscale serve` and Funnel always set `X-Forwarded-For`. Without
+`--tailscale`, headers change nothing and trust goes by address alone.
+
+labd can't see the rest, and can't be made to: raw TCP forwarding
+(`tailscale serve --tcp` or `--tls-terminated-tcp`, Funnel in TCP mode) adds
+no header at all, so a request it forwards from 127.0.0.1 or this host's LAN
+address looks local. So does traffic from a subnet router that brings
+tailnet traffic into a trusted network, or from someone who reaches a
+machine there over Tailscale SSH and connects from it. Trusting 127.0.0.1 or
+the lab LAN while also running `--tailscale` is safe only as long as nobody
+sets up TCP forwarding to labd on this host, or a route like those into that
+network. labd logs a warning at startup for each trusted network. With
+`--tailscale`, trust only networks no tailnet route leads into, or leave
+`--trust` off and use `--admins` and the token.
 
 To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
 Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short
-expiry. Then on the Mac:
+expiry. On the Mac, put it in a file only you can read, run setup with it,
+and remove the file:
 
 ```sh
-sudo ./lab-agent setup --server http://<labd tailnet IP>:7770 --token enr_... --tailscale-authkey tskey-auth-...
+(umask 077; cat > tskey)    # paste the key, Enter, then Ctrl-D
+sudo ./lab-agent setup --server http://<labd tailnet IP>:7770 --token enr_... --tailscale-authkey-file tskey
+shred -u tskey
 ```
 
-Before anything else, setup runs `tailscale up --auth-key=... --advertise-tags=tag:maclab
+Setup refuses a key file that group or others may read: make a new key
+then, since anyone could have read that one. `--tailscale-authkey -` reads
+the key from stdin instead, and asks for it when stdin is a terminal. A key
+given straight to `--tailscale-authkey` is refused: by the time setup sees
+it, the process list and sudo's journal entry show it, and tailnet viewers
+can read that journal through labd. Revoke such a key and make a new one.
+
+Before anything else, setup runs `tailscale up --auth-key=file:... --advertise-tags=tag:maclab
 --ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup
-uses the machine's hostname, since the lab name only arrives with enrollment)
-and checks that labd answers. It never prints or stores the key.
+uses the machine's hostname, since the lab name only arrives with enrollment).
+The key goes to tailscale in a root-only temporary file, removed as soon as
+`tailscale up` returns. On a Mac that is logged in already, setup adds
+`--force-reauth`, without which tailscale ignores the new key, so a rerun
+with a key from another tailnet really moves the Mac. If tailscale won't
+run without naming the Mac's other settings (an exit node, routes), setup
+lists the settings that go back to their defaults, then runs it again with
+`--reset`. It keeps `--shields-up` if the Mac had it, and says so: that
+blocks every connection into the Mac, Tailscale SSH included. Then
+it checks that the Mac has a new login, is tagged `tag:maclab`, and is on
+the tailnet labd is on (when `--server` is a tailnet address or a `ts.net`
+name). If it isn't, setup logs the Mac out (`tailscale logout`)
+rather than leave it on the wrong tailnet, or untagged, with Tailscale SSH
+on, and says so; make a new key and run setup again. Last, it checks that
+labd answers. It never prints or stores the key, and removes the key file
+when stopped by Ctrl-C, SIGTERM or a dropped SSH session (SIGHUP).
+Re-joining can cut a Tailscale SSH session, and tailscale may refuse to do
+it from one; run setup from the console or over plain SSH then.
 
 A minimal policy: Macs reach only labd, admins reach labd and SSH into the
 Macs as root, and the rest of the tailnet may view labd.

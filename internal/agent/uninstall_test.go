@@ -1,17 +1,26 @@
 package agent
 
 import (
+	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	osuser "os/user"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/iconidentify/maclab/internal/api"
 )
 
 // labMac is what setup leaves on a Limine Mac, under a temp root.
@@ -565,4 +574,244 @@ func TestUninstallForceWithoutBootloader(t *testing.T) {
 	}
 	m.kept(t, workDir, altStage+"/j1")
 	m.gone(t, sysctlPath, unitPath) // everything else went
+}
+
+// fakeLabd answers /api/agent/leave the way labd does, and notes when the
+// call came: it must come before uninstall stops the agent.
+type fakeLabd struct {
+	srv     *httptest.Server
+	mu      sync.Mutex
+	reqs    []api.LeaveRequest
+	auth    []string
+	stopped atomic.Bool // lab-agent.service was stopped
+	early   bool        // a call came before that
+	old     bool        // an older labd, which takes an undo for a leave
+}
+
+func newFakeLabd(t *testing.T) *fakeLabd {
+	f := &fakeLabd{}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/agent/leave" {
+			http.NotFound(w, r)
+			return
+		}
+		var req api.LeaveRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.reqs, f.auth = append(f.reqs, req), append(f.auth, r.Header.Get("Authorization"))
+		f.early = !f.stopped.Load()
+		f.mu.Unlock()
+		json.NewEncoder(w).Encode(api.LeaveResponse{Name: "m1air", Canceled: req.Jobs, Back: req.Undo && !f.old})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// labMacFor is a lab Mac whose agent config points at server, telling labd
+// for real (Leave), with job j1 staged and its one-shot armed.
+func labMacFor(t *testing.T, server string, stopped *atomic.Bool) *labMac {
+	m := newLabMac(t)
+	cfg := `{"server":"` + server + `","name":"m1air","secret":"s3cret"}`
+	if err := os.WriteFile(m.u.path(ConfigPath), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.u.leave = Leave
+	record := m.u.cmd
+	m.u.cmd = func(name string, args ...string) error {
+		if stopped != nil && strings.Join(args, " ") == "disable --now lab-agent.service" {
+			stopped.Store(true)
+		}
+		return record(name, args...)
+	}
+	stageLimineEntry(t, m.lim, "j1")
+	m.lim.writeEntries()
+	armOneShot(t, "maclab-j1")
+	m.u.force = true
+	return m
+}
+
+// uninstall --force mid-job tells labd first, with the job in flight, so labd
+// cancels it instead of resetting the Mac once the agent goes quiet.
+func TestUninstallTellsLabd(t *testing.T) {
+	f := newFakeLabd(t)
+	m := labMacFor(t, f.srv.URL, &f.stopped)
+
+	// a dry run only says it would
+	if err := m.again(true); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	n := len(f.reqs)
+	f.mu.Unlock()
+	if n != 0 || !slices.Contains(m.out, "would tell labd at "+f.srv.URL+" that m1air is leaving the lab") {
+		t.Fatalf("dry run: %d calls\n%s", n, strings.Join(m.out, "\n"))
+	}
+
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reqs) != 1 || f.auth[0] != "Bearer s3cret" || !f.early {
+		t.Fatalf("calls %+v auth %q, before the agent stopped: %v", f.reqs, f.auth, f.early)
+	}
+	if r := f.reqs[0]; r.Reason != "lab-agent uninstall --force with j1 in flight" || !reflect.DeepEqual(r.Jobs, []string{"j1"}) {
+		t.Fatalf("told labd %+v", r)
+	}
+	if !slices.Contains(m.out, "told labd at "+f.srv.URL+" that m1air is leaving the lab; it canceled j1") {
+		t.Errorf("output:\n%s", strings.Join(m.out, "\n"))
+	}
+	if last := m.out[len(m.out)-1]; last != "uninstalled. labd lists this Mac as m1air, left: `lab forget m1air` takes it off the list" {
+		t.Errorf("last line %q", last)
+	}
+	m.gone(t, workDir, ConfigPath)
+}
+
+// With labd unreachable, uninstall still goes ahead, and says labd wasn't
+// told and what to run on the controller instead.
+func TestUninstallLabdUnreachable(t *testing.T) {
+	f := newFakeLabd(t)
+	url := f.srv.URL
+	f.srv.Close()
+	m := labMacFor(t, url, nil)
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	m.gone(t, workDir, ConfigPath, unitPath)
+	todo := "`lab cancel j1`, then `lab forget m1air`"
+	said := slices.ContainsFunc(m.out, func(l string) bool {
+		return strings.HasPrefix(l, "labd at "+url+" was not told that m1air is leaving the lab (") && strings.HasSuffix(l, "On the controller, run "+todo)
+	})
+	if !said {
+		t.Errorf("output:\n%s", strings.Join(m.out, "\n"))
+	}
+	if last := m.out[len(m.out)-1]; last != "uninstalled, but labd wasn't told: on the controller, run "+todo {
+		t.Errorf("last line %q", last)
+	}
+}
+
+// With labd unreachable and the agent stopped by a disable --now whose
+// systemctl died, there is nothing to take back: uninstall says what to run
+// on the controller.
+func TestUninstallStopFailedLabdUnreachable(t *testing.T) {
+	f := newFakeLabd(t)
+	url := f.srv.URL
+	f.srv.Close()
+	m := labMacFor(t, url, nil)
+	record := m.u.cmd
+	m.u.cmd = func(name string, args ...string) error {
+		record(name, args...)
+		switch strings.Join(args, " ") {
+		case "disable --now lab-agent.service":
+			return errors.New("signal: interrupt")
+		case "is-active --quiet lab-agent.service", "is-enabled --quiet lab-agent.service":
+			return errors.New("exit status 3")
+		}
+		return nil
+	}
+	if err := m.u.uninstall(); err == nil || !strings.Contains(err.Error(), "uninstall stopped there") {
+		t.Fatalf("uninstall: %v", err)
+	}
+	said := "systemctl failed (run systemctl disable --now lab-agent.service: signal: interrupt), but lab-agent.service is no longer active or enabled, " +
+		"and labd at " + url + " wasn't told that m1air is leaving the lab. Run uninstall again to finish, and on the controller run `lab cancel j1`, then `lab forget m1air`"
+	if !slices.Contains(m.out, said) {
+		t.Errorf("didn't say %q:\n%s", said, strings.Join(m.out, "\n"))
+	}
+	m.kept(t, ConfigPath, workDir)
+}
+
+// If uninstall stops after telling labd but before the agent is stopped (the
+// agent won't stop, or the person interrupts it), the agent runs on: uninstall
+// takes the leave back, so labd doesn't refuse its jobs for good. Once the
+// agent is stopped, a later failure leaves the Mac as left. So does a
+// systemctl disable --now interrupted (Ctrl-C) while PID 1 went on to stop
+// the agent: taking the leave back would leave labd a silent Mac to recover.
+func TestUninstallTakesBackItsLeave(t *testing.T) {
+	const (
+		stop     = "disable --now lab-agent.service"
+		active   = "is-active --quiet lab-agent.service"
+		enabled  = "is-enabled --quiet lab-agent.service"
+		failed   = "run systemctl disable --now lab-agent.service: exit status 1: Failed"
+		killed   = "run systemctl disable --now lab-agent.service: signal: interrupt"
+		stayed   = "told labd at <url> that m1air stays in the lab after all"
+		leftNote = "but lab-agent.service is no longer active or enabled: labd at <url> keeps m1air as left, as it should with no agent. " +
+			"Run uninstall again to finish, then `lab forget m1air` on the controller"
+	)
+	for _, c := range []struct {
+		name        string
+		fail        string   // the systemctl command that fails
+		killed      bool     // ... by Ctrl-C
+		off         []string // systemctl checks that find the agent stopped or disabled
+		interrupted bool
+		old         bool // an older labd
+		undo        bool // took the leave back
+		err, said   string
+	}{
+		{"the agent won't stop", stop, false, nil, false, false, true,
+			"uninstall stopped there", stayed},
+		{"interrupted", "", false, nil, true, false, true,
+			"interrupted before lab-agent.service was stopped", stayed},
+		{"an older labd", stop, false, nil, false, true, true,
+			"uninstall stopped there", "labd at <url> may still list m1air as left, refusing its jobs (this labd can't take a leave back): on the controller, run `lab reset m1air`"},
+		{"the agent stopped, then a step failed", "daemon-reload", false, nil, false, false, false,
+			"uninstall stopped there", "told labd at <url> that m1air is leaving the lab; it canceled j1"},
+		{"Ctrl-C killed systemctl, PID 1 stopped the agent", stop, true, []string{active, enabled}, true, false, false,
+			"uninstall stopped there", "systemctl failed (" + killed + "), " + leftNote},
+		{"systemctl failed, the agent stopped and disabled", stop, false, []string{active, enabled}, false, false, false,
+			"uninstall stopped there", "systemctl failed (" + failed + "), " + leftNote},
+		{"Ctrl-C killed systemctl, the agent still runs", stop, true, []string{enabled}, true, false, true,
+			"uninstall stopped there", stayed},
+		{"Ctrl-C killed systemctl, the agent stopped but starts at boot", stop, true, []string{active}, true, false, true,
+			"uninstall stopped there", stayed},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeLabd(t)
+			f.old = c.old
+			m := labMacFor(t, f.srv.URL, &f.stopped)
+			record := m.u.cmd
+			ctx, cancel := context.WithCancel(context.Background())
+			m.u.cmd = func(name string, args ...string) error {
+				if err := record(name, args...); err != nil {
+					return err
+				}
+				switch a := strings.Join(args, " "); {
+				case a == c.fail && c.killed:
+					cancel() // the person's Ctrl-C: uninstall's and systemctl's
+					return errors.New("signal: interrupt")
+				case a == c.fail:
+					return errors.New("exit status 1: Failed")
+				case slices.Contains(c.off, a):
+					return errors.New("exit status 3")
+				}
+				return nil
+			}
+			if c.interrupted && !c.killed {
+				cancel()
+			}
+			defer cancel()
+			m.u.ctx = ctx
+			before := snapshot(t, m.lim.ESP.Target)
+			err := m.u.uninstall()
+			if err == nil || !strings.Contains(err.Error(), c.err) {
+				t.Fatalf("uninstall: %v, want %q", err, c.err)
+			}
+			f.mu.Lock()
+			reqs := f.reqs
+			f.mu.Unlock()
+			if len(reqs) == 0 || reqs[0].Undo {
+				t.Fatalf("told labd %+v; want the leave first", reqs)
+			}
+			if undone := len(reqs) == 2 && reqs[1].Undo; undone != c.undo || len(reqs) > 2 {
+				t.Errorf("told labd %+v; want the leave taken back: %v", reqs, c.undo)
+			}
+			if said := strings.ReplaceAll(c.said, "<url>", f.srv.URL); !slices.Contains(m.out, said) {
+				t.Errorf("didn't say %q:\n%s", said, strings.Join(m.out, "\n"))
+			}
+			// nothing past the agent changed
+			if after := snapshot(t, m.lim.ESP.Target); !reflect.DeepEqual(before, after) {
+				t.Error("changed the ESP")
+			}
+			m.kept(t, ConfigPath, workDir)
+		})
+	}
 }

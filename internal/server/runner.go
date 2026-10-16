@@ -32,6 +32,8 @@ type jobRun struct {
 	ir *installedRun // installed-kernel jobs only
 
 	omtRef []byte // a known-good run's omarchy-m-test reference, written only if the job passes
+
+	failedOwn int // tests that failed by themselves, not cut short by a cancel
 }
 
 func (r *jobRun) ev(format string, args ...any) {
@@ -93,20 +95,29 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	// A source is built (or an identical earlier build reused) before the Mac is needed.
 	if j.Spec.Source != "" && j.Spec.Kernel == "" {
 		if outcome, summary := r.build(ctx); outcome != "" {
+			if why := v.leaving(); why != "" {
+				outcome, summary = api.OutcomeCanceled, "canceled: "+why
+			}
 			r.finish(outcome, summary)
 			return
 		}
 	}
 
-	// Queued jobs wait for the Mac, including for a human to power cycle it.
+	// Queued jobs wait for the Mac, including for a human to power cycle it,
+	// but not for one that left the lab.
 	v.mu.Lock()
 	ready := v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
 	v.mu.Unlock()
 	if !ready {
 		r.ev("waiting for %s to be ready (%s)", j.Spec.Device, v.snapshot().State)
-		if err := v.waitFor(ctx, 0, func() bool {
-			return v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
-		}); err != nil {
+		err := v.waitFor(ctx, 0, func() bool {
+			return v.d.State == api.StateLeft || v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
+		})
+		if why := v.leaving(); why != "" {
+			r.finish(api.OutcomeCanceled, "canceled: "+why)
+			return
+		}
+		if err != nil {
 			r.finish(api.OutcomeCanceled, "canceled while waiting for the device")
 			return
 		}
@@ -149,13 +160,25 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 
 	outcome, summary := r.execute(ctx)
 	if ctx.Err() != nil && outcome != api.OutcomeCanceled {
-		outcome, summary = api.OutcomeCanceled, "canceled: "+summary
+		outcome, summary = r.canceledAfter(outcome, summary)
+	}
+	left := v.leaving()
+	if left != "" {
+		// Canceled whatever was seen: the agent stopping reads as the Mac
+		// going down, which the job can't tell from the kernel's doing.
+		outcome, summary = api.OutcomeCanceled, "canceled: "+left
 	}
 
-	// Always put the Mac back on its known-good kernel, even after a cancel.
+	// Always put the Mac back on its known-good kernel, even after a cancel,
+	// unless it is leaving the lab: its agent is stopping, so a restore would
+	// only time out and walk the recovery ladder.
 	rctx, cancel := context.WithTimeout(s.ctx, 3*r.boot+5*time.Minute)
 	defer cancel()
-	if v.snapshot().State != api.StateNeedsHands {
+	switch {
+	case left != "":
+		r.ev("not restoring the known-good kernel: %s", left)
+		summary += "; not restored: lab-agent uninstall clears the lab's one-shot and staged kernels"
+	case v.snapshot().State != api.StateNeedsHands:
 		if err := r.restore(rctx); err != nil {
 			r.ev("restore: %v", err)
 			if outcome == api.OutcomePass {
@@ -163,7 +186,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 			}
 			summary += "; restore failed: " + err.Error()
 		}
-	} else {
+	default:
 		summary += ". " + v.snapshot().Name + " needs a human power cycle; the lab cleans up the staged kernel when it is back"
 	}
 	if j.Spec.Baseline && outcome == api.OutcomePass {
@@ -182,6 +205,24 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		outcome, summary = r.ir.seal(outcome, summary, at)
 	}
 	r.finishAt(outcome, summary, at)
+}
+
+// canceledAfter is the outcome of a job canceled while it ran, given what
+// execute made of it. A kernel failure seen before the cancel (a panic, a
+// reboot or hang during a test, a test that failed by itself) is the
+// kernel's whatever came next: it stays the outcome, with the cancel in the
+// summary, so lab gate counts it and a retry's pass doesn't read as clean.
+// Anything else, tests the cancel cut short among it, is the cancel's.
+func (r *jobRun) canceledAfter(outcome, summary string) (string, string) {
+	kernel := gateResult(outcome) == api.GateFail
+	if outcome == api.OutcomeTestsFailed && r.failedOwn == 0 {
+		kernel = false // only tests the cancel cut short failed
+	}
+	if kernel {
+		r.ev("canceled after the kernel failed (%s): that stays the outcome", outcome)
+		return outcome, summary + "; then the job was canceled"
+	}
+	return api.OutcomeCanceled, "canceled: " + summary
 }
 
 func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, time.Now()) }
@@ -229,7 +270,8 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	r.ev("staging %s", what)
 	d := v.snapshot()
 	args := api.StageArgs{Artifact: j.Spec.Kernel, Cmdline: j.Spec.Cmdline, Serial: d.OOB != nil,
-		CmdlineBase: j.Spec.CmdlineBase, CmdlineStrip: j.Spec.CmdlineStrip, Verbose: j.Spec.VerboseBoot}
+		CmdlineBase: j.Spec.CmdlineBase, CmdlineStrip: j.Spec.CmdlineStrip, Verbose: j.Spec.VerboseBoot,
+		BootTimeoutSec: int(r.boot / time.Second)}
 	if r.ir != nil {
 		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
 	}
@@ -309,8 +351,12 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
 		}
+		cut := err != nil && ctx.Err() != nil // by a cancel
 		if err != nil {
 			tr = api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}
+		}
+		if cut {
+			tr.Error = "the job was canceled during this test"
 		}
 		if t.Builtin == omtTest && err == nil {
 			r.omtResult(&tr)
@@ -326,6 +372,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		if !tr.Passed {
 			failed++
+			if !cut {
+				r.failedOwn++
+			}
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.Tests = append(j.Result.Tests, tr) })
 		r.ev("test %s: %s", t.Name, testVerdict(tr))
@@ -514,6 +563,8 @@ func testVerdict(t api.TestResult) string {
 	switch {
 	case t.Passed:
 		return fmt.Sprintf("pass (%.0fs)", t.Seconds)
+	case t.Skipped:
+		return "skipped (not a pass): " + t.Error
 	case t.TimedOut:
 		return "timed out"
 	case t.Error != "":
