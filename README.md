@@ -136,9 +136,11 @@ while it's outstanding.
 A job that couldn't stage its kernel ends `stage_failed`, with the reason and
 `lab retry <job>` in its summary. `lab retry` (or Retry on a finished job's page)
 runs any finished job again as a new job: the same Mac, kernel, tests and cmdline.
-A source job whose built kernel has since been collected builds again from its
-source, which may have moved. `lab retry` holds the new job as you, and the web UI's
-Retry as `web`.
+A source job boots the kernel its first run built. Once that has been collected,
+the retry builds again from the exact commit the first build recorded, not from
+wherever its branch or pull request points now; a job that recorded no commit
+can't be retried, and the refusal says to run it afresh with `lab run`.
+`lab retry` holds the new job as you, and the web UI's Retry as `web`.
 
 Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
 1 = + hardware watchdog (`apple_wdt`, armed through systemd),

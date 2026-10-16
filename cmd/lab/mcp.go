@@ -167,7 +167,7 @@ func serveMCP(ctx context.Context) error {
 		JobID   string `json:"job_id"`
 		WaitSec int    `json:"wait_sec,omitempty" jsonschema:"wait up to this long for the result (max 900); 0 returns once queued"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_retry", Description: "Run a finished job again as a new job: same Mac, kernel, tests and cmdline. A stage_failed job's summary says why, and whether labd already tried it again (up to 3 attempts); retry it once that cause is fixed. Returns the new job; use lab_wait for the result."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_retry", Description: "Run a finished job again as a new job: same Mac, kernel (for a source job, the same commit), tests and cmdline. A stage_failed job's summary says why, and whether labd already tried it again (up to 3 attempts); retry it once that cause is fixed. Returns the new job; use lab_wait for the result."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a retryArg) (*mcp.CallToolResult, any, error) {
 			j, err := c.Retry(ctx, a.JobID, who)
 			if err != nil {

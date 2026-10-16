@@ -1077,7 +1077,9 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.subm
 
 // Retry queues a finished job again as a new job: the same Mac, kernel,
 // tests and cmdline. holder, if given, replaces the first job's, so a lease
-// is checked against whoever retries it.
+// is checked against whoever retries it. A source job boots the kernel the
+// first one built; once that is collected, it builds again from the commit
+// that build recorded, never from wherever a branch points now.
 func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
 	old, err := s.store.job(id)
 	if err != nil {
@@ -1096,10 +1098,35 @@ func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
 	if spec.Source != "" && spec.Kernel != "" {
 		// boot the kernel the first job built, unless it has been collected
 		if _, err := os.Stat(s.artifactPath(spec.Kernel)); err != nil {
-			spec.Kernel, spec.Build = "", ""
+			spec.Kernel = ""
 		}
 	}
+	if spec.Source != "" && spec.Kernel == "" {
+		src, err := s.pinnedSource(old)
+		if err != nil {
+			return nil, 409, err
+		}
+		spec.Source, spec.Build = src, ""
+	}
 	return s.submit(spec, old.ID)
+}
+
+// pinnedSource is the source a retry of old builds from: the exact commit its
+// build resolved, as repo#sha. Its source may name a branch or pull request
+// that has moved on since.
+func (s *Server) pinnedSource(old *api.Job) (string, error) {
+	if src, err := parseSource(old.Spec.Source); err == nil && reHex40.MatchString(src.Ref) {
+		return old.Spec.Source, nil // a commit already
+	}
+	again := fmt.Sprintf("run it afresh with `lab run %s --kernel %s`", old.Spec.Device, old.Spec.Source)
+	if old.Spec.Build == "" {
+		return "", fmt.Errorf("job %s never resolved %s to a commit, so a retry would build whatever it points to now; %s", old.ID, old.Spec.Source, again)
+	}
+	b, err := s.getBuild(old.Spec.Build)
+	if err != nil || b.Source.SHA == "" || b.Source.Repo == "" {
+		return "", fmt.Errorf("job %s's build %s recorded no commit, so a retry would build whatever %s points to now; %s", old.ID, old.Spec.Build, old.Spec.Source, again)
+	}
+	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
 // submit queues a job; retryOf names the job it retries, whose source may

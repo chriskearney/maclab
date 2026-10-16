@@ -44,7 +44,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab jobs [device] | lab job <id> | lab wait <id> | lab cancel <id> | lab logs <id> [file]
   lab gate <kernel> [--families m1,m2] [--volunteers] [--evidence file]
                                       did a kernel (build id or sha256 prefix) pass on every chip family? exits 3 if not
-  lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel, tests and cmdline
+  lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
   lab forget <device> [--force]       take a Mac out of the lab (after lab-agent uninstall); its jobs stay.

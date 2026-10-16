@@ -1233,9 +1233,78 @@ func TestRetryJob(t *testing.T) {
 	if err := l.s.store.saveJob(src); err != nil {
 		t.Fatal(err)
 	}
+	l.s.saveBuild(&api.Build{ID: "b1", Key: "k1", Source: api.Source{Repo: "https://github.com/o/r", Ref: "b", SHA: strings.Repeat("e", 40)},
+		ConfigSHA: gc, State: api.BuildDone, Created: time.Now()})
 	if _, code, err := l.s.Retry(src.ID, ""); code != 400 || err == nil || !strings.Contains(err.Error(), "config artifact "+gc) {
 		t.Fatalf("retry needing a collected config: %d %v", code, err)
 	}
+}
+
+// A retry whose first kernel was collected builds the commit the first build
+// recorded, not wherever the branch it was given points now. With no
+// commit recorded it is refused.
+func TestRetryPinsCommit(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	builds := 0
+	go l.fakeBuilder(ctx, &builds)
+
+	src := gitRepo(t) // file://<dir>@main
+	j := l.run(api.JobSpec{Source: src})
+	l.expect(j, api.OutcomePass)
+	first, err := l.s.getBuild(j.Spec.Build)
+	if err != nil || first.Source.SHA == "" {
+		t.Fatalf("build %+v %v", first, err)
+	}
+	// main moves on, and the kernel the first job booted is collected
+	dir := strings.TrimSuffix(strings.TrimPrefix(src, "file://"), "@main")
+	commit := exec.Command("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved on")
+	commit.Dir = dir
+	if out, err := commit.CombinedOutput(); err != nil {
+		t.Fatalf("git commit: %v %s", err, out)
+	}
+	if now, _ := resolve(ctx, mustParse(t, src)); now.SHA == first.Source.SHA {
+		t.Fatal("main did not move")
+	}
+	if err := os.Remove(l.s.artifactPath(j.Spec.Kernel)); err != nil {
+		t.Fatal(err)
+	}
+
+	r, _, err := l.s.Retry(j.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "file://" + dir + "#" + first.Source.SHA; r.Spec.Source != want || r.Spec.Kernel != "" || r.Spec.Build != "" {
+		t.Fatalf("retry spec: %+v, want source %s", r.Spec, want)
+	}
+	r = l.wait(r.ID, 60*time.Second)
+	l.expect(r, api.OutcomePass)
+	again, err := l.s.getBuild(r.Spec.Build)
+	if err != nil || again.ID == first.ID || again.Source.SHA != first.Source.SHA || builds != 2 {
+		t.Fatalf("the retry built %+v (%d builds), want commit %s", again, builds, first.Source.SHA)
+	}
+
+	// No commit to pin: refused, not rebuilt from the moving branch.
+	for _, c := range []struct{ id, build string }{{"jnobuild", ""}, {"jgone", "b-collected"}} {
+		old := &api.Job{ID: c.id, Spec: api.JobSpec{Device: l.name, Source: src, Build: c.build}, State: api.JobDone, Outcome: api.OutcomeBuildFailed}
+		if err := l.s.store.saveJob(old); err != nil {
+			t.Fatal(err)
+		}
+		if _, code, err := l.s.Retry(c.id, ""); code != 409 || err == nil || !strings.Contains(err.Error(), "lab run "+l.name+" --kernel "+src) {
+			t.Fatalf("retry of %s: %d %v", c.id, code, err)
+		}
+	}
+}
+
+func mustParse(t *testing.T, source string) api.Source {
+	t.Helper()
+	s, err := parseSource(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s
 }
 
 // Without a serial console a test boot keeps the base's quiet and splash,
