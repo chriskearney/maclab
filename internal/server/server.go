@@ -430,7 +430,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
 	m.HandleFunc("POST /api/devices/{name}/exec", s.admin(s.hExec))
 	web.Register(m)
-	return m
+	return sameOrigin(m)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

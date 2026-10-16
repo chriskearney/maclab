@@ -596,6 +596,15 @@ network you'd hand a root shell to. A token still works from anywhere. On a
 phone the UI switches to a bottom tab bar and can be added to the home
 screen.
 
+A browser on a trusted network carries that access to every page it opens,
+so labd refuses (403) any request but GET, HEAD and OPTIONS whose `Origin`
+names another host or port than the `Host` it was sent to, or that comes with
+`Sec-Fetch-Site: cross-site` or `same-site` and no matching `Origin`. Another
+site's page can't run commands on the Macs, and labd's own UI, served from
+the address it calls, works as before. The lab CLI, agents, builders and
+curl send neither header and aren't affected. A proxy in front of labd must
+pass on the `Host` the browser asked for.
+
 ## Tailscale
 
 Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while
