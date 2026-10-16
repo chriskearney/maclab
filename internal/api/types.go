@@ -18,6 +18,9 @@ const (
 	StateRecovering DeviceState = "recovering"  // walking the recovery ladder
 	StateNeedsHands DeviceState = "needs_hands" // waiting for a human power cycle
 	StateOffline    DeviceState = "offline"     // idle and not heartbeating
+	// StateLeft: lab-agent uninstall told labd the Mac is leaving the lab. Its
+	// jobs were canceled and nothing recovers it; it stays until lab forget.
+	StateLeft DeviceState = "left"
 )
 
 // Model decides which human instructions a device gets.
@@ -452,6 +455,18 @@ type DevicePatch struct {
 	Model *string    `json:"model,omitempty"`
 	OOB   *OOBConfig `json:"oob,omitempty"`
 	NoOOB bool       `json:"no_oob,omitempty"`
+}
+
+// LeaveRequest is lab-agent uninstall telling labd, before it undoes
+// anything, that the Mac is leaving the lab.
+type LeaveRequest struct {
+	Reason string   `json:"reason"`         // what is taking it out, e.g. "lab-agent uninstall --force"
+	Jobs   []string `json:"jobs,omitempty"` // the jobs the Mac still had in flight, as it sees them
+}
+
+type LeaveResponse struct {
+	Name     string   `json:"name"`
+	Canceled []string `json:"canceled,omitempty"` // the Mac's running and queued jobs, canceled
 }
 
 type LeaseRequest struct {

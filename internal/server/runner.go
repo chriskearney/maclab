@@ -93,20 +93,29 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	// A source is built (or an identical earlier build reused) before the Mac is needed.
 	if j.Spec.Source != "" && j.Spec.Kernel == "" {
 		if outcome, summary := r.build(ctx); outcome != "" {
+			if why := v.leaving(); why != "" {
+				outcome, summary = api.OutcomeCanceled, "canceled: "+why
+			}
 			r.finish(outcome, summary)
 			return
 		}
 	}
 
-	// Queued jobs wait for the Mac, including for a human to power cycle it.
+	// Queued jobs wait for the Mac, including for a human to power cycle it,
+	// but not for one that left the lab.
 	v.mu.Lock()
 	ready := v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
 	v.mu.Unlock()
 	if !ready {
 		r.ev("waiting for %s to be ready (%s)", j.Spec.Device, v.snapshot().State)
-		if err := v.waitFor(ctx, 0, func() bool {
-			return v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
-		}); err != nil {
+		err := v.waitFor(ctx, 0, func() bool {
+			return v.d.State == api.StateLeft || v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
+		})
+		if why := v.leaving(); why != "" {
+			r.finish(api.OutcomeCanceled, "canceled: "+why)
+			return
+		}
+		if err != nil {
 			r.finish(api.OutcomeCanceled, "canceled while waiting for the device")
 			return
 		}
@@ -151,11 +160,21 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	if ctx.Err() != nil && outcome != api.OutcomeCanceled {
 		outcome, summary = api.OutcomeCanceled, "canceled: "+summary
 	}
+	left := v.leaving()
+	if left != "" {
+		outcome, summary = api.OutcomeCanceled, "canceled: "+left
+	}
 
-	// Always put the Mac back on its known-good kernel, even after a cancel.
+	// Always put the Mac back on its known-good kernel, even after a cancel,
+	// unless it is leaving the lab: its agent is stopping, so a restore would
+	// only time out and walk the recovery ladder.
 	rctx, cancel := context.WithTimeout(s.ctx, 3*r.boot+5*time.Minute)
 	defer cancel()
-	if v.snapshot().State != api.StateNeedsHands {
+	switch {
+	case left != "":
+		r.ev("not restoring the known-good kernel: %s", left)
+		summary += "; not restored: lab-agent uninstall clears the lab's one-shot and staged kernels"
+	case v.snapshot().State != api.StateNeedsHands:
 		if err := r.restore(rctx); err != nil {
 			r.ev("restore: %v", err)
 			if outcome == api.OutcomePass {
@@ -163,7 +182,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 			}
 			summary += "; restore failed: " + err.Error()
 		}
-	} else {
+	default:
 		summary += ". " + v.snapshot().Name + " needs a human power cycle; the lab cleans up the staged kernel when it is back"
 	}
 	if j.Spec.Baseline && outcome == api.OutcomePass {

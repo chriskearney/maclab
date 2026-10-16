@@ -11,6 +11,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/user"
@@ -46,7 +47,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel, tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
   lab lease <device> [--ttl 1h] | lab release <device>
-  lab forget <device>                 take a Mac out of the lab (after lab-agent uninstall); its jobs stay
+  lab forget <device> [--force]       take a Mac out of the lab (after lab-agent uninstall); its jobs stay.
+                                      Refused while someone else leases it or its agent checks in, unless --force
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
   lab installed freeze-entry <device> --release R    freeze the installer's boot entry, after the install
   lab installed promote <device> --release R --job <id> --accepted-by <who>
@@ -533,11 +535,19 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		return nil
 
 	case "forget":
+		force := fs.Bool("force", false, "forget it even while someone else holds a lease on it, or its lab-agent still checks in")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab forget <device>"); err != nil {
+		if err := need(pos, 1, "lab forget <device> [--force]"); err != nil {
 			return err
 		}
-		if err := c.ForgetDevice(ctx, pos[0]); err != nil {
+		err := c.ForgetDevice(ctx, pos[0], holder(), *force)
+		// a forget run twice, or after a forget that timed out, is done already
+		var se *client.StatusError
+		if errors.As(err, &se) && se.Code == http.StatusNotFound {
+			fmt.Printf("%s is not in the lab: nothing to forget\n", pos[0])
+			return nil
+		}
+		if err != nil {
 			return err
 		}
 		fmt.Printf("forgot %s; its jobs stay. `lab enroll %s` adds it again.\n", pos[0], pos[0])

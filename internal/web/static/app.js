@@ -141,6 +141,7 @@ function applyTheme() {
 const STATE = {
   ready: ['c-ok', 'Ready'], busy: ['c-info live', 'Testing'], recovering: ['c-warn live', 'Recovering'],
   needs_hands: ['c-bad live', 'Needs hands'], offline: ['c-dim', 'Offline'], new: ['c-odd', 'Needs baseline'],
+  left: ['c-dim', 'Left the lab'],
 };
 const OUTCOME = {
   pass: ['c-ok', 'check', 'Passed'], tests_failed: ['c-warn', 'close', 'Tests failed'],

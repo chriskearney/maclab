@@ -23,7 +23,7 @@ const usage = `lab-agent: the Mac side of the test lab
 
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin] [--volatile-journal]
         [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
-  sudo lab-agent uninstall [--dry-run] [--force]   undo everything setup did
+  sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)

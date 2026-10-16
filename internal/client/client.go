@@ -72,7 +72,7 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return fmt.Errorf("%s", strings.TrimSpace(string(b)))
+		return &StatusError{Code: resp.StatusCode, Msg: strings.TrimSpace(string(b))}
 	}
 	switch o := out.(type) {
 	case nil:
@@ -83,6 +83,14 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, ou
 	}
 	return nil
 }
+
+// StatusError is labd turning a request down: the HTTP status, and what labd said.
+type StatusError struct {
+	Code int
+	Msg  string
+}
+
+func (e *StatusError) Error() string { return e.Msg }
 
 func jsonBody(v any) io.Reader {
 	b, _ := json.Marshal(v)
@@ -123,9 +131,15 @@ func (c *Client) Lease(ctx context.Context, name, holder string, ttl time.Durati
 	return &out, c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/lease", jsonBody(api.LeaseRequest{Holder: holder, TTLSec: int(ttl.Seconds())}), &out)
 }
 
-// ForgetDevice takes a Mac out of the lab; its jobs stay.
-func (c *Client) ForgetDevice(ctx context.Context, name string) error {
-	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name), nil, nil)
+// ForgetDevice takes a Mac out of the lab; its jobs stay. force forgets it
+// even while someone other than holder holds a lease on it, or its agent
+// still checks in.
+func (c *Client) ForgetDevice(ctx context.Context, name, holder string, force bool) error {
+	q := url.Values{"holder": {holder}}
+	if force {
+		q.Set("force", "1")
+	}
+	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name)+"?"+q.Encode(), nil, nil)
 }
 
 func (c *Client) Release(ctx context.Context, name, holder string) error {

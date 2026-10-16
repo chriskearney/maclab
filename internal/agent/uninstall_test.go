@@ -2,16 +2,24 @@ package agent
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	osuser "os/user"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/iconidentify/maclab/internal/api"
 )
 
 // labMac is what setup leaves on a Limine Mac, under a temp root.
@@ -565,4 +573,117 @@ func TestUninstallForceWithoutBootloader(t *testing.T) {
 	}
 	m.kept(t, workDir, altStage+"/j1")
 	m.gone(t, sysctlPath, unitPath) // everything else went
+}
+
+// fakeLabd answers /api/agent/leave the way labd does, and notes when the
+// call came: it must come before uninstall stops the agent.
+type fakeLabd struct {
+	srv     *httptest.Server
+	mu      sync.Mutex
+	reqs    []api.LeaveRequest
+	auth    []string
+	stopped atomic.Bool // lab-agent.service was stopped
+	early   bool        // a call came before that
+}
+
+func newFakeLabd(t *testing.T) *fakeLabd {
+	f := &fakeLabd{}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || r.URL.Path != "/api/agent/leave" {
+			http.NotFound(w, r)
+			return
+		}
+		var req api.LeaveRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		f.mu.Lock()
+		f.reqs, f.auth = append(f.reqs, req), append(f.auth, r.Header.Get("Authorization"))
+		f.early = !f.stopped.Load()
+		f.mu.Unlock()
+		json.NewEncoder(w).Encode(api.LeaveResponse{Name: "m1air", Canceled: req.Jobs})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// labMacFor is a lab Mac whose agent config points at server, telling labd
+// for real (Leave), with job j1 staged and its one-shot armed.
+func labMacFor(t *testing.T, server string, stopped *atomic.Bool) *labMac {
+	m := newLabMac(t)
+	cfg := `{"server":"` + server + `","name":"m1air","secret":"s3cret"}`
+	if err := os.WriteFile(m.u.path(ConfigPath), []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	m.u.leave = Leave
+	record := m.u.cmd
+	m.u.cmd = func(name string, args ...string) error {
+		if stopped != nil && strings.Join(args, " ") == "disable --now lab-agent.service" {
+			stopped.Store(true)
+		}
+		return record(name, args...)
+	}
+	stageLimineEntry(t, m.lim, "j1")
+	m.lim.writeEntries()
+	armOneShot(t, "maclab-j1")
+	m.u.force = true
+	return m
+}
+
+// uninstall --force mid-job tells labd first, with the job in flight, so labd
+// cancels it instead of resetting the Mac once the agent goes quiet.
+func TestUninstallTellsLabd(t *testing.T) {
+	f := newFakeLabd(t)
+	m := labMacFor(t, f.srv.URL, &f.stopped)
+
+	// a dry run only says it would
+	if err := m.again(true); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	n := len(f.reqs)
+	f.mu.Unlock()
+	if n != 0 || !slices.Contains(m.out, "would tell labd at "+f.srv.URL+" that m1air is leaving the lab") {
+		t.Fatalf("dry run: %d calls\n%s", n, strings.Join(m.out, "\n"))
+	}
+
+	if err := m.again(false); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.reqs) != 1 || f.auth[0] != "Bearer s3cret" || !f.early {
+		t.Fatalf("calls %+v auth %q, before the agent stopped: %v", f.reqs, f.auth, f.early)
+	}
+	if r := f.reqs[0]; r.Reason != "lab-agent uninstall --force with j1 in flight" || !reflect.DeepEqual(r.Jobs, []string{"j1"}) {
+		t.Fatalf("told labd %+v", r)
+	}
+	if !slices.Contains(m.out, "told labd at "+f.srv.URL+" that m1air is leaving the lab; it canceled j1") {
+		t.Errorf("output:\n%s", strings.Join(m.out, "\n"))
+	}
+	if last := m.out[len(m.out)-1]; last != "uninstalled. labd lists this Mac as m1air, left: `lab forget m1air` takes it off the list" {
+		t.Errorf("last line %q", last)
+	}
+	m.gone(t, workDir, ConfigPath)
+}
+
+// With labd unreachable, uninstall still goes ahead, and says labd wasn't
+// told and what to run on the controller instead.
+func TestUninstallLabdUnreachable(t *testing.T) {
+	f := newFakeLabd(t)
+	url := f.srv.URL
+	f.srv.Close()
+	m := labMacFor(t, url, nil)
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	m.gone(t, workDir, ConfigPath, unitPath)
+	todo := "`lab cancel j1`, then `lab forget m1air`"
+	said := slices.ContainsFunc(m.out, func(l string) bool {
+		return strings.HasPrefix(l, "labd at "+url+" was not told that m1air is leaving the lab (") && strings.HasSuffix(l, "On the controller, run "+todo)
+	})
+	if !said {
+		t.Errorf("output:\n%s", strings.Join(m.out, "\n"))
+	}
+	if last := m.out[len(m.out)-1]; last != "uninstalled, but labd wasn't told: on the controller, run "+todo {
+		t.Errorf("last line %q", last)
+	}
 }

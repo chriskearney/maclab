@@ -377,6 +377,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/report", s.agent(s.hReport))
 	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
+	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
 	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
@@ -882,13 +883,17 @@ func (s *Server) hPatchDevice(w http.ResponseWriter, r *http.Request) {
 
 // hForgetDevice takes a Mac out of the lab: after `lab-agent uninstall`, or so
 // it can enroll again under the same name. Its jobs stay in the history. A
-// Mac with a job running, queued, or unfinished in the store is refused.
+// Mac with a job running, queued, or unfinished in the store is refused. So,
+// unless ?force=1, is one someone other than ?holder= holds a lease on
+// (forgetting it would end the lease and cut their lab shell), and one whose
+// agent still checks in.
 func (s *Server) hForgetDevice(w http.ResponseWriter, r *http.Request) {
 	v := s.devOr404(w, r)
 	if v == nil {
 		return
 	}
-	if code, err := s.forget(v); err != nil {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	if code, err := s.forget(v, r.URL.Query().Get("holder"), force); err != nil {
 		httpErr(w, code, "%v", err)
 		return
 	}
@@ -899,8 +904,10 @@ func (s *Server) hForgetDevice(w http.ResponseWriter, r *http.Request) {
 // forget deletes v's row and drops it from devs, ending its device loop and
 // out-of-band stream. It holds v.mu throughout, as every save of v does, and
 // marks v forgotten before letting go: nothing still holding v can then
-// write the row back, and Submit queues nothing more on it.
-func (s *Server) forget(v *dev) (int, error) {
+// write the row back, and Submit queues nothing more on it. A lease held by
+// holder doesn't count; force skips the lease and live-agent checks, never
+// the job check.
+func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	name := v.d.Name
@@ -915,6 +922,17 @@ func (s *Server) forget(v *dev) (int, error) {
 	}
 	if v.d.State == api.StateBusy || v.d.State == api.StateRecovering || len(v.queue) > 0 || len(open) > 0 {
 		return 409, fmt.Errorf("%s has a job running or queued; cancel it first", name)
+	}
+	if l := v.d.Lease; !force && l != nil && time.Now().Before(l.Expires) && l.Holder != holder {
+		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s --holder %s`), or pass --force",
+			name, l.Holder, l.Expires.Format(time.DateTime), name, l.Holder)
+	}
+	// An agent that told labd it is leaving may still check in until
+	// uninstall has stopped it. Any other one that checks in is still set up,
+	// and would only get 401s once its row is gone.
+	if seen := v.d.LastSeen; !force && v.d.State != api.StateLeft && !seen.IsZero() && time.Since(seen) < s.cfg.OfflineAfter {
+		return 409, fmt.Errorf("%s's lab-agent checked in %s ago, so it is still set up: run `sudo lab-agent uninstall` on the Mac first, or pass --force",
+			name, time.Since(seen).Round(time.Second))
 	}
 	if err := s.store.deleteDevice(v.d.ID); err != nil {
 		return 500, err
@@ -1136,6 +1154,9 @@ func (s *Server) submit(spec api.JobSpec, retryOf string) (*api.Job, int, error)
 		return nil, 400, fmt.Errorf("unknown crash mode %q", spec.Crash)
 	}
 	d := s.view(v)
+	if d.State == api.StateLeft {
+		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
+	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {
 			return nil, 400, errors.New("baseline and crash-test jobs boot the known-good cmdline; drop --cmdline-base/--cmdline-strip")

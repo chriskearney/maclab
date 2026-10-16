@@ -69,6 +69,7 @@ type lab struct {
 	cancel context.CancelFunc
 	url    string
 	name   string // the simulated Mac
+	secret string // its device secret
 }
 
 func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "sim-mac") }
@@ -120,6 +121,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 	if err != nil {
 		t.Fatal(err)
 	}
+	l.secret = resp.Secret
 	a := agent.New(&agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir()}, sim, quiet)
 	go a.Run(ctx)
 	if withOOB {

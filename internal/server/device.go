@@ -42,6 +42,9 @@ type dev struct {
 	// forgotten: lab forget deleted the device's row. Set under mu, which
 	// every save holds, so nothing still holding the device writes it back.
 	forgotten bool
+	// leftBy is what took the Mac out of the lab ("lab-agent uninstall
+	// --force"), set with StateLeft; empty after labd restarts.
+	leftBy string
 
 	shotMu     sync.Mutex
 	screenAt   time.Time
@@ -106,6 +109,17 @@ func (v *dev) saveLocked() {
 	}
 }
 
+// leaving says that lab-agent uninstall took the Mac out of the lab, and
+// how, or "" while it is still in the lab.
+func (v *dev) leaving() string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.d.State != api.StateLeft {
+		return ""
+	}
+	return fmt.Sprintf("%s left the lab (%s)", v.d.Name, orStr(v.leftBy, "lab-agent uninstall"))
+}
+
 func (v *dev) aliveLocked() bool {
 	return !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) < aliveWindow
 }
@@ -118,6 +132,11 @@ func (v *dev) setState(st api.DeviceState, reason string) {
 
 func (v *dev) setStateLocked(st api.DeviceState, reason string) {
 	if v.d.State == st && v.d.StateReason == reason {
+		return
+	}
+	// A Mac that left the lab stays left until lab forget: a job ending or a
+	// recovery finishing must not put it back in the pool.
+	if v.d.State == api.StateLeft {
 		return
 	}
 	v.d.State, v.d.StateReason = st, reason

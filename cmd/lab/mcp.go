@@ -41,7 +41,7 @@ func serveMCP(ctx context.Context) error {
 	}
 
 	type none struct{}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_devices", Description: "List test Macs: state (ready, busy, recovering, needs_hands, offline, new), recovery tier, running kernel, lease, and any action a human must take."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_devices", Description: "List test Macs: state (ready, busy, recovering, needs_hands, offline, new, left), recovery tier, running kernel, lease, and any action a human must take."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ none) (*mcp.CallToolResult, any, error) {
 			d, err := c.Devices(ctx)
 			return text(d), nil, err

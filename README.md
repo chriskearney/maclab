@@ -248,7 +248,11 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 
 No other job runs on a Mac until its baseline passes.
 
-To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made: it stops
+To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made. First it
+tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, saying why, lists it as
+`left`, and from then on neither resets it nor asks for hands, as it otherwise would once the agent
+stops mid-job. If labd can't be reached, uninstall goes on, and says so and what to run on the
+controller instead (`lab cancel <job>`, then `lab forget <device>`). Then it stops
 and removes the agent and its config (with the device secret), clears a lab one-shot, removes the
 maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
 the modules the lab installed, and the panic, watchdog, serial-getty and autologin settings, and
@@ -261,7 +265,10 @@ Without `--force`, it refuses while a job is in flight or the bootloader can't b
 bootloader it can't find is left alone, and so is `/var/lib/maclab`. `--dry-run` prints each action,
 or the refusal, without taking it. labd still lists the Mac afterwards:
 `lab forget <device>` on the controller drops it (its jobs stay), so it can enroll again under the
-same name.
+same name. It refuses a Mac with a job running or queued, and, unless given `--force`, one that
+someone else holds a lease on (forgetting it would end their lease and cut their `lab shell`) or
+whose agent still checks in and never said it was leaving. Forgetting a Mac labd doesn't know is done
+already: `lab forget` says so and exits 0.
 
 ### Out-of-band control from a macOS host
 

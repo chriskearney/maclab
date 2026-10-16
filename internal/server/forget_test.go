@@ -29,7 +29,7 @@ func (l *lab) adminDo(method, path string) int {
 }
 
 // After lab-agent uninstall a Mac is forgotten, and can then enroll again
-// under the same name; a Mac with a job is refused.
+// under the same name; a Mac with a job is refused, even with --force.
 func TestForgetDevice(t *testing.T) {
 	l := newLab(t, false)
 	v := l.s.dev(l.name)
@@ -37,7 +37,7 @@ func TestForgetDevice(t *testing.T) {
 	v.mu.Lock()
 	v.d.State = api.StateBusy
 	v.mu.Unlock()
-	if code := l.adminDo("DELETE", "/api/devices/"+l.name); code != http.StatusConflict {
+	if code := l.adminDo("DELETE", "/api/devices/"+l.name+"?force=1"); code != http.StatusConflict {
 		t.Fatalf("forgetting a busy Mac: %d", code)
 	}
 	v.mu.Lock()
@@ -49,13 +49,14 @@ func TestForgetDevice(t *testing.T) {
 	if err := l.s.store.saveJob(open); err != nil {
 		t.Fatal(err)
 	}
-	if code := l.adminDo("DELETE", "/api/devices/"+l.name); code != http.StatusConflict {
+	if code := l.adminDo("DELETE", "/api/devices/"+l.name+"?force=1"); code != http.StatusConflict {
 		t.Fatalf("forgetting a Mac with an unfinished job: %d", code)
 	}
 	open.State = api.JobDone
 	l.s.store.saveJob(open)
 
-	if code := l.adminDo("DELETE", "/api/devices/"+l.name); code != http.StatusOK {
+	// its agent still checks in: TestForgetRefusesLeaseAndLiveAgent
+	if code := l.adminDo("DELETE", "/api/devices/"+l.name+"?force=1"); code != http.StatusOK {
 		t.Fatalf("forget: %d", code)
 	}
 	if code := l.adminDo("GET", "/api/devices/"+l.name); code != http.StatusNotFound {
@@ -88,7 +89,7 @@ func TestForgetDeviceTwiceAtOnce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			req, _ := http.NewRequest("DELETE", l.url+"/api/devices/"+l.name, nil)
+			req, _ := http.NewRequest("DELETE", l.url+"/api/devices/"+l.name+"?force=1", nil)
 			req.Header.Set("Authorization", "Bearer admin")
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
@@ -116,7 +117,7 @@ func TestForgetDeviceTwiceAtOnce(t *testing.T) {
 func TestForgetThenLateSave(t *testing.T) {
 	l := newLab(t, false)
 	v := l.s.dev(l.name)
-	if code := l.adminDo("DELETE", "/api/devices/"+l.name); code != http.StatusOK {
+	if code := l.adminDo("DELETE", "/api/devices/"+l.name+"?force=1"); code != http.StatusOK {
 		t.Fatalf("forget: %d", code)
 	}
 	late := func() {
@@ -162,7 +163,7 @@ func TestForgetThenLateSave(t *testing.T) {
 func TestSubmitToForgottenMac(t *testing.T) {
 	l := newLab(t, false)
 	v := l.s.dev(l.name)
-	if code, err := l.s.forget(v); err != nil {
+	if code, err := l.s.forget(v, "", true); err != nil {
 		t.Fatalf("forget: %d %v", code, err)
 	}
 	// as if Submit had looked v up just before the forget
