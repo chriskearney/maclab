@@ -42,9 +42,9 @@ func testTimeout(t api.TestSpec) time.Duration {
 	return 5 * time.Minute
 }
 
-func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult {
+func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	if t.Builtin == suspendDevicesTest {
-		return suspendDevices(ctx, t, outDir, l.GUIUser)
+		return suspendDevices(ctx, t, outDir, l.GUIUser, quiet)
 	}
 	res := api.TestResult{Name: t.Name}
 	fail := func(err error) api.TestResult { res.Error = err.Error(); res.ExitCode = -1; return res }

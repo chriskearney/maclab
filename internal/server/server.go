@@ -196,7 +196,7 @@ func (s *Server) monitor() {
 			v.mu.Lock()
 			// After a restart, agents need a moment to reconnect before silence means anything.
 			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && time.Since(s.start) > s.cfg.OfflineAfter
-			if idle && !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) > s.cfg.OfflineAfter {
+			if idle && !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(time.Now()) {
 				v.restore = v.d.State
 				why := "no heartbeat since " + v.d.LastSeen.Format(time.TimeOnly)
 				if !v.asleep.IsZero() {

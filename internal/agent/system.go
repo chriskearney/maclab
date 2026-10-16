@@ -11,6 +11,10 @@ import (
 // Fetcher downloads an artifact by sha256 into dst and verifies it.
 type Fetcher func(ctx context.Context, sha, dst string) error
 
+// Quieter tells labd, before the Mac goes off the network, how long it may be
+// off on this boot, so that labd doesn't count it as lost meanwhile.
+type Quieter func(ctx context.Context, d time.Duration) error
+
 // System is everything the agent does to the machine. Linux is the real
 // implementation; Sim stands in for a Mac in tests.
 type System interface {
@@ -25,7 +29,9 @@ type System interface {
 
 	Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetcher) (api.StageResult, error)
 	BootOnce(entry string) error
-	RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult
+	// RunTest runs a test; a test that takes the network down (suspend-devices)
+	// tells labd first with quiet.
+	RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult
 	Collect(ctx context.Context, boot, outDir string) error
 	Cleanup(job string, all bool) error
 	// Screenshot captures the GUI session as JPEG to path.

@@ -210,6 +210,16 @@ func (a *Agent) feedWatchdog(ctx context.Context, w io.Writer) {
 	a.log.Printf("test boot: holding the hardware watchdog, fed while PID 1 answers and each step is within its budget")
 }
 
+// quiet tells labd that this boot is about to go off the network for up to
+// d, and returns once labd has heard it, or after a few seconds without.
+func (a *Agent) quiet(ctx context.Context, d time.Duration) error {
+	bootID, _, _ := a.sys.Identity()
+	ctx, cancel := context.WithTimeout(ctx, 4*time.Second)
+	defer cancel()
+	q := api.Quiet{BootID: bootID, Seconds: int((d + time.Second - 1) / time.Second)}
+	return postJSON(ctx, a.http, a.url("/api/agent/report"), a.cfg.Secret, api.Report{Quiet: &q}, nil)
+}
+
 // sleeping tells labd the Mac is about to suspend, before it does, and that
 // it has resumed. Anything still running (a test that suspends) carries on.
 func (a *Agent) sleeping(asleep bool) {
@@ -417,7 +427,7 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		res := a.sys.RunTest(ctx, c.JobID, t, func(ctx context.Context, sha, dst string) error {
 			defer start()
 			return fetch(ctx, sha, dst)
-		}, dir)
+		}, a.quiet, dir)
 		start()
 		done()
 		res.Files = a.uploadDir(ctx, c.JobID, "test-"+t.Name, dir)

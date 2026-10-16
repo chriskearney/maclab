@@ -63,16 +63,21 @@ AI agents get the same operations over MCP (`lab mcp`).
    noirq phases, nor the sleep itself), waits 5 s and resumes them by itself.
    The test passes if that cycle's kernel log shows the wait (which comes only
    once those callbacks succeeded) and no device failing to suspend or resume,
-   and the default route comes back. On a kernel without `pm_test`
-   (`CONFIG_PM_DEBUG`) it passes, saying SKIP in its log. `pm_test` goes back to the mode it
+   and the default route comes back. On a kernel without `pm_test`'s `devices`
+   mode (`CONFIG_PM_DEBUG`) it is skipped, which is not a pass: the job ends
+   `tests_failed`. `pm_test` goes back to the mode it
    had, but to `none` only once nothing is left that could suspend the Mac; if
    a suspend that didn't finish in time never settles, it stays at `devices`
    until the next boot, so a later suspend is a test one too. Omarchy locks the
    desktop before every suspend, and only the user's password unlocks it, so
    the test stops the GUI user's `omarchy-sleep-lock.service` for the cycle and
-   starts it again after. The Mac goes quiet for 10-15 s (NetworkManager takes
-   Wi-Fi down for the suspend); labd waits out up to a minute of that, as it
-   would a Wi-Fi drop, before counting the Mac as lost. A real suspend can't be
+   starts it again after. All of it, putting things back too, ends within the
+   test's timeout (5 minutes by default). The Mac goes quiet for 10-15 s
+   (NetworkManager takes Wi-Fi down for the suspend), so just before it
+   suspends, the test tells labd how long the Mac may be off the network (3.5
+   minutes: the waits for the cycle, for it to settle and for the route, or
+   what is left of the timeout), and labd waits that out on that boot before
+   counting the Mac as lost. A real suspend can't be
    tested unattended: Apple Silicon's RTC has no wake alarm, so only a key
    press wakes the Mac (a reset ends the boot). labd warns when a test named
    `suspend-*` needs someone there.

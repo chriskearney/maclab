@@ -609,7 +609,7 @@ function overview(j) {
   return `
     ${r.tests?.length ? `<div class="section"><div class="h">Tests</div><div class="tests">${r.tests.map(t => `
       <details class="test"><summary><span class="st ${t.passed ? 'ok' : 'bad'}">${I[t.passed ? 'check' : t.timed_out ? 'sand' : 'close']}</span>
-        <span class="nm">${esc(t.name)}</span><span class="tm">${t.passed ? `passed · ${dur(t.seconds)}` : t.timed_out ? 'timed out' : t.error ? esc(t.error) : `exit ${t.exit_code}`}</span></summary>
+        <span class="nm">${esc(t.name)}</span><span class="tm">${t.passed ? `passed · ${dur(t.seconds)}` : t.skipped ? `skipped: ${esc(t.error)}` : t.timed_out ? 'timed out' : t.error ? esc(t.error) : `exit ${t.exit_code}`}</span></summary>
         ${t.tail ? `<pre class="term plain">${t.tail.split('\n').map(l => `<span class="l k-${lineKind(l)}">${esc(l)}</span>`).join('')}</pre>` : ''}
       </details>`).join('')}</div></div>` : ''}
     ${r.recovery?.length ? `<div class="section"><div class="h">Recovery</div><ul class="lines">${r.recovery.map(x => `<li style="--c:var(--warn)">${esc(x)}</li>`).join('')}</ul></div>`

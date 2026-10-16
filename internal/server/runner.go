@@ -515,6 +515,8 @@ func testVerdict(t api.TestResult) string {
 	switch {
 	case t.Passed:
 		return fmt.Sprintf("pass (%.0fs)", t.Seconds)
+	case t.Skipped:
+		return "skipped (not a pass): " + t.Error
 	case t.TimedOut:
 		return "timed out"
 	case t.Error != "":

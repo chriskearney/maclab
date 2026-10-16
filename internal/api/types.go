@@ -131,6 +131,16 @@ type Checkin struct {
 type Report struct {
 	Results []CommandResult `json:"results,omitempty"`
 	Events  []KernelEvent   `json:"events,omitempty"`
+	Quiet   *Quiet          `json:"quiet,omitempty"`
+}
+
+// Quiet is the agent saying, while it can, that the Mac is about to go off
+// the network on boot BootID for up to Seconds from now (suspend-devices,
+// whose suspend takes Wi-Fi down). labd waits that out on that boot before
+// it counts the Mac as lost.
+type Quiet struct {
+	BootID  string `json:"boot_id"`
+	Seconds int    `json:"seconds"`
 }
 
 type CheckinResponse struct {
@@ -260,14 +270,18 @@ type TestSpec struct {
 }
 
 type TestResult struct {
-	Name     string   `json:"name"`
-	Passed   bool     `json:"passed"`
-	ExitCode int      `json:"exit_code"`
-	Seconds  float64  `json:"seconds"`
-	TimedOut bool     `json:"timed_out,omitempty"`
-	Tail     string   `json:"tail,omitempty"`
-	Files    []string `json:"files,omitempty"`
-	Error    string   `json:"error,omitempty"`
+	Name     string  `json:"name"`
+	Passed   bool    `json:"passed"`
+	ExitCode int     `json:"exit_code"`
+	Seconds  float64 `json:"seconds"`
+	TimedOut bool    `json:"timed_out,omitempty"`
+	// Skipped: the test couldn't run on this Mac (its kernel lacks what the
+	// test needs), and Error says why. A skipped test is never Passed, so it
+	// fails the job like any other test that didn't pass.
+	Skipped bool     `json:"skipped,omitempty"`
+	Tail    string   `json:"tail,omitempty"`
+	Files   []string `json:"files,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 type JobState string

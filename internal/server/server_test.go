@@ -752,6 +752,61 @@ func TestShortQuietSpellDuringTest(t *testing.T) {
 	}
 }
 
+// suspend-devices tells labd, before it suspends, how long the Mac may be off
+// the network. labd waits that out on that boot, past quietGrace, and the
+// job passes with no recovery. The spell was for that boot only.
+func TestAnnouncedQuietSpellDuringTest(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.SuspendFor, l.sim.QuietFor = 5*time.Second, 8*time.Second // past quietGrace, inside what it announced
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"),
+		Tests: []api.TestSpec{{Name: "suspend-devices", Builtin: "suspend-devices"}, {Name: "after-resume", Builtin: "x"}}})
+	l.expect(j, api.OutcomePass)
+	var back bool
+	for _, e := range j.Events {
+		back = back || strings.Contains(e.Msg, "back on the same boot after")
+	}
+	if !back || len(j.Result.Recovery) != 0 || len(j.Result.Tests) != 3 {
+		t.Fatalf("back=%v recovery=%v tests=%+v events %v", back, j.Result.Recovery, j.Result.Tests, j.Events)
+	}
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	quiet := v.quietLocked(time.Now())
+	v.mu.Unlock()
+	if quiet {
+		t.Error("the known-good boot after the job is within the test boot's quiet spell")
+	}
+}
+
+// A Mac silent on the same boot is lost after quietGrace, unless it said it
+// may be off the network for longer on that boot (up to maxQuiet): then once
+// that spell is over.
+func TestQuietSpellWindow(t *testing.T) {
+	v := newDev(&Server{log: log.New(io.Discard, "", 0)}, api.Device{Name: "m1air", BootID: "b1"}, "")
+	now := time.Now()
+	v.d.LastSeen = now.Add(-quietGrace - time.Second)
+	lost := func(want bool, at time.Duration, when string) {
+		t.Helper()
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		if got := v.lostLocked(now.Add(at)); got != want {
+			t.Errorf("%s: lost %v, want %v", when, got, want)
+		}
+	}
+	lost(true, 0, "silent past quietGrace")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b0", Seconds: 600}})
+	lost(true, 0, "a spell announced for another boot")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 600}})
+	lost(false, 0, "within the spell")
+	lost(false, 9*time.Minute, "9 minutes into a 10-minute spell")
+	lost(true, 11*time.Minute, "after the spell")
+	v.report(api.Report{Quiet: &api.Quiet{BootID: "b1", Seconds: 86400}})
+	lost(false, maxQuiet-time.Minute, "a day's spell, a minute inside maxQuiet")
+	lost(true, maxQuiet+time.Minute, "a day's spell, past maxQuiet")
+	v.d.BootID = "b2"
+	lost(true, 0, "on the next boot")
+}
+
 // A test boot's watchdog deadline comes from the job's boot timeout: what is
 // left of it once the reset and the fallback boot are allowed for, and at
 // least a minute.
@@ -770,6 +825,14 @@ func TestTestBootWatchdogDeadline(t *testing.T) {
 		if !strings.Contains(j.Result.BootCmdline+" ", " "+c.want+" ") {
 			t.Errorf("boot timeout %ds: cmdline %q, want %s", c.boot, j.Result.BootCmdline, c.want)
 		}
+	}
+}
+
+// A skipped test isn't a pass: the job fails, and labd says it was skipped.
+func TestSkippedTestVerdict(t *testing.T) {
+	tr := api.TestResult{Name: "suspend-devices", Skipped: true, ExitCode: -1, Error: "the kernel has no pm_test devices mode (CONFIG_PM_DEBUG): no /sys/power/pm_test"}
+	if v := testVerdict(tr); v != "skipped (not a pass): "+tr.Error {
+		t.Errorf("verdict %q", v)
 	}
 }
 

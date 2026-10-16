@@ -211,7 +211,7 @@ func (s *wdSystem) Facts() api.Facts {
 	return f
 }
 
-func (s *wdSystem) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, outDir string) api.TestResult {
+func (s *wdSystem) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	if t.Script != "" {
 		if err := fetch(ctx, t.Script, filepath.Join(s.Sim.WorkDir, t.Name+".sh")); err != nil {
 			return api.TestResult{Name: t.Name, ExitCode: -1, Error: err.Error()}

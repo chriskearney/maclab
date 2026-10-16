@@ -55,6 +55,10 @@ type dev struct {
 
 	asleep time.Time // when the agent said the Mac is going to sleep; zero while awake
 	awoke  time.Time // when it said it woke up: quietGrace counts from here
+	// The agent said boot quietBoot may be off the network until quietUntil
+	// (api.Quiet): until then its silence doesn't make it lost or offline.
+	quietBoot  string
+	quietUntil time.Time
 
 	// heard is the last check-in from the Mac itself. LastSeen also moves when
 	// labd answers a held check-in, which a Mac that just died can't hear.
@@ -240,6 +244,11 @@ func (v *dev) deliver(bootID string) api.CheckinResponse {
 func (v *dev) report(rep api.Report) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID && q.Seconds > 0 {
+		d := min(time.Duration(q.Seconds)*time.Second, maxQuiet)
+		v.quietBoot, v.quietUntil = q.BootID, time.Now().Add(d)
+		v.s.log.Printf("%s: may be off the network for up to %s on boot %s", v.d.Name, d, short(q.BootID))
+	}
 	for _, r := range rep.Results {
 		if _, ok := v.inflight[r.ID]; ok {
 			delete(v.inflight, r.ID)
@@ -390,11 +399,30 @@ var quietGrace = 60 * time.Second
 // maxSleep is how long a command waits for a Mac that went to sleep.
 var maxSleep = time.Hour
 
+// maxQuiet is the longest spell off the network an agent can announce
+// (api.Quiet) that labd honours.
+var maxQuiet = 15 * time.Minute
+
+// quietLocked is whether the Mac is within a spell off the network it
+// announced for the boot it is on. Caller holds mu.
+func (v *dev) quietLocked(now time.Time) bool {
+	return v.quietBoot != "" && v.quietBoot == v.d.BootID && now.Before(v.quietUntil)
+}
+
+// lostLocked is whether a Mac silent on the same boot, and not asleep, has
+// been silent too long: quietGrace from its last check-in and from its last
+// wake-up, and past any spell off the network it announced for this boot.
+// Caller holds mu.
+func (v *dev) lostLocked(now time.Time) bool {
+	return now.Sub(v.d.LastSeen) > quietGrace && now.Sub(v.awoke) > quietGrace && !v.quietLocked(now)
+}
+
 // callNote is call for commands that may outlive a quiet spell. A Mac that
 // goes quiet on the same boot is asleep or off the network, and the command
 // is still running there: it waits, with the command's clock stopped, for as
-// long as the Mac said it is asleep (up to maxSleep), and quietGrace
-// otherwise. note, if set, hears about sleeping and waking.
+// long as the Mac said it is asleep (up to maxSleep), as long as it said it
+// may be off the network (up to maxQuiet), and quietGrace otherwise. note, if
+// set, hears about sleeping and waking.
 func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout time.Duration, out any, note func(string)) error {
 	v.mu.Lock()
 	boot := v.d.BootID
@@ -460,7 +488,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 				}
 				return false
 			}
-			if now.Sub(v.d.LastSeen) > quietGrace && now.Sub(v.awoke) > quietGrace {
+			if v.lostLocked(now) {
 				lost = true
 				return true
 			}
