@@ -548,35 +548,72 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "device %s already enrolled", req.Name)
 		return
 	}
-	s.issueToken(w, req)
+	s.issueToken(w, req, "")
 }
 
 // issueToken answers with a one-use enrollment token for req, good for a day.
-func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest) {
+// A token for volunteer, a tailnet viewer's login, replaces any unused one
+// they hold and counts toward maxVolunteerTokens (see addVolunteerToken).
+func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest, volunteer string) {
 	if req.Model == "" {
 		req.Model = api.ModelLaptop
 	}
 	tok := "enr_" + randHex(16)
 	exp := time.Now().Add(24 * time.Hour)
-	if err := s.store.addToken(hashSecret(tok), req, exp); err != nil {
+	var err error
+	if volunteer != "" {
+		err = s.store.addVolunteerToken(hashSecret(tok), req, volunteer, exp, maxVolunteerTokens)
+	} else {
+		err = s.store.addToken(hashSecret(tok), req, exp)
+	}
+	if errors.Is(err, errVolunteerTokens) {
+		httpErr(w, 429, "%d volunteers are signing up already: try again in a while, or ask the lab's maintainer", maxVolunteerTokens)
+		return
+	} else if err != nil {
 		httpErr(w, 500, "%v", err)
 		return
 	}
 	writeJSON(w, api.EnrollTokenResponse{Name: req.Name, Token: tok, Expires: exp})
 }
 
+// A viewer holds at most one unused volunteer token, and at most
+// maxVolunteerTokens viewers hold one, so tailnet peers can't fill labd's
+// token table. A request is a name and a model: volunteerBodyMax is plenty.
+const (
+	maxVolunteerTokens = 20
+	volunteerBodyMax   = 4 << 10
+)
+
 // hVolunteer gives anyone who may look at the lab, such as any tailnet peer
 // under --tailscale, a token to enroll their own Mac: ./volunteer runs
 // lab-agent setup with it. The Mac is named after what it sent, made into a
-// free device name, and labelled with the volunteer's tailnet login.
+// free device name, labelled with the volunteer's tailnet login and marked a
+// volunteer's. Tagged tailnet devices are machines, lab Macs among them, not
+// people, so they get no token. Admins may ask too, outside the limits: they
+// can make any token with POST /api/enroll-tokens anyway.
 func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
+	a, who := s.access(r)
+	volunteer := ""
+	if a != adminAccess {
+		if s.taggedPeer(r) {
+			httpErr(w, 403, "%s is a tagged tailnet device, a machine rather than a person: only a person may volunteer a Mac", who)
+			return
+		}
+		if volunteer = strings.ToLower(who); volunteer == "" {
+			httpErr(w, 403, "labd can't tell who you are on the tailnet")
+			return
+		}
+	}
 	var req api.EnrollTokenRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpErr(w, 400, "%v", err)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, volunteerBodyMax)).Decode(&req); err != nil {
+		code := 400
+		if errors.As(err, new(*http.MaxBytesError)) {
+			code = 413
+		}
+		httpErr(w, code, "%v", err)
 		return
 	}
-	_, who := s.access(r)
-	req.Label = who
+	req.Label, req.Volunteer = who, true
 	if req.Model != api.ModelDesktop {
 		req.Model = api.ModelLaptop
 	}
@@ -584,8 +621,14 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "no free device name")
 		return
 	}
-	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, who)
-	s.issueToken(w, req)
+	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(an admin)"))
+	s.issueToken(w, req, volunteer)
+}
+
+// taggedPeer reports whether r comes from a tagged tailnet device.
+func (s *Server) taggedPeer(r *http.Request) bool {
+	p := s.tailnetPeer(r)
+	return p != nil && len(p.Tags) > 0
 }
 
 var reNameRun = regexp.MustCompile(`[^a-z0-9]+`)
@@ -639,7 +682,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := "dev_" + randHex(24)
-	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, State: api.StateNew,
+	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, Volunteer: t.Volunteer, State: api.StateNew,
 		StateReason: "enrolled; run a baseline job", Facts: req.Facts}
 	v := newDev(s, d, hashSecret(secret))
 	s.mu.Lock()

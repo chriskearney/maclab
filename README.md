@@ -521,9 +521,14 @@ with them. `MACLAB_SERVER=http://<host>:7770 ./volunteer` skips the search.
 The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
 keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
 Then they share the labd machine with each volunteer's Tailscale account (admin
-console, Machines, Share), or invite them to the tailnet. Any tailnet peer labd
-lets look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
-name made from `<user>-<hostname>` and the volunteer's login as its label. Next
+console, Machines, Share), or invite them to the tailnet. Any person labd lets
+look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
+name made from `<user>-<hostname>` and the volunteer's login as its label, and
+is marked a volunteer's. Tagged tailnet devices, lab Macs under `tag:maclab`
+among them, are machines and get no token. Each person holds at most one unused
+token: asking again replaces it, so running `./volunteer` again after a setup
+that stopped half way just works. At most 20 people hold one at once; the next
+gets a 429 until one is used or expires a day later. Admins aren't limited. Next
 comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 `lab forget <name>`.
 

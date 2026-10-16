@@ -52,6 +52,7 @@ type Device struct {
 	Name        string       `json:"name"`
 	Label       string       `json:"label"` // physical description for humans
 	Model       string       `json:"model"`
+	Volunteer   bool         `json:"volunteer,omitempty"` // enrolled with ./volunteer: an agent the lab doesn't control, so lab gate leaves it out
 	OOB         *OOBConfig   `json:"oob,omitempty"`
 	State       DeviceState  `json:"state"`
 	StateReason string       `json:"state_reason,omitempty"`
@@ -417,6 +418,9 @@ type EnrollTokenRequest struct {
 	Name  string `json:"name"`
 	Label string `json:"label"`
 	Model string `json:"model"`
+	// Volunteer makes the Mac a volunteer's (see Device.Volunteer). labd sets
+	// it on every POST /api/volunteer token, whatever the request says.
+	Volunteer bool `json:"volunteer,omitempty"`
 }
 
 type EnrollTokenResponse struct {
