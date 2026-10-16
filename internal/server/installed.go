@@ -32,8 +32,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/installed"
 )
@@ -650,12 +648,12 @@ func publishDir(src, dst, last string) error {
 	if err := syncDir(tmp); err != nil {
 		return fmt.Errorf("syncing %s: %w", tmp, err)
 	}
-	if err := unix.Renameat2(unix.AT_FDCWD, tmp, unix.AT_FDCWD, dst, unix.RENAME_NOREPLACE); err != nil {
+	if err := renameNoReplace(tmp, dst); err != nil {
 		return fmt.Errorf("publishing %s: %w", dst, err)
 	}
 	if err := syncDir(filepath.Dir(dst)); err != nil {
 		// not durably published: take it back out of the frozen store's view
-		if qerr := unix.Renameat2(unix.AT_FDCWD, dst, unix.AT_FDCWD, tmp, unix.RENAME_NOREPLACE); qerr != nil {
+		if qerr := renameNoReplace(dst, tmp); qerr != nil {
 			return fmt.Errorf("syncing %s after publishing %s: %v; and moving it aside failed: %v", filepath.Dir(dst), dst, err, qerr)
 		}
 		return fmt.Errorf("syncing %s after publishing %s: %w; moved aside", filepath.Dir(dst), dst, err)

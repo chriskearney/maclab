@@ -16,7 +16,7 @@ AI agents get the same operations over MCP (`lab mcp`).
 
 | Binary | Runs on | Job |
 |---|---|---|
-| `labd` | any Linux box | Controller: devices, leases, job queue, recovery ladder, notifications, artifact and log store |
+| `labd` | any Linux box, or a Mac | Controller: devices, leases, job queue, recovery ladder, notifications, artifact and log store |
 | `lab-agent` | each test Mac (Omarchy/Asahi, aarch64) | Heartbeat. Stages kernels beside the known-good one, arms the one-shot boot, runs tests, uploads logs |
 | `oobd` | the controller host wired to a test Mac's DFU port | Hard reset and serial console. Today: a macOS Mac running `macvdmtool`. Later: a Linux box with a Central Scrutinizer |
 | `lab` | your machine | CLI, and `lab mcp` for agents |
