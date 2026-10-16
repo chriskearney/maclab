@@ -32,11 +32,15 @@ find_labs() {
 }
 
 # peer_name names the tailnet machine at address $1: its tailnet DNS name and
-# its host name, as tailscale status reports them.
+# its host name, as tailscale status reports them. The machine chose its host
+# name itself, so only printable ASCII is kept of either: a carriage return or
+# an escape sequence in it could rewrite the question it is shown in.
 peer_name() {
 	local name
-	name=$(tailscale status --json | jq -r --arg ip "$1" 'first(.Peer[]? | select(any(.TailscaleIPs[]?; . == $ip))) |
-		"\(.DNSName // "" | rtrimstr(".") | if . == "" then "(no DNS name)" else . end) (host name \(.HostName // "unknown"))"')
+	name=$(tailscale status --json | jq -r --arg ip "$1" 'def printable: tostring | gsub("[^ -~]"; "");
+		first(.Peer[]? | select(any(.TailscaleIPs[]?; . == $ip))) |
+		"\(.DNSName // "" | printable | rtrimstr(".") | if . == "" then "(no DNS name)" else . end)" +
+		" (host name \(.HostName // "" | printable | if . == "" then "unknown" else . end))"')
 	echo "${name:-a machine missing from tailscale status}"
 }
 
