@@ -52,7 +52,8 @@ type SetupOptions struct {
 	// failed lab boot's journal is lost.
 	VolatileJournal bool
 	// TailscaleAuthKey, a one-off key a maintainer made by hand, joins the
-	// lab's tailnet before anything else. It is never printed or stored.
+	// lab's tailnet before anything else. It is never printed or stored, and
+	// reaches tailscale in a file, not argv; lab-agent reads it with AuthKey.
 	TailscaleAuthKey  string
 	TailscaleHostname string // default maclab-<device name>, else this machine's hostname
 	Log               func(format string, args ...any)
@@ -84,7 +85,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 			return err
 		}
 	} else if o.TailscaleHostname != "" {
-		return fmt.Errorf("--tailscale-hostname needs --tailscale-authkey")
+		return fmt.Errorf("--tailscale-hostname needs --tailscale-authkey-file or --tailscale-authkey")
 	}
 
 	b, err := detectBootloader()

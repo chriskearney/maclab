@@ -2,9 +2,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -12,13 +14,15 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/iconidentify/maclab/internal/agent"
 )
 
 const usage = `lab-agent: the Mac side of the test lab
 
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin] [--volatile-journal]
-        [--tailscale-authkey tskey-auth-... [--tailscale-hostname name]]
+        [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
   sudo lab-agent uninstall [--dry-run] [--force]   undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
@@ -43,11 +47,30 @@ func main() {
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
 		volatile := fs.Bool("volatile-journal", false, "leave journald alone: a failed lab boot's journal is lost")
-		tsKey := fs.String("tailscale-authkey", "", "join the lab's tailnet first with this one-off auth key (tagged tag:maclab, Tailscale SSH on); never stored")
+		tsKeyFile := fs.String("tailscale-authkey-file", "", "join the lab's tailnet first with the one-off auth key in this file (tagged tag:maclab, Tailscale SSH on); never stored")
+		tsKey := fs.String("tailscale-authkey", "", "the one-off auth key, or - to read it from stdin; a key given here shows in the process list and sudo's journal")
 		tsHost := fs.String("tailscale-hostname", "", "name on the tailnet (default maclab-<device name>, else this machine's hostname)")
 		fs.Parse(os.Args[2:])
+		var stdin io.Reader = os.Stdin
+		if *tsKey == "-" && term.IsTerminal(int(os.Stdin.Fd())) {
+			fmt.Fprint(os.Stderr, "Tailscale auth key: ")
+			b, e := term.ReadPassword(int(os.Stdin.Fd()))
+			fmt.Fprintln(os.Stderr)
+			if e != nil {
+				log.Fatal(e)
+			}
+			stdin = bytes.NewReader(b)
+		}
+		key, warning, e := agent.AuthKey(*tsKey, *tsKeyFile, stdin)
+		if e != nil {
+			err = e
+			break
+		}
+		if warning != "" {
+			fmt.Fprintln(os.Stderr, "lab-agent: warning:", warning)
+		}
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, VolatileJournal: *volatile,
-			TailscaleAuthKey: *tsKey, TailscaleHostname: *tsHost,
+			TailscaleAuthKey: key, TailscaleHostname: *tsHost,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "uninstall":
 		dry := fs.Bool("dry-run", false, "print each action without taking it")

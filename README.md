@@ -576,16 +576,32 @@ networks no tailnet route leads into, or leave `--trust` off and use
 
 To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
 Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short
-expiry. Then on the Mac:
+expiry. Put it in a file only you can read (`(umask 077; cat > tskey)`), then
+on the Mac:
 
 ```sh
-sudo ./lab-agent setup --server http://<labd tailnet IP>:7770 --token enr_... --tailscale-authkey tskey-auth-...
+sudo ./lab-agent setup --server http://<labd tailnet IP>:7770 --token enr_... --tailscale-authkey-file tskey
 ```
 
-Before anything else, setup runs `tailscale up --auth-key=... --advertise-tags=tag:maclab
+`--tailscale-authkey -` reads the key from stdin instead, and asks for it when
+stdin is a terminal. A key given straight to `--tailscale-authkey` still
+works, with a warning: the process list and sudo's journal entry show it,
+and tailnet viewers can read that journal through labd.
+
+Before anything else, setup runs `tailscale up --auth-key=file:... --advertise-tags=tag:maclab
 --ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup
-uses the machine's hostname, since the lab name only arrives with enrollment)
-and checks that labd answers. It never prints or stores the key.
+uses the machine's hostname, since the lab name only arrives with enrollment).
+The key goes to tailscale in a root-only temporary file, removed as soon as
+`tailscale up` returns. On a Mac that is logged in already, setup adds
+`--force-reauth`, without which tailscale ignores the new key, so a rerun
+with a key from another tailnet really moves the Mac. If tailscale won't
+run without naming the Mac's other settings (an exit node, routes), setup
+runs it again with `--reset` and lists what went back to its default. Then
+it checks that the Mac has a new login, is tagged `tag:maclab`, and is on
+the tailnet labd is on (when `--server` is a tailnet address or a `ts.net`
+name), and that labd answers. It never prints or stores the key.
+Re-joining can cut a Tailscale SSH session, and tailscale may refuse to do
+it from one; run setup from the console or over plain SSH then.
 
 A minimal policy: Macs reach only labd, admins reach labd and SSH into the
 Macs as root, and the rest of the tailnet may view labd.
