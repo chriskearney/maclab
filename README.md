@@ -578,7 +578,9 @@ is marked a volunteer's: `lab gate` leaves its results out unless asked (see
 among them, are machines and get no token. Each person holds at most one unused
 token: asking again replaces it, so running `./volunteer` again after a setup
 that stopped half way just works. At most 20 people hold one at once; the next
-gets a 429 until one is used or expires a day later. Admins aren't limited. Next
+gets a 429 until one is used or expires a day later. Each person may have at
+most 3 Macs in the lab, counted by tailnet login; a fourth gets a 409 until
+`lab forget` drops one of them. Admins aren't limited. Next
 comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 `lab forget <name>`.
 

@@ -69,6 +69,11 @@ type Device struct {
 	Health      Health       `json:"health"`
 	Lease       *Lease       `json:"lease,omitempty"`
 	ActiveJob   string       `json:"active_job,omitempty"`
+
+	// VolunteeredBy is the tailnet login whose ./volunteer token enrolled the
+	// Mac, lowercased; empty for a token an admin asked for. It counts toward
+	// that login's limit of Macs (see POST /api/volunteer).
+	VolunteeredBy string `json:"volunteered_by,omitempty"`
 }
 
 // Tier is how much of the recovery ladder a device supports: 0 panic reboot only,
@@ -442,6 +447,9 @@ type EnrollTokenRequest struct {
 	// Volunteer makes the Mac a volunteer's (see Device.Volunteer). labd sets
 	// it on every POST /api/volunteer token, whatever the request says.
 	Volunteer bool `json:"volunteer,omitempty"`
+	// VolunteeredBy is the login that asked for a volunteer token, set by
+	// labd only (see Device.VolunteeredBy).
+	VolunteeredBy string `json:"-"`
 }
 
 type EnrollTokenResponse struct {

@@ -579,19 +579,75 @@ func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest, v
 
 // A viewer holds at most one unused volunteer token, and at most
 // maxVolunteerTokens viewers hold one, so tailnet peers can't fill labd's
-// token table. A request is a name and a model: volunteerBodyMax is plenty.
+// token table. One viewer's tokens enroll at most maxVolunteerMacs Macs, so
+// one login can't fill the lab either. A request is a name and a model:
+// volunteerBodyMax is plenty.
 const (
 	maxVolunteerTokens = 20
+	maxVolunteerMacs   = 3
 	volunteerBodyMax   = 4 << 10
 )
+
+// Agents' requests are small, except for command results. Real ones stay far
+// below these limits: an enrollment or a check-in carries the Mac's facts, a
+// few KB, which every viewer downloads again with /api/devices. A report
+// carries command results, the largest an exec's output (1 MB per stream,
+// which JSON's escapes can make 6 MB), a journal of up to 20000 lines or the
+// kernel's .config, and up to 500 kernel events. Files go to
+// /api/agent/upload and /api/agent/screen, which these don't limit.
+const (
+	enrollBodyMax  = 256 << 10
+	checkinBodyMax = 256 << 10
+	reportBodyMax  = 64 << 20
+)
+
+// decodeBody decodes r's JSON body into v. A body over max bytes gets a 413,
+// unread if its Content-Length says so, and a malformed one a 400;
+// decodeBody answers the request then, and returns false.
+func decodeBody(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
+	if r.ContentLength > max {
+		httpErr(w, 413, "a request body of %d bytes is over labd's limit of %d", r.ContentLength, max)
+		return false
+	}
+	err := json.NewDecoder(http.MaxBytesReader(w, r.Body, max)).Decode(v)
+	if err == nil {
+		return true
+	}
+	code := 400
+	if errors.As(err, new(*http.MaxBytesError)) {
+		code = 413
+	}
+	httpErr(w, code, "%v", err)
+	return false
+}
+
+// volunteerMacsLocked names the Macs that login's volunteer tokens enrolled,
+// left ones included until lab forget drops them. The caller holds s.mu.
+func (s *Server) volunteerMacsLocked(login string) []string {
+	var names []string
+	for name, v := range s.devs {
+		if v.volunteeredBy == login {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// tooManyMacs is the answer to a volunteer who has maxVolunteerMacs already.
+func tooManyMacs(w http.ResponseWriter, login string, names []string) {
+	httpErr(w, 409, "%s has volunteered %d Macs already (%s), as many as one person may: to put in another, take one out first "+
+		"(./volunteer leave on it, then the lab's maintainer runs `lab forget <name>`)", login, len(names), strings.Join(names, ", "))
+}
 
 // hVolunteer gives anyone who may look at the lab, such as any tailnet peer
 // under --tailscale, a token to enroll their own Mac: ./volunteer runs
 // lab-agent setup with it. The Mac is named after what it sent, made into a
 // free device name, labelled with the volunteer's tailnet login and marked a
 // volunteer's. Tagged tailnet devices are machines, lab Macs among them, not
-// people, so they get no token. Admins may ask too, outside the limits: they
-// can make any token with POST /api/enroll-tokens anyway.
+// people, so they get no token, and a person with maxVolunteerMacs Macs in
+// the lab gets none either. Admins may ask too, outside the limits: they can
+// make any token with POST /api/enroll-tokens anyway.
 func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	a, who := s.access(r)
 	volunteer := ""
@@ -604,14 +660,16 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 403, "labd can't tell who you are on the tailnet")
 			return
 		}
+		s.mu.Lock()
+		names := s.volunteerMacsLocked(volunteer)
+		s.mu.Unlock()
+		if len(names) >= maxVolunteerMacs {
+			tooManyMacs(w, who, names)
+			return
+		}
 	}
 	var req api.EnrollTokenRequest
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, volunteerBodyMax)).Decode(&req); err != nil {
-		code := 400
-		if errors.As(err, new(*http.MaxBytesError)) {
-			code = 413
-		}
-		httpErr(w, code, "%v", err)
+	if !decodeBody(w, r, volunteerBodyMax, &req) {
 		return
 	}
 	req.Label, req.Volunteer = who, true
@@ -671,10 +729,11 @@ func (s *Server) hVolunteerAgent(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "lab-agent", st.ModTime(), f)
 }
 
+// hEnroll turns an enrollment token into a device. It needs no secret, so
+// its body is held to enrollBodyMax before the token is even looked at.
 func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	var req api.EnrollRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		httpErr(w, 400, "%v", err)
+	if !decodeBody(w, r, enrollBodyMax, &req) {
 		return
 	}
 	t, err := s.store.takeToken(hashSecret(req.Token))
@@ -683,14 +742,24 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := "dev_" + randHex(24)
-	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, Volunteer: t.Volunteer, State: api.StateNew,
-		StateReason: "enrolled; run a baseline job", Facts: req.Facts}
+	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, Volunteer: t.Volunteer, VolunteeredBy: t.VolunteeredBy,
+		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts}
 	v := newDev(s, d, hashSecret(secret))
 	s.mu.Lock()
 	if _, dup := s.devs[d.Name]; dup {
 		s.mu.Unlock()
 		httpErr(w, 409, "device %s already enrolled", d.Name)
 		return
+	}
+	// hVolunteer counted this person's Macs when it handed out the token, but
+	// a token asked for while another was being used here was counted one
+	// Mac short. Counting again with the insert, under s.mu, settles it.
+	if d.VolunteeredBy != "" {
+		if names := s.volunteerMacsLocked(d.VolunteeredBy); len(names) >= maxVolunteerMacs {
+			s.mu.Unlock()
+			tooManyMacs(w, d.VolunteeredBy, names)
+			return
+		}
 	}
 	s.devs[d.Name] = v
 	s.mu.Unlock()
@@ -704,8 +773,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hCheckin(w http.ResponseWriter, r *http.Request) {
 	var ci api.Checkin
-	if err := json.NewDecoder(r.Body).Decode(&ci); err != nil {
-		httpErr(w, 400, "%v", err)
+	if !decodeBody(w, r, checkinBodyMax, &ci) {
 		return
 	}
 	v := agentDev(r)
@@ -721,8 +789,7 @@ func (s *Server) hCheckin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
 	var rep api.Report
-	if err := json.NewDecoder(r.Body).Decode(&rep); err != nil {
-		httpErr(w, 400, "%v", err)
+	if !decodeBody(w, r, reportBodyMax, &rep) {
 		return
 	}
 	agentDev(r).report(rep)

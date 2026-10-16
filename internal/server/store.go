@@ -126,11 +126,13 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 	return tx.Commit()
 }
 
-// takeToken consumes a one-time enrollment token.
+// takeToken consumes a one-time enrollment token. VolunteeredBy is the
+// login that asked for a volunteer token.
 func (s *store) takeToken(hash string) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,volunteer,expires`, hash).Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &exp)
+	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,volunteer,requester,expires`, hash).
+		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &exp)
 	if err != nil {
 		return nil, err
 	}

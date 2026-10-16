@@ -22,6 +22,9 @@ var errDeviceLost = errors.New("device stopped responding or rebooted")
 type dev struct {
 	s          *Server
 	secretHash string
+	// volunteeredBy is d.VolunteeredBy, which never changes: labd counts a
+	// volunteer's Macs under s.mu alone, without each Mac's mu.
+	volunteeredBy string
 
 	mu       sync.Mutex
 	d        api.Device
@@ -73,7 +76,7 @@ type dev struct {
 }
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
-	v := &dev{s: s, d: d, secretHash: secretHash, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
+	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
 		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{})}
 	return v
 }
