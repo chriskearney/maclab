@@ -195,6 +195,20 @@ func lessTested(j *api.Job, omt bool) string {
 	return strings.Join(why, ", ")
 }
 
+// retryOf is the job j retries, or "". A retry from before labd recorded it
+// says so in its first event.
+func retryOf(j *api.Job) string {
+	if j.RetryOf != "" {
+		return j.RetryOf
+	}
+	if len(j.Events) > 0 {
+		if id, ok := strings.CutPrefix(j.Events[0].Msg, "queued: a retry of job "); ok {
+			return id
+		}
+	}
+	return ""
+}
+
 // gatePrecedence orders run results by how much they decide a family: a
 // failure on any Mac decides it, then a Mac that both passed and failed,
 // then a pass; a Mac that couldn't stage the kernel decides only when no
@@ -225,7 +239,7 @@ type gateMac struct {
 
 // gateRun is job j's line in a gate report, with the result res.
 func gateRun(j *api.Job, res string) api.GateRun {
-	r := api.GateRun{Device: j.Spec.Device, Job: j.ID, Outcome: j.Outcome, Result: res, Finished: j.Updated}
+	r := api.GateRun{Device: j.Spec.Device, Job: j.ID, Outcome: j.Outcome, Result: res, Finished: j.Updated, RetryOf: retryOf(j)}
 	if res == api.GateStageFailed {
 		r.Reason = j.Summary
 	}
@@ -355,6 +369,10 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 			fail, pass := gateRun(m.fail, api.GateFlaky), gateRun(m.pass, api.GateFlaky)
 			fail.Reason = "passed too, in job " + m.pass.ID
 			pass.Reason = fmt.Sprintf("%s too, in job %s", m.fail.Outcome, m.fail.ID)
+			if pass.RetryOf == m.fail.ID {
+				fail.Reason += ", a retry of this one"
+				pass.Reason += ", which this one retries"
+			}
 			counted = []api.GateRun{fail, pass}
 		case m.fail != nil:
 			counted = []api.GateRun{gateRun(m.fail, api.GateFail)}
@@ -411,7 +429,11 @@ func rollUp(k api.GateKernel, devs []api.Device, jobs []*api.Job, required []str
 		case api.GateFlaky:
 			// a flaky Mac's failure comes first, then its pass
 			r, p := fr.Runs[0], fr.Runs[1]
-			why = append(why, fmt.Sprintf("%s flaky (%s passed in job %s, %s in job %s)", f, r.Device, p.Job, r.Outcome, r.Job))
+			if p.RetryOf == r.Job {
+				why = append(why, fmt.Sprintf("%s flaky (%s passed in job %s, a retry of %s job %s)", f, r.Device, p.Job, r.Outcome, r.Job))
+			} else {
+				why = append(why, fmt.Sprintf("%s flaky (%s passed in job %s, %s in job %s)", f, r.Device, p.Job, r.Outcome, r.Job))
+			}
 		case api.GateUntested:
 			if n := len(fr.NotCounted); n > 0 {
 				why = append(why, fmt.Sprintf("%s untested (%d %s not counted)", f, n, plural(n, "run", "runs")))

@@ -765,7 +765,7 @@ func printGate(r *api.GateReport) {
 			if i > 0 {
 				fam, name, res = "", "", ""
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fam, name, res, run.Device, run.Job, run.Outcome)
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n", fam, name, res, run.Device, gateJob(run), run.Outcome)
 		}
 	}
 	w.Flush()
@@ -775,7 +775,7 @@ func printGate(r *api.GateReport) {
 	// Runs that decide nothing, the excluded ones and the volunteers' Macs' apart.
 	var other, excluded, vol []string
 	add := func(fam string, run api.GateRun) {
-		l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", fam, run.Device, run.Job, run.Outcome, run.NotCounted)
+		l := fmt.Sprintf("  %s\t%s\t%s\t%s\t%s", fam, run.Device, gateJob(run), run.Outcome, run.NotCounted)
 		switch {
 		case run.Excluded:
 			excluded = append(excluded, l)
@@ -821,6 +821,14 @@ func printGate(r *api.GateReport) {
 		fmt.Printf("not counted (no supported chip family known): %s\n", strings.Join(r.Unclassified, ", "))
 	}
 	fmt.Println(r.Summary)
+}
+
+// gateJob is a gate run's job, and the job it retries if it is a retry.
+func gateJob(run api.GateRun) string {
+	if run.RetryOf != "" {
+		return run.Job + " (retry of " + run.RetryOf + ")"
+	}
+	return run.Job
 }
 
 func verdict(t api.TestResult) string {

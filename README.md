@@ -137,11 +137,14 @@ while it's outstanding.
 
 A job that couldn't stage its kernel ends `stage_failed`, with the reason and
 `lab retry <job>` in its summary. `lab retry` (or Retry on a finished job's page)
-runs any finished job again as a new job: the same Mac, kernel, tests and cmdline.
-A source job boots the kernel its first run built. Once that has been collected,
-the retry builds again from the exact commit the first build recorded, not from
-wherever its branch or pull request points now; a job that recorded no commit
-can't be retried, and the refusal says to run it afresh with `lab run`.
+runs any finished job again as a new job: the same Mac, kernel, tests and cmdline,
+and the new job records which one it retries (`retry_of`). A source job boots the
+kernel its first run built. Once that has been collected, the retry builds again
+from the exact commit and the config the first build recorded, not from wherever
+its branch or pull request points now or the Mac's config as it is now; a job
+that recorded no commit, or whose config has been collected too, can't be
+retried (a build from another config would be another kernel), and the refusal
+says to run it afresh with `lab run`.
 `lab retry` holds the new job as you, and the web UI's Retry as `web`.
 
 Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
@@ -479,10 +482,10 @@ under their family, or under the report when the job didn't record its family.
 
 Each Mac fails when it failed on the kernel and never passed, passes when it passed and never
 failed, and is **flaky** when it did both, in either order: a `lab retry` that passes doesn't hide
-the failure before it, and the report lists both jobs. `stage_failed` means the kernel never booted
-(the Mac couldn't stage it, e.g. its boot partition was full): it counts only for a Mac with no pass
-or failure on the kernel, so a run that couldn't stage never hides another result. A family's
-result is decided in this order:
+the failure before it, and the report lists both jobs, a retry naming the job it retries
+(`retry_of`). `stage_failed` means the kernel never booted (the Mac couldn't stage it, e.g. its
+boot partition was full): it counts only for a Mac with no pass or failure on the kernel, so a run
+that couldn't stage never hides another result. A family's result is decided in this order:
 
 1. **fail** when any of its Macs failed;
 2. **flaky** when any of its Macs both passed and failed;
@@ -511,11 +514,11 @@ run's `pass`, `fail`, `flaky` or `stage_failed`. A script that looks for `"fail"
 `--evidence` writes the report as one JSON evidence record:
 the kernel (sha256, build, release), `result` (`pass` or `fail`), and per family its result and
 runs (device, job, outcome, per-test results, the deciding run first; `reason` for a run that
-couldn't stage, or a flaky Mac's other result), and `not_counted`, the runs that decide nothing,
-each with its reason (`volunteer` marks a volunteer's Mac, `excluded` a job `--exclude` set
-aside). Then `volunteers` names the volunteers' Macs, `volunteers_counted` says whether they
-counted, `excluded` lists the excluded jobs, `not_counted` holds the runs of forgotten Macs whose
-jobs didn't record their family, and the labd host. The API is
+couldn't stage, or a flaky Mac's other result; `retry_of` for a retry), and `not_counted`, the runs
+that decide nothing, each with its reason (`volunteer` marks a volunteer's Mac, `excluded` a job
+`--exclude` set aside). Then `volunteers` names the volunteers' Macs, `volunteers_counted` says
+whether they counted, `excluded` lists the excluded jobs, `not_counted` holds the runs of forgotten
+Macs whose jobs didn't record their family, and the labd host. The API is
 `GET /api/gate/{kernel}?families=m1,m2&volunteers=1&exclude=j1,j2`; agents use `lab_gate`.
 
 ## Kernel artifacts

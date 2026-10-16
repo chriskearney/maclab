@@ -1240,7 +1240,7 @@ func TestRetryJob(t *testing.T) {
 	json.Unmarshal([]byte(body), &n)
 	want := j.Spec
 	want.Holder = "second"
-	if n.ID == j.ID || !reflect.DeepEqual(n.Spec, want) || n.Events[0].Msg != "queued: a retry of job "+j.ID {
+	if n.ID == j.ID || !reflect.DeepEqual(n.Spec, want) || n.Events[0].Msg != "queued: a retry of job "+j.ID || n.RetryOf != j.ID {
 		t.Fatalf("retry of %s: %s %+v %v", j.ID, n.ID, n.Spec, n.Events)
 	}
 	l.expect(l.wait(n.ID, 60*time.Second), api.OutcomePass)
@@ -1283,7 +1283,7 @@ func TestRetryJob(t *testing.T) {
 	}
 	l.s.saveBuild(&api.Build{ID: "b1", Key: "k1", Source: api.Source{Repo: "https://github.com/o/r", Ref: "b", SHA: strings.Repeat("e", 40)},
 		ConfigSHA: gc, State: api.BuildDone, Created: time.Now()})
-	if _, code, err := l.s.Retry(src.ID, ""); code != 400 || err == nil || !strings.Contains(err.Error(), "config artifact "+gc) {
+	if _, code, err := l.s.Retry(src.ID, ""); code != 409 || err == nil || !strings.Contains(err.Error(), "built with config "+gc[:8]+", which has been collected since") {
 		t.Fatalf("retry needing a collected config: %d %v", code, err)
 	}
 }
@@ -1320,18 +1320,42 @@ func TestRetryPinsCommit(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// and the Mac's config moves on too, as it does with a new known-good kernel
+	moved := l.artifact("CONFIG_MOVED_ON=y\n")
+	if err := l.s.store.setConfig(l.name, agent.SimKnownGood, moved); err != nil {
+		t.Fatal(err)
+	}
+	if now, _ := l.s.deviceConfig(ctx, l.name); now != moved || now == first.ConfigSHA {
+		t.Fatalf("the Mac's config is %s, want %s", now, moved)
+	}
+
 	r, _, err := l.s.Retry(j.ID, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "file://" + dir + "#" + first.Source.SHA; r.Spec.Source != want || r.Spec.Kernel != "" || r.Spec.Build != "" {
-		t.Fatalf("retry spec: %+v, want source %s", r.Spec, want)
+	if want := "file://" + dir + "#" + first.Source.SHA; r.Spec.Source != want || r.Spec.Kernel != "" || r.Spec.Build != "" || r.Spec.Config != first.ConfigSHA || r.RetryOf != j.ID {
+		t.Fatalf("retry %+v, want source %s and config %s", r, want, first.ConfigSHA)
+	}
+	if len(r.Events) != 2 || !strings.Contains(r.Events[1].Msg, "builds with the config build "+first.ID+" used") {
+		t.Fatalf("retry events %v", r.Events)
 	}
 	r = l.wait(r.ID, 60*time.Second)
 	l.expect(r, api.OutcomePass)
 	again, err := l.s.getBuild(r.Spec.Build)
-	if err != nil || again.ID == first.ID || again.Source.SHA != first.Source.SHA || builds != 2 {
-		t.Fatalf("the retry built %+v (%d builds), want commit %s", again, builds, first.Source.SHA)
+	if err != nil || again.ID == first.ID || again.Source.SHA != first.Source.SHA || again.ConfigSHA != first.ConfigSHA || builds != 2 {
+		t.Fatalf("the retry built %+v (%d builds), want commit %s with config %s", again, builds, first.Source.SHA, first.ConfigSHA)
+	}
+
+	// With the config the first build used collected too, the same kernel
+	// can't be built again: refused, not built from the Mac's config now.
+	if err := os.Remove(l.s.artifactPath(r.Spec.Kernel)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(l.s.artifactPath(first.ConfigSHA)); err != nil {
+		t.Fatal(err)
+	}
+	if _, code, err := l.s.Retry(r.ID, ""); code != 409 || err == nil || !strings.Contains(err.Error(), "built with config "+first.ConfigSHA[:8]+", which has been collected since") {
+		t.Fatalf("retry with its config collected: %d %v", code, err)
 	}
 
 	// No commit to pin: refused, not rebuilt from the moving branch.

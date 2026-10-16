@@ -1155,10 +1155,12 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit(spec, "") }
 
 // Retry queues a finished job again as a new job: the same Mac, kernel,
-// tests and cmdline. holder, if given, replaces the first job's, so a lease
-// is checked against whoever retries it. A source job boots the kernel the
-// first one built; once that is collected, it builds again from the commit
-// that build recorded, never from wherever a branch points now.
+// tests and cmdline, recording which job it retries. holder, if given,
+// replaces the first job's, so a lease is checked against whoever retries
+// it. A source job boots the kernel the first one built; once that is
+// collected, it builds again from the commit and the config that build
+// recorded, never from wherever a branch points now or the Mac's config as
+// it is now.
 func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
 	old, err := s.store.job(id)
 	if err != nil {
@@ -1180,14 +1182,51 @@ func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
 			spec.Kernel = ""
 		}
 	}
+	var notes []string
 	if spec.Source != "" && spec.Kernel == "" {
 		src, err := s.pinnedSource(old)
 		if err != nil {
 			return nil, 409, err
 		}
-		spec.Source, spec.Build = src, ""
+		cfg, note, err := s.pinnedConfig(old)
+		if err != nil {
+			return nil, 409, err
+		}
+		spec.Source, spec.Build, spec.Config = src, "", cfg
+		if note != "" {
+			notes = append(notes, note)
+		}
 	}
-	return s.submit(spec, old.ID)
+	return s.submit(spec, old.ID, notes...)
+}
+
+// pinnedConfig is the config a retry of old builds its kernel again with: the
+// one the first build used, as a config artifact, so the retry builds the
+// same kernel and not one from the Mac's config as it is by now. A recorded
+// config that has been collected since is refused rather than replaced: a
+// build from another config is another kernel, which the retry would pass
+// off as the first job's. note, if any, says where the config came from.
+func (s *Server) pinnedConfig(old *api.Job) (cfg, note string, err error) {
+	again := fmt.Sprintf("run it afresh with `lab run %s --kernel %s`", old.Spec.Device, old.Spec.Source)
+	cfg = old.Spec.Config
+	switch {
+	case cfg != "":
+		// built with an uploaded config, which the build request named
+	case old.Spec.Build == "":
+		// the first job never got as far as a build, so there is no config to keep
+		return "", fmt.Sprintf("job %s recorded no build, so this one builds with %s's config as it is now", old.ID, old.Spec.Device), nil
+	default:
+		b, err := s.getBuild(old.Spec.Build)
+		if err != nil || b.ConfigSHA == "" {
+			return "", "", fmt.Errorf("job %s's build %s recorded no config, so a retry would build with %s's config as it is now; %s", old.ID, old.Spec.Build, old.Spec.Device, again)
+		}
+		cfg = b.ConfigSHA
+		note = fmt.Sprintf("builds with the config build %s used (%s), not %s's as it is now", b.ID, short(cfg), old.Spec.Device)
+	}
+	if _, err := os.Stat(s.artifactPath(cfg)); err != nil {
+		return "", "", fmt.Errorf("job %s's kernel was built with config %s, which has been collected since, so a retry can't build the same kernel; %s", old.ID, short(cfg), again)
+	}
+	return cfg, note, nil
 }
 
 // pinnedSource is the source a retry of old builds from: the exact commit its
@@ -1209,9 +1248,10 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 }
 
 // submit queues a job; retryOf names the job it retries, whose source may
-// come with the kernel already built from it. The job records what lab gate
-// needs to know about its Mac as it is now.
-func (s *Server) submit(spec api.JobSpec, retryOf string) (*api.Job, int, error) {
+// come with the kernel already built from it, and notes go in the job's
+// events after the first. The job records what lab gate needs to know about
+// its Mac as it is now.
+func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api.Job, int, error) {
 	v := s.dev(spec.Device)
 	if v == nil {
 		return nil, 404, fmt.Errorf("no device %q", spec.Device)
@@ -1314,8 +1354,11 @@ func (s *Server) submit(spec api.JobSpec, retryOf string) (*api.Job, int, error)
 		msg = "queued: a retry of job " + retryOf
 	}
 	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
-		Events:         []api.JobEvent{{Time: now, Msg: msg}},
+		Events: []api.JobEvent{{Time: now, Msg: msg}}, RetryOf: retryOf,
 		DeviceAtSubmit: &api.DeviceSnapshot{Family: family(d.Facts), Volunteer: d.Volunteer, OMT: s.omtWanted(d.Device, api.JobSpec{})}}
+	for _, n := range notes {
+		j.Events = append(j.Events, api.JobEvent{Time: now, Msg: n})
+	}
 	if err := s.store.saveJob(j); err != nil {
 		return nil, 500, err
 	}

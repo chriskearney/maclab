@@ -431,6 +431,8 @@ type Job struct {
 	Events   []JobEvent `json:"events"`
 	Result   JobResult  `json:"result"`
 	Canceled bool       `json:"canceled,omitempty"`
+	// RetryOf is the job this one retries (lab retry).
+	RetryOf string `json:"retry_of,omitempty"`
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
 	// Jobs from before labd kept it have none.
 	DeviceAtSubmit *DeviceSnapshot `json:"device_at_submit,omitempty"`
@@ -675,6 +677,7 @@ type GateRun struct {
 	Tests      []GateTest `json:"tests,omitempty"`
 	Volunteer  bool       `json:"volunteer,omitempty"`   // the Mac is a volunteer's (Device.Volunteer)
 	NotCounted string     `json:"not_counted,omitempty"` // why the run doesn't count
+	RetryOf    string     `json:"retry_of,omitempty"`    // the job this one retries (lab retry)
 	Excluded   bool       `json:"excluded,omitempty"`    // the query set it aside (?exclude=, lab gate --exclude)
 }
 

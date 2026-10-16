@@ -583,6 +583,26 @@ func TestGateExclude(t *testing.T) {
 	}
 }
 
+// A retry's pass names the job it retries, and the flaky Mac's reasons say so.
+func TestGateRetryLink(t *testing.T) {
+	jobs := gateJobs("m1air pass", "m1air tests_failed gui-smoke", "m2air pass", "m2air panicked")
+	jobs[0].RetryOf = "jm1air-b"
+	jobs[2].Events = []api.JobEvent{{Msg: "queued: a retry of job jm2air-d"}} // from before retry_of
+	r := rollUp(api.GateKernel{SHA256: "k"}, gateFleet(), jobs, []string{"m1", "m2"}, gateOpts{})
+	m1 := r.Families[0].Runs
+	if len(m1) != 2 || m1[0].Reason != "passed too, in job jm1air-a, a retry of this one" ||
+		m1[1].RetryOf != "jm1air-b" || m1[1].Reason != "tests_failed too, in job jm1air-b, which this one retries" {
+		t.Fatalf("m1 runs %+v", m1)
+	}
+	if m2 := r.Families[2].Runs; len(m2) != 2 || m2[1].RetryOf != "jm2air-d" {
+		t.Fatalf("m2 runs %+v", m2)
+	}
+	if want := "gate shut: m1 flaky (m1air passed in job jm1air-a, a retry of tests_failed job jm1air-b), " +
+		"m2 flaky (m2air passed in job jm2air-c, a retry of panicked job jm2air-d)"; r.Summary != want {
+		t.Fatalf("summary %q,\nwant %q", r.Summary, want)
+	}
+}
+
 // Volunteers' Macs run agents the lab doesn't control: the gate lists their
 // runs apart and counts them only when asked.
 func TestGateVolunteers(t *testing.T) {
