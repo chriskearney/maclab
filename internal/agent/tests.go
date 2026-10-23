@@ -7,9 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
-	"strconv"
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
@@ -94,6 +92,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	}
 	env = append(env, skip)
 	var cmd *exec.Cmd
+	var gui *guiTestWorkspace
 	if t.GUI {
 		if l.GUIUser == "" {
 			return fail(errors.New("gui test, but no gui_user configured (lab-agent setup --gui-user)"))
@@ -102,10 +101,14 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		if err != nil {
 			return fail(err)
 		}
-		chownTree(outDir, u)
-		os.Chmod(script, 0o755)
-		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, skip, "bash", script)...)
+		gui, err = newGUITestWorkspace(script, u)
+		if err != nil {
+			return fail(fmt.Errorf("GUI workspace: %w", err))
+		}
+		defer gui.close()
+		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+gui.outputPath(), "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name, skip, "bash", gui.scriptPath())...)
 		cmd = exec.CommandContext(tctx, "runuser", args...)
+		cmd.Dir = gui.dir
 	} else {
 		cmd = exec.CommandContext(tctx, "bash", script)
 		cmd.Env = env
@@ -122,6 +125,11 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	logf.Close()
 	res.Seconds = time.Since(start).Seconds()
 	res.Tail = tail(logPath, 40)
+	if gui != nil {
+		if e := gui.collect(outDir); e != nil {
+			return fail(fmt.Errorf("collect GUI output: %w", e))
+		}
+	}
 	if tctx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		res.ExitCode = -1
@@ -137,15 +145,4 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		return fail(err)
 	}
 	return res
-}
-
-func chownTree(dir string, u *user.User) {
-	uid, _ := strconv.Atoi(u.Uid)
-	gid, _ := strconv.Atoi(u.Gid)
-	filepath.Walk(dir, func(p string, _ os.FileInfo, err error) error {
-		if err == nil {
-			os.Lchown(p, uid, gid)
-		}
-		return nil
-	})
 }
