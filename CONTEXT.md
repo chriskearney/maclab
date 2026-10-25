@@ -18,7 +18,11 @@ _Avoid_: Admin, operator
 The kernel a Mac returns to after every lab boot, recorded on both labd and the Mac. On a Volunteer's Mac, it is the kernel the Volunteer's own system boots by default.
 
 **Availability window**:
-A time when a Volunteer's Mac may be used for lab jobs. Outside it, the Mac is the Volunteer's own.
+A time when a Volunteer's Mac may be used for lab jobs, set only by its Volunteer: a weekly schedule in the Mac's local time, plus a Pause or an "open now until" they add by hand. Outside it, the Mac is the Volunteer's own and nothing from the lab runs on it.
+_Avoid_: Slot, schedule (for the window itself)
+
+**Pause**:
+A Volunteer closing their Mac's Availability window early: by default only the current window, or until a date they choose. Work in progress stops as it would at the window's end.
 
 **Access level**:
 What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs) or Full (everything a lab-owned Mac allows).
