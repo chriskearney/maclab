@@ -27,6 +27,10 @@ A boot of a Mac from an entry the lab put there (a test kernel or an installed R
 A time when a Volunteer's Mac may be used for lab jobs, set only by its Volunteer: a weekly schedule in the Mac's local time, plus a Pause or an "open now until" they add by hand. Outside it, the Mac is the Volunteer's own and nothing from the lab runs on it.
 _Avoid_: Slot, schedule (for the window itself)
 
+**Attended window**:
+A time the Volunteer opens by hand to say they are at their Mac, so Lab boots that need someone to type the disk password may run in it.
+_Avoid_: Supervised window
+
 **Pause**:
 A Volunteer closing their Mac's Availability window early: by default only the current window, or until a date they choose. Work in progress stops as it would at the window's end.
 
@@ -52,6 +56,9 @@ _Avoid_: Certification, sign-off
 
 **Installed run**:
 A run of a Release as the Omarchy installer installs it on a Mac. On a Volunteer's Mac it fits inside one Availability window and ends in a Rollback; it can end incomplete (the window closed first) or aborted by the Volunteer, neither of which is a failure.
+
+**Boot method**:
+How a run's kernel was started: a cold boot through the Mac's firmware, or kexec from the running system. Every run records it.
 
 **Rollback**:
 Returning a Volunteer's Mac to its system exactly as it was just before an Installed run.
