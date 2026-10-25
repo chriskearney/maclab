@@ -14,6 +14,9 @@ _Avoid_: Admin, operator
 
 ## Machines
 
+**Lab-owned Mac**:
+A Mac the Maintainers keep for the lab, with no Volunteer. A Mac is lab-owned or a Volunteer's for as long as it stays enrolled.
+
 **Known-good kernel**:
 The kernel a Mac returns to after every lab boot, recorded on both labd and the Mac. On a Volunteer's Mac, it is the kernel the Volunteer's own system boots by default.
 
