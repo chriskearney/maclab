@@ -51,7 +51,7 @@ _Avoid_: Build, version
 What the Omarchy installer puts on a Mac: the system a Release is installed into.
 
 **Qualification**:
-The fleet-wide verdict on one Release: qualified or not qualified, reached by running the Release as installed on every eligible Volunteer Mac.
+The fleet-wide verdict on one Release: qualified or not qualified, reached by running the Release as installed on the Macs a Maintainer picks for it, and recorded by a named Maintainer. A qualified verdict can later be revoked; a fix is always a new Release.
 _Avoid_: Certification, sign-off
 
 **Installed run**:
