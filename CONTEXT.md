@@ -15,7 +15,7 @@ _Avoid_: Admin, operator
 ## Machines
 
 **Known-good kernel**:
-The kernel a Mac returns to after every lab boot, recorded on both labd and the Mac.
+The kernel a Mac returns to after every lab boot, recorded on both labd and the Mac. On a Volunteer's Mac, it is the kernel the Volunteer's own system boots by default.
 
 **Availability window**:
 A time when a Volunteer's Mac may be used for lab jobs. Outside it, the Mac is the Volunteer's own.
@@ -40,5 +40,12 @@ What the Omarchy installer puts on a Mac: the system a Release is installed into
 The fleet-wide verdict on one Release: qualified or not qualified, reached by running the Release as installed on every eligible Volunteer Mac.
 _Avoid_: Certification, sign-off
 
+**Installed run**:
+A run of a Release as the Omarchy installer installs it on a Mac. On a Volunteer's Mac it fits inside one Availability window and ends in a Rollback; it can end incomplete (the window closed first) or aborted by the Volunteer, neither of which is a failure.
+
+**Rollback**:
+Returning a Volunteer's Mac to its system exactly as it was just before an Installed run.
+_Avoid_: Restore, revert
+
 **Promotion**:
-Making an accepted installed run a Mac's new references and Known-good kernel.
+Making an accepted installed run a Mac's new references and Known-good kernel. Volunteer Macs are never promoted.
