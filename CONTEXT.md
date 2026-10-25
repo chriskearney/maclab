@@ -20,6 +20,13 @@ The kernel a Mac returns to after every lab boot, recorded on both labd and the 
 **Availability window**:
 A time when a Volunteer's Mac may be used for lab jobs. Outside it, the Mac is the Volunteer's own.
 
+**Access level**:
+What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs) or Full (everything a lab-owned Mac allows).
+_Avoid_: Permissions, trust level
+
+**Audit log**:
+The record, per Volunteer Mac, of every Maintainer action on it, which its Volunteer can read.
+
 ## Releases
 
 **Release**:
