@@ -647,7 +647,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	r.ev("lost the Mac during test %s; waiting for it to come back", test)
 	lost := r.s.now()
 	// A hang has already had quietGrace of silence to show itself.
-	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-quietGrace, time.Minute))
+	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-r.s.quietGrace(), time.Minute))
 	r.addRecovery(steps)
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {

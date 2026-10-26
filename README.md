@@ -226,6 +226,16 @@ token at once. Jobs and Promotions record the Maintainer whose token asked.
 Upgrading from a labd with a single admin token keeps that token, in the same
 `admin.token` file, as the first Maintainer's (`--maintainer`, default `$USER`).
 
+labd listens on `127.0.0.1:7770` unless told otherwise. For Macs over Tailscale,
+start it with `--listen <tailnet-ip>:7770` (or `MACLAB_LISTEN`) so it is not
+reachable off the tailnet. Remote links are slow, so the timeouts that assume a
+LAN are flags: `--boot-timeout`, `--offline-after`, `--alive-window`,
+`--quiet-grace` and `--stage-timeout` (defaults are sized for remote Macs).
+Artifact downloads resume with HTTP range requests after a dropped transfer. An
+enrollment token is spent by the Mac's first check-in, so a failed `setup` can
+be run again with the same token until it expires. lab-agent's own request
+timeouts are `http_timeout_sec` and `transfer_timeout_sec` in its config file.
+
 On the Mac:
 
 ```sh

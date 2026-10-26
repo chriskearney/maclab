@@ -5,8 +5,6 @@ package agent
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,8 +36,26 @@ type Config struct {
 	Secret   string `json:"secret"`
 	GUIUser  string `json:"gui_user,omitempty"`
 	WorkDir  string `json:"work_dir,omitempty"`
+	// HTTPTimeoutSec bounds a check-in or report request, TransferTimeoutSec an
+	// upload; a Mac far from labd needs both longer. Zero is the default.
+	HTTPTimeoutSec     int `json:"http_timeout_sec,omitempty"`
+	TransferTimeoutSec int `json:"transfer_timeout_sec,omitempty"`
 	// Clock is where lab-agent reads time; nil is the wall clock.
 	Clock Clock `json:"-"`
+}
+
+func (c *Config) httpTimeout() time.Duration {
+	if c.HTTPTimeoutSec > 0 {
+		return time.Duration(c.HTTPTimeoutSec) * time.Second
+	}
+	return 2 * time.Minute
+}
+
+func (c *Config) transferTimeout() time.Duration {
+	if c.TransferTimeoutSec > 0 {
+		return time.Duration(c.TransferTimeoutSec) * time.Second
+	}
+	return 30 * time.Minute
 }
 
 func LoadConfig(path string) (*Config, error) {
@@ -104,7 +120,7 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 	return &Agent{
 		cfg:     cfg,
 		sys:     sys,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http:    &http.Client{Timeout: cfg.httpTimeout()},
 		log:     logger,
 		seen:    map[string]bool{},
 		running: map[string]bool{},
@@ -756,7 +772,7 @@ func (a *Agent) uploadScreen(ctx context.Context, path string) (string, error) {
 	req, _ := http.NewRequestWithContext(ctx, "POST", a.url("/api/agent/screen"), f)
 	req.Header.Set("Authorization", "Bearer "+a.cfg.Secret)
 	req.Header.Set("Content-Type", "image/jpeg")
-	resp, err := (&http.Client{Timeout: time.Minute}).Do(req)
+	resp, err := (&http.Client{Timeout: a.cfg.transferTimeout()}).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -790,34 +806,85 @@ func (a *Agent) outDir(c api.Command) (string, error) {
 
 func (a *Agent) url(p string) string { return strings.TrimRight(a.cfg.Server, "/") + p }
 
+// fetch downloads an artifact to dst, resuming with a Range request when the
+// transfer drops: over a slow link a long download rarely survives one try. The
+// bytes so far wait in dst+".part" until the whole file matches its sha256.
 func (a *Agent) fetch(ctx context.Context, sha, dst string) error {
+	part := dst + ".part"
+	var err error
+	wait := time.Second
+	for try := 0; ; try++ {
+		var permanent bool
+		if permanent, err = a.fetchOnce(ctx, sha, part); err == nil {
+			return os.Rename(part, dst)
+		}
+		if permanent || ctx.Err() != nil || try >= 8 {
+			return err
+		}
+		a.log.Printf("fetch %s: %v; resuming in %s", short(sha), err, wait)
+		select {
+		case <-ctx.Done():
+			return err
+		case <-a.clock().After(wait):
+		}
+		wait = min(wait*2, 30*time.Second)
+	}
+}
+
+func short(s string) string { return s[:min(len(s), 12)] }
+
+// fetchOnce continues the download in part. permanent means retrying can't help.
+func (a *Agent) fetchOnce(ctx context.Context, sha, part string) (permanent bool, err error) {
+	have := int64(0)
+	if fi, err := os.Stat(part); err == nil {
+		have = fi.Size()
+	}
 	req, _ := http.NewRequestWithContext(ctx, "GET", a.url("/api/agent/artifacts/"+sha), nil)
 	req.Header.Set("Authorization", "Bearer "+a.cfg.Secret)
+	if have > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+	}
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
+	flags := os.O_WRONLY | os.O_CREATE
+	switch {
+	case resp.StatusCode == http.StatusPartialContent:
+		flags |= os.O_APPEND
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		// The partial file is as long as the artifact or longer: check it as it is.
+		have = -1
+	case resp.StatusCode == http.StatusOK:
+		flags |= os.O_TRUNC // labd ignored the Range: start over
+	default:
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return fmt.Errorf("artifact %s: %s: %s", sha, resp.Status, strings.TrimSpace(string(b)))
+		return resp.StatusCode < 500, fmt.Errorf("artifact %s: %s: %s", sha, resp.Status, strings.TrimSpace(string(b)))
 	}
-	f, err := os.Create(dst)
+	if have >= 0 {
+		f, err := os.OpenFile(part, flags, 0o644)
+		if err != nil {
+			return true, err
+		}
+		_, err = io.Copy(f, resp.Body)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err != nil {
+			return false, err
+		}
+	}
+	got, err := fileSHA256(part)
 	if err != nil {
-		return err
+		return true, err
 	}
-	h := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(f, h), resp.Body); err != nil {
-		f.Close()
-		return err
+	if got != sha {
+		os.Remove(part)
+		// A bad prefix from an earlier attempt is gone now: one more go from the start.
+		return have == 0, fmt.Errorf("artifact %s: downloaded sha256 %s", sha, got)
 	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if got := hex.EncodeToString(h.Sum(nil)); got != sha {
-		return fmt.Errorf("artifact %s: downloaded sha256 %s", sha, got)
-	}
-	return nil
+	return false, nil
 }
 
 // uploadDir sends every file under dir to labd as prefix/<relpath> and returns the names.
@@ -868,7 +935,7 @@ func (a *Agent) uploadOnce(ctx context.Context, job, name, path string) error {
 	q := url.Values{"job": {job}, "name": {name}}
 	req, _ := http.NewRequestWithContext(ctx, "POST", a.url("/api/agent/upload?"+q.Encode()), f)
 	req.Header.Set("Authorization", "Bearer "+a.cfg.Secret)
-	resp, err := (&http.Client{Timeout: 10 * time.Minute}).Do(req)
+	resp, err := (&http.Client{Timeout: a.cfg.transferTimeout()}).Do(req)
 	if err != nil {
 		return err
 	}

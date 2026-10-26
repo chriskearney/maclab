@@ -54,7 +54,7 @@ func addColumn(db *sql.DB, table, col, def string) error {
 func (s *store) saveDevice(d *api.Device, secretHash string) error {
 	b, _ := json.Marshal(d)
 	_, err := s.db.Exec(`INSERT INTO devices(id,name,secret_hash,data) VALUES(?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data`, d.ID, d.Name, secretHash, string(b))
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, secret_hash=excluded.secret_hash, data=excluded.data`, d.ID, d.Name, secretHash, string(b))
 	return err
 }
 
@@ -98,7 +98,8 @@ func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time)
 }
 
 // errVolunteerTokens turns a volunteer away while too many others hold
-// unused tokens.
+// unused tokens. A token stays until its Mac first checks in (see token),
+// but once a Mac has enrolled with it, it is used: it counts no more.
 var errVolunteerTokens = errors.New("too many volunteers hold unused enrollment tokens")
 
 // addVolunteerToken stores a token for who, the tailnet viewer who asked for
@@ -111,11 +112,11 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM tokens WHERE requester != '' AND (requester=? OR expires<?)`, who, now.Unix()); err != nil {
+	if _, err := tx.Exec(`DELETE FROM tokens WHERE requester != '' AND (requester=? AND name NOT IN (SELECT name FROM devices) OR expires<?)`, who, now.Unix()); err != nil {
 		return err
 	}
 	var n int
-	if err := tx.QueryRow(`SELECT count(*) FROM tokens WHERE requester != ''`).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT count(*) FROM tokens WHERE requester != '' AND name NOT IN (SELECT name FROM devices)`).Scan(&n); err != nil {
 		return err
 	}
 	if n >= max {
@@ -127,12 +128,12 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 	return tx.Commit()
 }
 
-// takeToken consumes a one-time enrollment token. VolunteeredBy is the
-// login that asked for a volunteer token.
-func (s *store) takeToken(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
+// token looks up an enrollment token that has not expired. VolunteeredBy is
+// the login that asked for a volunteer token.
+func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,volunteer,requester,expires`, hash).
+	err := s.db.QueryRow(`SELECT name,label,model,volunteer,requester,expires FROM tokens WHERE token_hash=?`, hash).
 		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &exp)
 	if err != nil {
 		return nil, err
@@ -141,6 +142,12 @@ func (s *store) takeToken(hash string, now time.Time) (*api.EnrollTokenRequest, 
 		return nil, sql.ErrNoRows
 	}
 	return &r, nil
+}
+
+// spendTokens uses up the enrollment tokens for a name: its Mac has checked in.
+func (s *store) spendTokens(name string) error {
+	_, err := s.db.Exec(`DELETE FROM tokens WHERE name=?`, name)
+	return err
 }
 
 func (s *store) saveJob(j *api.Job) error {

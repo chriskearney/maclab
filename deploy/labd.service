@@ -5,7 +5,8 @@ Description=maclab controller
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/labd --listen :7770
+# Pass labd's own tailnet IP: without --listen it serves 127.0.0.1 only.
+ExecStart=%h/.local/bin/labd --listen 100.64.0.1:7770
 Restart=always
 RestartSec=3
 # The first start makes $USER the first Maintainer; add --maintainer <name> to ExecStart for someone else.

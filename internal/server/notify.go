@@ -13,7 +13,14 @@ type Notification struct {
 	Device   string
 	Title    string
 	Body     string
-	Priority string // urgent, default, low
+	Priority string // urgent, high, default, low
+}
+
+// ntfyPriorities is how a Notification's priority reads to ntfy; default sends neither.
+var ntfyPriorities = map[string]struct{ priority, tag string }{
+	"urgent": {"urgent", "rotating_light"},
+	"high":   {"high", "warning"},
+	"low":    {"low", "information_source"},
 }
 
 func (s *Server) notify(n Notification) {
@@ -29,8 +36,9 @@ func (s *Server) notify(n Notification) {
 			defer cancel()
 			req, _ := http.NewRequestWithContext(ctx, "POST", s.cfg.NtfyURL, strings.NewReader(n.Body))
 			req.Header.Set("Title", n.Title)
-			req.Header.Set("Priority", map[string]string{"urgent": "urgent", "low": "low"}[n.Priority])
-			req.Header.Set("Tags", map[string]string{"urgent": "rotating_light", "low": "information_source"}[n.Priority])
+			p := ntfyPriorities[n.Priority]
+			req.Header.Set("Priority", p.priority)
+			req.Header.Set("Tags", p.tag)
 			if resp, err := http.DefaultClient.Do(req); err != nil {
 				s.log.Printf("ntfy: %v", err)
 			} else {

@@ -197,7 +197,7 @@ INSERT INTO devices VALUES ('d-1', 'm2air', 'x', '{"id":"d-1","name":"m2air","la
 		t.Fatal(err)
 	}
 	defer st.db.Close()
-	tok, err := st.takeToken("old", time.Now())
+	tok, err := st.token("old", time.Now())
 	if err != nil || tok.Name != "m1air" || tok.Volunteer {
 		t.Fatalf("old token: %+v, %v", tok, err)
 	}
@@ -242,12 +242,14 @@ func TestVolunteerMacLimit(t *testing.T) {
 		}
 		names = append(names, tok.Name)
 	}
+	// The Macs' tokens stay until each first checks in; the refusal adds none.
+	before := volunteerTokens(t, s)
 	code, body, _ := ask(person)
 	if code != 409 || !strings.Contains(body, "volunteered 3 Macs already") || !strings.Contains(body, names[0]) {
 		t.Errorf("Mac %d: %d %s", maxVolunteerMacs+1, code, body)
 	}
-	if n := volunteerTokens(t, s); n != 0 {
-		t.Errorf("the refusal left %d tokens", n)
+	if n := volunteerTokens(t, s); n != before {
+		t.Errorf("the refusal left %d tokens", n-before)
 	}
 	if code, body, _ := ask("100.64.1.2:40000"); code != 200 {
 		t.Errorf("someone else: %d %s", code, body)

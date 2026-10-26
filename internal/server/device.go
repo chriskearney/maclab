@@ -20,8 +20,9 @@ var errDeviceLost = errors.New("device stopped responding or rebooted")
 
 // dev is labd's live view of one Mac.
 type dev struct {
-	s          *Server
-	secretHash string
+	s            *Server
+	secretHash   string
+	enrolledWith string // hash of the enrollment token that made this Mac, until it first checks in
 	// volunteeredBy is d.VolunteeredBy, which never changes: labd counts a
 	// volunteer's Macs under s.mu alone, without each Mac's mu.
 	volunteeredBy string
@@ -113,6 +114,13 @@ func (v *dev) saveLocked() {
 	}
 }
 
+// checkedIn is whether the Mac has ever reached labd since it enrolled.
+func (v *dev) checkedIn() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.d.BootID != ""
+}
+
 // leaving says that lab-agent uninstall took the Mac out of the lab, and
 // how, or "" while it is still in the lab.
 func (v *dev) leaving() string {
@@ -125,7 +133,7 @@ func (v *dev) leaving() string {
 }
 
 func (v *dev) aliveLocked() bool {
-	return !v.d.LastSeen.IsZero() && v.s.since(v.d.LastSeen) < aliveWindow
+	return !v.d.LastSeen.IsZero() && v.s.since(v.d.LastSeen) < v.s.aliveWindow()
 }
 
 func (v *dev) setState(st api.DeviceState, reason string) {
@@ -166,6 +174,11 @@ func (v *dev) heartbeat(ci api.Checkin) {
 	defer v.mu.Unlock()
 	now := v.s.now()
 	rebooted := v.d.BootID != "" && ci.BootID != v.d.BootID
+	if v.d.BootID == "" {
+		if err := v.s.store.spendTokens(v.d.Name); err != nil {
+			v.s.log.Printf("spend enrollment tokens for %s: %v", v.d.Name, err)
+		}
+	}
 	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel
 	if rebooted {
 		v.endedBoot, v.endedHeard, v.nextSeen = v.d.BootID, v.heard, now
@@ -427,6 +440,21 @@ func (v *dev) call(ctx context.Context, kind, job string, args any, timeout time
 // reconnecting after a resume takes tens of seconds.
 var quietGrace = 60 * time.Second
 
+// aliveWindow and quietGrace are the package defaults unless Config sets them.
+func (s *Server) aliveWindow() time.Duration {
+	if s.cfg.AliveWindow > 0 {
+		return s.cfg.AliveWindow
+	}
+	return aliveWindow
+}
+
+func (s *Server) quietGrace() time.Duration {
+	if s.cfg.QuietGrace > 0 {
+		return s.cfg.QuietGrace
+	}
+	return quietGrace
+}
+
 // maxSleep is how long a command waits for a Mac that went to sleep.
 var maxSleep = time.Hour
 
@@ -445,7 +473,7 @@ func (v *dev) quietLocked(now time.Time) bool {
 // wake-up, and past any spell off the network it announced for this boot.
 // Caller holds mu.
 func (v *dev) lostLocked(now time.Time) bool {
-	return now.Sub(v.d.LastSeen) > quietGrace && now.Sub(v.awoke) > quietGrace && !v.quietLocked(now)
+	return now.Sub(v.d.LastSeen) > v.s.quietGrace() && now.Sub(v.awoke) > v.s.quietGrace() && !v.quietLocked(now)
 }
 
 // callNote is call for commands that may outlive a quiet spell. A Mac that

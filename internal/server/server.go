@@ -42,8 +42,13 @@ type Config struct {
 	Interval             time.Duration // agent heartbeat interval
 	BootTimeout          time.Duration // default time for a Mac to come back after a reboot
 	OfflineAfter         time.Duration
-	NtfyURL              string
-	NotifyCmd            string
+	// AliveWindow and QuietGrace are timeouts that assume a LAN, as
+	// StageTimeout below does; a Mac far from labd needs them longer. Zero
+	// keeps the LAN default; labd's flags default to remote-sized values.
+	AliveWindow time.Duration // how stale a heartbeat may be before a Mac counts unresponsive
+	QuietGrace  time.Duration // silence on the same boot before a command counts lost
+	NtfyURL     string
+	NotifyCmd   string
 	// Tailscale lets tailnet peers look at the lab by identity; only a
 	// Maintainer's token changes it.
 	Tailscale bool
@@ -536,7 +541,10 @@ func (s *Server) agent(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hash := hashSecret(bearer(r))
 		for _, v := range s.allDevs() {
-			if subtle.ConstantTimeCompare([]byte(hash), []byte(v.secretHash)) == 1 {
+			v.mu.Lock()
+			ok := subtle.ConstantTimeCompare([]byte(hash), []byte(v.secretHash)) == 1
+			v.mu.Unlock()
+			if ok {
 				h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, v)))
 				return
 			}
@@ -559,7 +567,9 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "device name must be lowercase letters, digits and dashes")
 		return
 	}
-	if s.dev(req.Name) != nil {
+	// A Mac that never checked in hasn't taken the name: its enrollment failed,
+	// and enrolling again with the new token replaces its secret.
+	if v := s.dev(req.Name); v != nil && v.checkedIn() {
 		httpErr(w, 409, "device %s already enrolled", req.Name)
 		return
 	}
@@ -746,6 +756,11 @@ func (s *Server) hVolunteerAgent(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "lab-agent", st.ModTime(), f)
 }
 
+func (s *Server) tokenValid(hash string) bool {
+	_, err := s.store.token(hash, s.now())
+	return err == nil
+}
+
 // hEnroll turns an enrollment token into a device. It needs no secret, so
 // its body is held to enrollBodyMax before the token is even looked at.
 func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
@@ -753,15 +768,38 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, enrollBodyMax, &req) {
 		return
 	}
-	t, err := s.store.takeToken(hashSecret(req.Token), s.now())
+	t, err := s.store.token(hashSecret(req.Token), s.now())
 	if err != nil {
 		httpErr(w, 403, "enrollment token unknown, used or expired")
 		return
 	}
 	secret := "dev_" + randHex(24)
+	// The token is spent by the Mac's first check-in, not by this call: if the
+	// answer never reached the Mac, enrolling again must work. Until then the
+	// Mac it made gets a new secret.
+	if v := s.dev(t.Name); v != nil {
+		v.mu.Lock()
+		// Its own token again, or a new one once the old one has run out.
+		retry := v.d.BootID == "" && (v.enrolledWith == hashSecret(req.Token) || !s.tokenValid(v.enrolledWith))
+		if retry {
+			v.enrolledWith = hashSecret(req.Token)
+			v.secretHash = hashSecret(secret)
+			v.saveLocked()
+		}
+		d := v.d
+		v.mu.Unlock()
+		if !retry {
+			httpErr(w, 409, "device %s already enrolled", t.Name)
+			return
+		}
+		s.log.Printf("enrolled %s again before its first check-in", t.Name)
+		writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret})
+		return
+	}
 	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, Volunteer: t.Volunteer, VolunteeredBy: t.VolunteeredBy,
 		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts}
 	v := newDev(s, d, hashSecret(secret))
+	v.enrolledWith = hashSecret(req.Token)
 	s.mu.Lock()
 	if _, dup := s.devs[d.Name]; dup {
 		s.mu.Unlock()

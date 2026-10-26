@@ -118,6 +118,12 @@ type labConfig struct {
 	name      string
 	clock     *agent.FakeClock // nil runs labd and lab-agent on the wall clock
 	volunteer bool             // the Mac is a Volunteer's; drive its commands with l.volunteer
+	// wrap puts a test's transport (a flaky link, a stalled download) in front
+	// of labd's handler, so every request from the Mac and the Maintainers
+	// goes through it.
+	wrap func(http.Handler) http.Handler
+	// config adjusts labd's Config before it starts.
+	config func(*Config)
 }
 
 func newLabWith(t *testing.T, c labConfig) *lab {
@@ -154,15 +160,23 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		logw = io.MultiWriter(l.logs, os.Stderr)
 	}
 	logger := log.New(logw, "labd: ", log.Ltime|log.Lmicroseconds)
-	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
+	cfg := Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
 		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
-		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}, logger)
+		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}
+	if c.config != nil {
+		c.config(&cfg)
+	}
+	s, err := New(ctx, cfg, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.s = s
 	s.OnNotify(func(n Notification) { l.mu.Lock(); l.notes = append(l.notes, n); l.mu.Unlock() })
-	hs := httptest.NewServer(s.Handler())
+	handler := s.Handler()
+	if c.wrap != nil {
+		handler = c.wrap(handler)
+	}
+	hs := httptest.NewServer(handler)
 	l.url = hs.URL
 	t.Cleanup(func() { cancel(); hs.Close() })
 
