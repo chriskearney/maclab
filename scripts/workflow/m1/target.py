@@ -92,7 +92,7 @@ def current_observation(p,boot,deadline):
  parent=Path(os.readlink('/proc/'+str(os.getppid())+'/exe'))
  need('lab-agent' in parent.name,'current metadata must come directly from lab-agent')
  with held_regular(parent,64*1024**2) as (fd,st):parent_image={'path':str(parent),'sha256':hash_fd(fd,st.st_size,deadline),'bytes':st.st_size}
- return {'schema':'maclab.m1-fresh-observation/1','agent_parent':parent_image,'boot_id':boot,'kernel':os.uname().release,'packages':versions,'files':observed,'original_guard_mismatches':mismatch,'old_module_tree_sha256':module_sha,'module_markers':markers,'esp_free_bytes':os.statvfs('/boot/efi').f_bavail*os.statvfs('/boot/efi').f_frsize,'no_package_changes':True,'no_boot_changes':True,'historical_receipts_reused':False}
+ return {'schema':'maclab.m1-fresh-observation/1','agent_parent':parent_image,'boot_id':boot,'kernel':os.uname().release,'packages':versions,'files':observed,'original_guard_mismatches':mismatch,'old_module_tree_sha256':module_sha,'old_module_tree_bytes':sum(row.get('bytes',0) for row in rows.values()),'module_markers':markers,'root_free_bytes':os.statvfs('/usr/lib/modules').f_bavail*os.statvfs('/usr/lib/modules').f_frsize,'esp_free_bytes':os.statvfs('/boot/efi').f_bavail*os.statvfs('/boot/efi').f_frsize,'no_package_changes':True,'no_boot_changes':True,'historical_receipts_reused':False}
 
 def exact_profile(p):
  need(p['schema']=='maclab.m1-cohort-profile/1' and p['device']=='m1' and p['board']=='apple,j293','wrong supported profile')
