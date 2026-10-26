@@ -17,6 +17,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -731,19 +732,51 @@ func tokens(ptr string) ([]string, error) {
 	}
 	return ts, nil
 }
+
+// Array traversal is limited to canonical indexes of existing elements. No
+// append, extension, implicit container creation, or negative index is allowed.
+func arrayIndex(token string, length int) (int, error) {
+	if token == "" || (len(token) > 1 && token[0] == '0') {
+		return 0, errors.New("invalid array index")
+	}
+	for _, c := range token {
+		if c < '0' || c > '9' {
+			return 0, errors.New("invalid array index")
+		}
+	}
+	i, err := strconv.Atoi(token)
+	if err != nil || i < 0 || i >= length {
+		return 0, errors.New("array index out of bounds")
+	}
+	return i, nil
+}
+func child(doc any, token string) (any, error) {
+	switch v := doc.(type) {
+	case map[string]any:
+		out, ok := v[token]
+		if !ok {
+			return nil, errors.New("missing evidence key")
+		}
+		return out, nil
+	case []any:
+		i, err := arrayIndex(token, len(v))
+		if err != nil {
+			return nil, err
+		}
+		return v[i], nil
+	default:
+		return nil, errors.New("pointer traverses scalar")
+	}
+}
 func get(doc any, ptr string) (any, error) {
 	ts, err := tokens(ptr)
 	if err != nil {
 		return nil, err
 	}
 	for _, t := range ts {
-		m, ok := doc.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("pointer traverses non-object: %s", ptr)
-		}
-		doc, ok = m[t]
-		if !ok {
-			return nil, fmt.Errorf("missing evidence pointer: %s", ptr)
+		doc, err = child(doc, t)
+		if err != nil {
+			return nil, fmt.Errorf("missing evidence pointer %s: %w", ptr, err)
 		}
 	}
 	return doc, nil
@@ -759,23 +792,27 @@ func set(doc *any, ptr string, value any) error {
 	}
 	cur := *doc
 	for _, t := range ts[:len(ts)-1] {
-		m, ok := cur.(map[string]any)
-		if !ok {
-			return errors.New("binding traverses non-object")
+		cur, err = child(cur, t)
+		if err != nil {
+			return fmt.Errorf("binding target must already exist: %w", err)
 		}
-		cur, ok = m[t]
-		if !ok {
+	}
+	last := ts[len(ts)-1]
+	switch v := cur.(type) {
+	case map[string]any:
+		if _, ok := v[last]; !ok {
 			return errors.New("binding target must already exist")
 		}
+		v[last] = value
+	case []any:
+		i, err := arrayIndex(last, len(v))
+		if err != nil {
+			return err
+		}
+		v[i] = value
+	default:
+		return errors.New("binding target is scalar")
 	}
-	m, ok := cur.(map[string]any)
-	if !ok {
-		return errors.New("binding target is not an object")
-	}
-	if _, ok = m[ts[len(ts)-1]]; !ok {
-		return errors.New("binding target must already exist")
-	}
-	m[ts[len(ts)-1]] = value
 	return nil
 }
 func randomID() string {
