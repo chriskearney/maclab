@@ -596,3 +596,27 @@ func TestImmutableWorkflowMetadataAvoidsSelfHashCycle(t *testing.T) {
 		t.Fatal("invented authority metadata admitted")
 	}
 }
+
+func TestCompletedElapsedTimeDoesNotGrowAfterReturn(t *testing.T) {
+	r := fixture(t, bindPhase())
+	now := time.Now()
+	r.Now = func() time.Time { return now }
+	if e := r.Run(context.Background(), "", false); e != nil {
+		t.Fatal(e)
+	}
+	b, e := r.Status()
+	if e != nil {
+		t.Fatal(e)
+	}
+	var before, after map[string]any
+	json.Unmarshal(b, &before)
+	r.Now = func() time.Time { return now.Add(10 * time.Minute) }
+	b, e = r.Status()
+	if e != nil {
+		t.Fatal(e)
+	}
+	json.Unmarshal(b, &after)
+	if before["elapsed_seconds"] != after["elapsed_seconds"] || after["complete"] != true {
+		t.Fatal("completed runtime grew with later polling")
+	}
+}

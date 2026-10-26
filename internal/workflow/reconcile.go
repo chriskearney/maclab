@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/iconidentify/maclab/internal/api"
 	"os"
+	"time"
 )
 
 // Reconciliation records independently reviewed actual evidence after an
@@ -144,10 +145,14 @@ func (r *Runner) Status() ([]byte, error) {
 	phases := []map[string]any{}
 	pending := ""
 	complete := true
+	var lastNormalFinish time.Time
 	now := r.now()
 	for _, p := range r.Plan.Phases {
 		row := map[string]any{"phase": p.ID, "kind": p.Kind, "recovery": p.Recovery, "state": "pending", "elapsed_seconds": float64(0)}
 		if rec := s.Records[p.ID]; rec != nil {
+			if !p.Recovery && rec.State == "done" && rec.Finished.After(lastNormalFinish) {
+				lastNormalFinish = rec.Finished
+			}
 			row["state"] = rec.State
 			row["elapsed_seconds"] = rec.Seconds
 			if rec.State == "running" {
@@ -166,7 +171,11 @@ func (r *Runner) Status() ([]byte, error) {
 		}
 		phases = append(phases, row)
 	}
-	return json.MarshalIndent(map[string]any{"schema": "maclab.workflow-status/1", "id": s.ID, "device": s.Device, "plan_sha256": s.PlanSHA256, "complete": complete, "next_phase": pending, "blocker": s.Blocker, "elapsed_seconds": now.Sub(s.Created).Seconds(), "phases": phases}, "", "  ")
+	elapsed := now.Sub(s.Created).Seconds()
+	if complete && !lastNormalFinish.IsZero() {
+		elapsed = lastNormalFinish.Sub(s.Created).Seconds()
+	}
+	return json.MarshalIndent(map[string]any{"schema": "maclab.workflow-status/1", "id": s.ID, "device": s.Device, "plan_sha256": s.PlanSHA256, "complete": complete, "next_phase": pending, "blocker": s.Blocker, "elapsed_seconds": elapsed, "phases": phases}, "", "  ")
 }
 
 // PublishStatus is local-only; no status notification or group message is sent.
