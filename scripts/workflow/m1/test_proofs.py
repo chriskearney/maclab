@@ -1,4 +1,4 @@
-import base64,copy,datetime,hashlib,importlib.util,json,os,shlex,shutil,stat,tempfile,unittest
+import base64,copy,datetime,hashlib,importlib.util,json,os,shlex,shutil,signal,stat,subprocess,sys,tempfile,unittest
 from pathlib import Path
 from unittest.mock import patch
 HERE=Path(__file__).parent
@@ -34,6 +34,17 @@ class ProofControls(unittest.TestCase):
    with self.assertRaises(RuntimeError):m.read_files(e,p,{'writer-persistent-hold/APPLIED.json':None})
    f.unlink();f.symlink_to('/dev/zero')
    with self.assertRaises(RuntimeError):m.read_files(e,p,{'writer-persistent-hold/APPLIED.json':None})
+ def test_actual_owned_group_alive_refuses_then_reaped_group_proves_empty(self):
+  owner=Path('/dev/shm/sf-m1-standing-authority-r1/transact-m1.py')
+  if not owner.exists():self.skipTest('reviewed owner source absent')
+  with tempfile.TemporaryDirectory(dir='/run/user/'+str(os.geteuid())) as t:
+   e=self.guarded(t);p=Path(t)/'packet';(p/'transaction-receipts').mkdir(parents=True);shutil.copyfile(owner,p/'transact-m1.py');child=subprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,start_new_session=True);r={'pid':child.pid,'pgid':child.pid,'sid':child.pid,'per_regular_file_limit_bytes':64413696,'argv':['/usr/bin/pacman','-U','--noconfirm','--',*[str(p/'packages'/('pkg'+str(i))) for i in range(5)]]};f=p/'transaction-receipts/PACMAN-OWNED-GROUP.json';f.write_text(json.dumps(r))
+   try:
+    with self.assertRaisesRegex(RuntimeError,'remains live'):m.drained_groups(e,p)
+   finally:
+    os.killpg(child.pid,signal.SIGTERM);child.wait(timeout=5)
+   out=m.drained_groups(e,p);self.assertIs(out['transaction-receipts/PACMAN-OWNED-GROUP.json']['live'],False);self.assertEqual(out['packet-c-receipts/PACMAN-OWNED-GROUP.json'],{'absent':True});r['argv'][4]='/var/lib/maclab/old-foreign-packet/pkg';f.write_text(json.dumps(r))
+   with self.assertRaisesRegex(RuntimeError,'finite package group argv'):m.drained_groups(e,p)
  def b(self):return {'operation':'read-current-files','profile':{'device':'m1','board':'apple,j293','packet':'/var/lib/maclab/rc7-m1-cpu-proof-new','source_packet':'/var/lib/maclab/rc7-m1-cpu-proof-source','holder':'owner','agent_parent':{'path':'/usr/local/bin/lab-agent','sha256':'b'*64,'bytes':100}},'expected_boot_id':'cpu-boot','expected_kernel':'7.2.11-6-1-ARCH','root_plan_sha256':'a'*64,'packet_profile_sha256':'c'*64,'files':{'writer-persistent-hold/APPLIED.json':None}}
  def test_non_receipt_keys_and_outside_paths_never_admitted(self):
   for name in ('../id_ed25519','STANDING-BOOT-AUTHORITY.json','/etc/shadow','transact-m1.py'):

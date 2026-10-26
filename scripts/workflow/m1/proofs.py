@@ -41,15 +41,26 @@ def read_files(e,P,requests):
  for name,pin in out.items():raw,s=e.regular(P/name,262144);need(H(raw)==pin['sha256'] and len(raw)==pin['bytes'] and e.key(s)==pin['identity'],'terminal proof drift')
  return out
 
+def drained_groups(e,P):
+ ownerraw,_=e.pin(P/'transact-m1.py','23b7227bdf76c22047784dc37776458a4fea7c8a5936a72eb857d3eeafbc3e3b',65536);owner=module(ownerraw,'reviewed_group_observer',P/'transact-m1.py');out={}
+ for name,folder in [('transaction-receipts/PACMAN-OWNED-GROUP.json','packages'),('packet-c-receipts/PACMAN-OWNED-GROUP.json','rollback-packages')]:
+  path=P/name
+  if not os.path.lexists(path):need(folder=='rollback-packages','original installer group receipt missing');out[name]={'absent':True};continue
+  e.private(path.parent);raw,_=e.regular(path,262144);r=json.loads(raw);gid=r['pgid'];need(type(gid) is int and 1<gid==r['pid']==r['sid'] and r['per_regular_file_limit_bytes']==64413696,'exact owned package group identity');argv=r['argv'];need(type(argv) is list and len(argv)==9 and argv[:4]==['/usr/bin/pacman','-U','--noconfirm','--'] and all(Path(x).parent==P/folder and Path(x).name not in ('.','..') for x in argv[4:]),'current-P finite package group argv');need(not owner.live_group(gid),'owned package group remains live; rollback not admitted');again,_=e.regular(path,262144);need(again==raw,'group identity receipt changed during /proc observation');out[name]={'pgid':gid,'identity_sha256':H(raw),'live':False}
+ return out
+
 def validate(b):
- p=b['profile'];need(b['operation']=='read-current-files' and p['device']=='m1' and p['board']=='apple,j293' and p['holder'],'finite M1 proof operation');pattern='/var/lib/maclab/rc7-m1-[a-z0-9-]{8,96}';need(re.fullmatch(pattern,p['packet']) and re.fullmatch(pattern,p['source_packet']) and p['packet']!=p['source_packet'],'distinct owned M1 packets');need(re.fullmatch('[0-9a-f]{64}',b['root_plan_sha256']) and re.fullmatch('[0-9a-f]{64}',b['packet_profile_sha256']) and b['expected_kernel'] in ('7.2.11-6-1-ARCH','7.2.11-7-1-ARCH'),'actual Plan/profile/cohort');need(type(b['files']) is dict and 1<=len(b['files'])<=32 and set(b['files'])<=FIXED,'finite proof leaves')
- for value in b['files'].values():need(value is None or (type(value) is dict and set(value)=={'sha256','bytes'} and re.fullmatch('[0-9a-f]{64}',value['sha256']) and type(value['bytes']) is int and 0<value['bytes']<=262144),'bounded previously observed proof pin')
+ p=b['profile'];need(b['operation'] in ('read-current-files','prove-owned-groups') and p['device']=='m1' and p['board']=='apple,j293' and p['holder'],'finite M1 proof operation');pattern='/var/lib/maclab/rc7-m1-[a-z0-9-]{8,96}';need(re.fullmatch(pattern,p['packet']) and re.fullmatch(pattern,p['source_packet']) and p['packet']!=p['source_packet'],'distinct owned M1 packets');need(re.fullmatch('[0-9a-f]{64}',b['root_plan_sha256']) and re.fullmatch('[0-9a-f]{64}',b['packet_profile_sha256']) and b['expected_kernel'] in ('7.2.11-6-1-ARCH','7.2.11-7-1-ARCH'),'actual Plan/profile/cohort');need(b['operation']=='prove-owned-groups' or (type(b['files']) is dict and 1<=len(b['files'])<=32 and set(b['files'])<=FIXED),'finite proof leaves')
+ for value in b.get('files',{}).values():need(value is None or (type(value) is dict and set(value)=={'sha256','bytes'} and re.fullmatch('[0-9a-f]{64}',value['sha256']) and type(value['bytes']) is int and 0<value['bytes']<=262144),'bounded previously observed proof pin')
  return p
 
 def target(b):
  validate(b);need(H(_ESP_SOURCE)==ESP,'reviewed guard source');e=module(_ESP_SOURCE,'remote_proof_guard','esp.py');p=b['profile'];P=Path(p['packet']);need(os.geteuid()==0 and os.uname().machine=='aarch64','root native proof reader');e.direct_agent_parent(p['agent_parent']);e.private(P)
  def live():need(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==b['expected_boot_id'] and os.uname().release==b['expected_kernel'] and Path('/proc/device-tree/compatible').read_bytes().split(b'\0')[0]==b'apple,j293' and b'maclab.job=' not in Path('/proc/cmdline').read_bytes(),'actual normal M1 proof-read identity')
- live();raw,_=e.regular(P/'CACHE-PROFILE.json',65536);marker=json.loads(raw);need(marker=={'profile_sha256':b['packet_profile_sha256'],'source_packet':p['source_packet']},'owned current packet marker mismatch');out=read_files(e,P,b['files']);live();return {'schema':'maclab.m1-proof-read/1','status':'ACTUAL_CURRENT_PACKET_PROOFS_READ_ONLY','packet':str(P),'boot_id':b['expected_boot_id'],'kernel':b['expected_kernel'],'root_plan_sha256':b['root_plan_sha256'],'files':out,'target_mutations':False}
+ live();raw,_=e.regular(P/'CACHE-PROFILE.json',65536);marker=json.loads(raw);need(marker=={'profile_sha256':b['packet_profile_sha256'],'source_packet':p['source_packet']},'owned current packet marker mismatch')
+ if b['operation']=='prove-owned-groups':
+  out=drained_groups(e,P);live();return {'schema':'maclab.m1-owned-group-drain/1','status':'OWNED_PACKAGE_GROUPS_DRAINED','packet':str(P),'boot_id':b['expected_boot_id'],'kernel':b['expected_kernel'],'root_plan_sha256':b['root_plan_sha256'],'groups':out,'target_mutations':False}
+ out=read_files(e,P,b['files']);live();return {'schema':'maclab.m1-proof-read/1','status':'ACTUAL_CURRENT_PACKET_PROOFS_READ_ONLY','packet':str(P),'boot_id':b['expected_boot_id'],'kernel':b['expected_kernel'],'root_plan_sha256':b['root_plan_sha256'],'files':out,'target_mutations':False}
 
 def run(b,api=None):
  if b['operation']=='describe-initial-esp':return describe_initial(b)
@@ -57,11 +68,14 @@ def run(b,api=None):
  e,eraw=load();here=Path(__file__).parent;sraw,_=e.pin(here/'frozen-controller-ea3.py',SDK,65536,False);s=module(sraw,'proof_sdk',here/'frozen-controller-ea3.py');c=api or s.API(s.config());d=c.request('/api/devices/m1');s.state_gate(d,p,b,True,210)
  source,_=e.regular(__file__,65536,False);command=shlex.join(['/usr/bin/python3','-E','-B','-c','import base64,zlib\n_ESP_SOURCE=zlib.decompress(base64.b64decode('+repr(base64.b64encode(zlib.compress(eraw)).decode())+'))\n'+source.decode(),'--request-json',json.dumps(b,separators=(',',':'))]);need(len(command.encode())<=120000,'fixed proof command ceiling');r=c.request('/api/devices/m1/exec',{'command':command,'timeout_sec':120},180)
  try:
-  need(r.get('via')=='agent' and r.get('exit_code')==0 and not r.get('stderr'),'proof RPC transport/exit/stderr');o=json.loads(r['stdout']);need(o['schema']=='maclab.m1-proof-read/1' and o['status']=='ACTUAL_CURRENT_PACKET_PROOFS_READ_ONLY' and o['packet']==p['packet'] and o['boot_id']==b['expected_boot_id'] and o['kernel']==b['expected_kernel'] and o['root_plan_sha256']==b['root_plan_sha256'] and o['target_mutations'] is False and set(o['files'])==set(b['files']),'actual proof response binding')
+  need(r.get('via')=='agent' and r.get('exit_code')==0 and not r.get('stderr'),'proof RPC transport/exit/stderr');o=json.loads(r['stdout']);groups=b['operation']=='prove-owned-groups';need(o['schema']==('maclab.m1-owned-group-drain/1' if groups else 'maclab.m1-proof-read/1') and o['status']==('OWNED_PACKAGE_GROUPS_DRAINED' if groups else 'ACTUAL_CURRENT_PACKET_PROOFS_READ_ONLY') and o['packet']==p['packet'] and o['boot_id']==b['expected_boot_id'] and o['kernel']==b['expected_kernel'] and o['root_plan_sha256']==b['root_plan_sha256'] and o['target_mutations'] is False and (groups or set(o['files'])==set(b['files'])),'actual proof response binding')
+  if groups:
+   need(set(o['groups'])=={'transaction-receipts/PACMAN-OWNED-GROUP.json','packet-c-receipts/PACMAN-OWNED-GROUP.json'},'exact possible owned groups')
+   for name,row in o['groups'].items():need((name.startswith('packet-c-') and row=={'absent':True}) or (set(row)=={'pgid','identity_sha256','live'} and type(row['pgid']) is int and row['pgid']>1 and re.fullmatch('[0-9a-f]{64}',row['identity_sha256']) and row['live'] is False),'genuine no-live-group observation')
   total=0
-  for name,pin in o['files'].items():raw=base64.b64decode(pin['base64'],validate=True);total+=len(raw);need(H(raw)==pin['sha256'] and len(raw)==pin['bytes']<=262144,'actual raw proof integrity');expected=b['files'][name];need(expected is None or all(pin[k]==expected[k] for k in ('sha256','bytes')),'actual expected proof pin drift')
+  for name,pin in o.get('files',{}).items():raw=base64.b64decode(pin['base64'],validate=True);total+=len(raw);need(H(raw)==pin['sha256'] and len(raw)==pin['bytes']<=262144,'actual raw proof integrity');expected=b['files'][name];need(expected is None or all(pin[k]==expected[k] for k in ('sha256','bytes')),'actual expected proof pin drift')
   need(total<=131072,'proof batch exceeds128KiB; split finite requests')
  except Exception as exc:return {'status':'M1_PROOF_READ_FAILED','actual_exec':r,'completion_claim':False,'response_error':type(exc).__name__+': '+str(exc)}
- return {'status':'M1_CURRENT_PACKET_PROOFS_OBSERVED','actual_exec':r,'target':o,'source_sha256':H(source),'completion_claim':False}
+ return {'status':'M1_OWNED_PACKAGE_GROUPS_OBSERVED' if b['operation']=='prove-owned-groups' else 'M1_CURRENT_PACKET_PROOFS_OBSERVED','packet':p['packet'],'boot_id':b['expected_boot_id'],'root_plan_sha256':b['root_plan_sha256'],'actual_exec':r,'target':o,'source_sha256':H(source),'completion_claim':False}
 if __name__=='__main__':
  a=argparse.ArgumentParser();g=a.add_mutually_exclusive_group(required=True);g.add_argument('--binding',type=Path);g.add_argument('--request-json');x=a.parse_args();print(json.dumps(run(json.loads(x.binding.read_bytes())) if x.binding else target(json.loads(x.request_json)),separators=(',',':')))
