@@ -580,3 +580,19 @@ func TestAggregateCheckpointCannotBecomeUnreadable(t *testing.T) {
 		t.Fatal("status irrecoverable", e)
 	}
 }
+
+func TestImmutableWorkflowMetadataAvoidsSelfHashCycle(t *testing.T) {
+	r := fixture(t, Phase{ID: "bound-plan", Kind: "bind", TimeoutSec: 2, Template: raw(map[string]string{"plan": "", "device": ""}), Bind: map[string]Value{"/plan": {"workflow", "/plan_sha256"}, "/device": {"workflow", "/device"}}})
+	if e := r.Run(context.Background(), "", false); e != nil {
+		t.Fatal(e)
+	}
+	s := readState(t, r)
+	var out map[string]string
+	json.Unmarshal(s.Records["bound-plan"].Output, &out)
+	if out["plan"] != r.PlanSHA || out["device"] != r.Plan.Device {
+		t.Fatal("metadata not actual runner identity")
+	}
+	if _, e := r.value(s, Value{"workflow", "/authorization"}); e == nil {
+		t.Fatal("invented authority metadata admitted")
+	}
+}

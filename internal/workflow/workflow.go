@@ -36,7 +36,7 @@ type Pin struct {
 }
 
 // Value selects a whole JSON value, without shell interpolation. From is
-// "inputs" or an earlier successful phase; Pointer follows RFC6901.
+// "inputs", "workflow" metadata, or an earlier successful phase; Pointer follows RFC6901.
 type Value struct {
 	From    string `json:"from"`
 	Pointer string `json:"pointer"`
@@ -169,7 +169,7 @@ func (p Plan) Validate() error {
 	if len(p.Phases) == 0 || len(p.Phases) > 100 {
 		return errors.New("need 1..100 phases")
 	}
-	known := map[string]bool{"inputs": true}
+	known := map[string]bool{"inputs": true, "workflow": true}
 	for _, x := range p.Helpers {
 		for _, f := range append([]Pin{x.Python, x.Source}, x.Closure...) {
 			if err := validPin(f); err != nil {
@@ -209,19 +209,19 @@ func (p Plan) Validate() error {
 			if _, ok := p.Helpers[s.Helper]; !ok {
 				return fmt.Errorf("unknown helper %s", s.Helper)
 			}
-			if !known[s.InputPhase] || s.InputPhase == "inputs" {
+			if !known[s.InputPhase] || (s.InputPhase == "inputs" || s.InputPhase == "workflow") {
 				return errors.New("helper requires an earlier phase binding")
 			}
 		case "submit":
-			if !s.Mutates || !known[s.InputPhase] || s.InputPhase == "inputs" {
+			if !s.Mutates || !known[s.InputPhase] || (s.InputPhase == "inputs" || s.InputPhase == "workflow") {
 				return errors.New("submission needs mutation scope and earlier job binding")
 			}
 		case "upload":
-			if s.Mutates || !known[s.InputPhase] || s.InputPhase == "inputs" {
+			if s.Mutates || !known[s.InputPhase] || (s.InputPhase == "inputs" || s.InputPhase == "workflow") {
 				return errors.New("upload requires earlier exact cache receipt and no target mutation")
 			}
 		case "wait":
-			if s.Mutates || !known[s.InputPhase] || s.InputPhase == "inputs" {
+			if s.Mutates || !known[s.InputPhase] || (s.InputPhase == "inputs" || s.InputPhase == "workflow") {
 				return errors.New("wait requires an earlier submission")
 			}
 		default:
@@ -635,7 +635,10 @@ func (r *Runner) execute(ctx context.Context, s *State, p Phase) ([]byte, error)
 }
 func (r *Runner) value(s *State, v Value) (any, error) {
 	b := r.Plan.Inputs
-	if v.From != "inputs" {
+	if v.From == "workflow" {
+		b, _ = json.Marshal(map[string]string{"id": r.Plan.ID, "device": r.Plan.Device, "plan_sha256": r.PlanSHA})
+	}
+	if v.From != "inputs" && v.From != "workflow" {
 		rec := s.Records[v.From]
 		if rec == nil || rec.State != "done" || Hash(rec.Output) != rec.OutputSHA256 {
 			return nil, fmt.Errorf("unverified/missing dependency %s", v.From)
