@@ -51,6 +51,7 @@ for a in [P,*P.parents]:
 need(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==q['boot_id'],'actual current boot changed')
 need(Path('/proc/device-tree/compatible').read_bytes().split(b'\0')[0]==b'apple,j293','M1 J293 only')
 need(b'maclab.job=' not in Path('/proc/cmdline').read_bytes() and not os.path.lexists('/var/lib/pacman/db.lck'),'normal idle original6 required')
+parent=Path(os.readlink('/proc/'+str(os.getppid())+'/exe'));need(str(parent)==q['agent_parent']['path'] and read(parent,67108864)[1]==q['agent_parent']['sha256'],'direct pinned agent parent required before any write')
 marker=json.loads(read(P/'CACHE-PROFILE.json')[0]);need(marker['profile_sha256']==q['profile_sha256'] and marker['source_packet']==q['source_packet'],'original packet ownership mismatch')
 main_raw,main_sha,_=read(P/'original-backup/BACKUP-RECEIPT.json');main=json.loads(main_raw)
 need(main_sha==q['main_receipt_sha256'] and main['packet']==str(P) and main['boot_id']==q['boot_id'] and main['status']=='LOCAL_BACKUP_VERIFIED_ONLY' and main['script_sha256']=='67a36275efc2c188599a03ab850b02ad6f0b8b7d8b61fb0cba22b5c0339258a4','genuine fresh main receipt required')
@@ -82,7 +83,7 @@ def run(binding,api=None):
  source=c.read_pin(binding['supplement_source']);need(H(source)==SUPPLEMENT_SHA,'reviewed supplement source changed')
  client=api or c.API(c.config());d=client.request('/api/devices/m1');bounded={'expected_boot_id':binding['expected_boot_id'],'expected_kernel':'7.2.11-6-1-ARCH'};c.state_gate(d,p,bounded,op!='collect',450)
  scope={'schema':'maclab.m1-fresh-supplement-binding/1','packet':p['packet'],'boot_id':binding['expected_boot_id'],'main_receipt_sha256':main['receipt_sha256'],'backup_source_freeze_sha256':main['source_freeze_sha256'],'old_boot_bin':binding['old_boot_bin'],'source_reviewed_by':binding['source_reviewed_by'],'standing_authority_sha256':AUTHORITY_SHA,'manual_saved_work_confirmed':False,'manual_nearby_recovery_confirmed':False}
- payload={'operation':op,'packet':p['packet'],'boot_id':binding['expected_boot_id'],'source_packet':p['source_packet'],'profile_sha256':H(json.dumps(p,sort_keys=True,separators=(',',':')).encode()),'main_receipt_sha256':main['receipt_sha256'],'source_freeze_sha256':main['source_freeze_sha256'],'authority_sha256':AUTHORITY_SHA,'source_sha256':SUPPLEMENT_SHA}
+ payload={'operation':op,'packet':p['packet'],'boot_id':binding['expected_boot_id'],'source_packet':p['source_packet'],'profile_sha256':H(json.dumps(p,sort_keys=True,separators=(',',':')).encode()),'main_receipt_sha256':main['receipt_sha256'],'source_freeze_sha256':main['source_freeze_sha256'],'authority_sha256':AUTHORITY_SHA,'source_sha256':SUPPLEMENT_SHA,'agent_parent':binding['agent_parent']}
  if op=='stage':payload.update(source_base64=base64.b64encode(source).decode(),scope=scope)
  if op=='collect':payload['receipt_sha256']=binding['receipt_sha256']
  command=shlex.join(['/usr/bin/python3','-E','-B','-c',REMOTE,json.dumps(payload,separators=(',',':'))]);need(len(command.encode())<=120000,'fixed supplement transport ceiling')
