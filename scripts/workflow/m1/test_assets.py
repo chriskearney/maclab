@@ -22,5 +22,8 @@ class FiniteAssetTransport(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'unsupported named artifact'):m.run(b,self.api())
   b=self.b();b.update(operation='stage-input',assets=[{'name':'transact-m1.py','sha256':'0'*64,'bytes':3}])
   with self.assertRaisesRegex(RuntimeError,'unreviewed source code'):m.run(b,self.api())
+ def test_normal7_cannot_stage_install_owner_or_assets(self):
+  b=self.b();b['expected_kernel']='7.2.11-7-1-ARCH'
+  with self.assertRaisesRegex(RuntimeError,'only PacketC clearance'):m.run(b,self.api())
  def test_serial_result_cannot_be_completed(self):
   out=m.run(self.b(),self.api('serial'));self.assertEqual(out['status'],'M1_ASSET_STAGE_FAILED');self.assertEqual(out['actual_exec']['via'],'serial')
