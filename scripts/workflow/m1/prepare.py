@@ -37,7 +37,13 @@ def make(binding):
  need(clear['schema']=='maclab.rc-m1-backup-clearance/1' and clear['boot_authorized'] is False,'backup cannot authorize a boot')
  guards={name:({'absent':True} if row.get('absent') else {'sha256':row['sha256']}) for name,row in current['files'].items()}
  need(set(guards)==set(p['original_file_pins']),'complete observed original guard closure required')
- spec['expected_boot_id']=boot;spec['original_file_pins']=guards
+ old_path='/boot/efi/m1n1/boot.bin.old';need(old_path in guards and not guards[old_path].get('absent') and type(current['files'][old_path]['bytes']) is int and current['files'][old_path]['bytes']>0,'dedicated complete old-boot supplement input required')
+ old_pin={'sha256':guards[old_path]['sha256'],'bytes':current['files'][old_path]['bytes']}
+ # The unchanged owner requires exact equality with main AND supplemental
+ # guard maps. Main67 emits SHA-only guards; the dedicated supplement emits
+ # the stronger SHA+bytes pin. Keep one unambiguous owner for .old, after
+ # validating it with every other fresh preflight guard above.
+ spec['expected_boot_id']=boot;spec['original_file_pins']={name:pin for name,pin in guards.items() if name!=old_path}
  # The capture's authorizations come from the already scoped workflow and
  # persistent actual user authority, not fictional saved-work/nearby answers.
  reviewer=binding.get('root_profile_reviewer');need(isinstance(reviewer,str) and reviewer and not reviewer.startswith('PENDING'),'reviewed supported profile source gate remains closed')
@@ -48,6 +54,6 @@ def make(binding):
  rawfiles={'backup-spec.json':spec_raw,'backup-clearance.json':bytes_json(clear),'backup-m1.py':backup,'STANDING-BOOT-AUTHORITY.json':authority}
  freeze={'schema':'maclab.m1-fresh-backup-source-freeze/1','packet':p['packet'],'boot_id':boot,'sources':{name:{'sha256':H(raw),'bytes':len(raw)} for name,raw in rawfiles.items()},'package_changes':False,'boot_authorized':False,'source_reviewed_by':reviewer};rawfiles['BACKUP-SOURCE-FREEZE.json']=bytes_json(freeze)
  files={name:{'sha256':H(raw),'bytes':len(raw),'base64':base64.b64encode(raw).decode()} for name,raw in rawfiles.items()}
- return {'schema':'maclab.m1-fresh-backup-binding/1','status':'FRESH_BACKUP_INPUTS_BOUND_NO_TARGET_ACTION','packet':p['packet'],'boot_id':boot,'profile_source_reviewer':reviewer,'files':files,'preflight_raw_exec_sha256':H(bytes_json(actual)),'authority_sha256':p['authority_source']['sha256'],'manual_saved_work_confirmed':False,'manual_nearby_recovery_confirmed':False,'historical_backup_or_boot_receipts_copied':False,'package_or_boot_authorization':False,'next':'stage exact files using reviewed write-once input adapter; invoke unchanged backup67a with --packet/--spec/--clearance; retain actual new main8 and supplemental3 independently before any destructive work'}
+ return {'schema':'maclab.m1-fresh-backup-binding/1','status':'FRESH_BACKUP_INPUTS_BOUND_NO_TARGET_ACTION','packet':p['packet'],'boot_id':boot,'profile_source_reviewer':reviewer,'files':files,'preflight_raw_exec_sha256':H(bytes_json(actual)),'authority_sha256':p['authority_source']['sha256'],'manual_saved_work_confirmed':False,'manual_nearby_recovery_confirmed':False,'separately_owned_original_pins':{old_path:old_pin},'complete_fresh_preflight_guard_count':len(guards),'historical_backup_or_boot_receipts_copied':False,'package_or_boot_authorization':False,'next':'stage exact files using reviewed write-once input adapter; invoke unchanged backup67a with --packet/--spec/--clearance; retain actual new main8 and supplemental3 independently before any destructive work'}
 if __name__=='__main__':
  a=argparse.ArgumentParser();a.add_argument('--binding',type=Path,required=True);x=a.parse_args();print(json.dumps(make(json.loads(x.binding.read_bytes())),separators=(',',':')))
