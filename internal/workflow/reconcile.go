@@ -131,6 +131,9 @@ func (r *Runner) Status() ([]byte, error) {
 		return nil, err
 	}
 	s := &decoded
+	if err = r.hydrateBindOutputs(s); err != nil {
+		return nil, err
+	}
 	if s.PlanSHA256 != r.PlanSHA || s.ID != r.Plan.ID || s.Device != r.Plan.Device || s.Records == nil {
 		return nil, errors.New("state/plan identity mismatch")
 	}

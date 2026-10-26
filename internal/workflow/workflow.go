@@ -99,6 +99,7 @@ type Record struct {
 	Finished            time.Time       `json:"finished,omitempty"`
 	Seconds             float64         `json:"seconds"`
 	Output              json.RawMessage `json:"output,omitempty"`
+	OutputPin           *Pin            `json:"output_pin,omitempty"`
 	OutputSHA256        string          `json:"output_sha256,omitempty"`
 	Error               string          `json:"error,omitempty"`
 	AuthorizationSHA256 string          `json:"authorization_sha256,omitempty"`
@@ -336,6 +337,10 @@ func (r *Runner) Open() (*os.File, *State, error) {
 		l.Close()
 		return nil, nil, errors.New("state/plan identity mismatch")
 	}
+	if err = r.hydrateBindOutputs(&s); err != nil {
+		l.Close()
+		return nil, nil, err
+	}
 	for id, rec := range s.Records {
 		if rec.State == "done" {
 			normalized, e := canonical(rec.Output)
@@ -355,7 +360,11 @@ func (r *Runner) Open() (*os.File, *State, error) {
 func (r *Runner) save(s *State) error {
 	// Whitespace is not evidence. Compact JSON retains every record and raw
 	// response while reserving the same hard 4MiB bound for real content.
-	b, err := json.Marshal(s)
+	cold, err := r.coldBindState(s)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(cold)
 	if err != nil {
 		return err
 	}

@@ -581,6 +581,23 @@ func TestAggregateCheckpointCannotBecomeUnreadable(t *testing.T) {
 	}
 }
 
+func TestAggregateLargeBindingsRemainResumableByPinnedArchives(t *testing.T) {
+	large := strings.Repeat("x", 2200000)
+	r := fixture(t, Phase{ID: "one", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": ""}), Bind: map[string]Value{"/data": {"inputs", "/data"}}}, Phase{ID: "two", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": ""}), Bind: map[string]Value{"/data": {"one", "/data"}}})
+	r.Plan.Inputs = raw(map[string]string{"data": large})
+	r.PlanSHA = Hash(raw(r.Plan))
+	if e := r.Run(context.Background(), "", false); e != nil {
+		t.Fatal("individually bounded bindings must remain resumable with full retained outputs", e)
+	}
+	s := readState(t, r)
+	if s.Records["one"].State != "done" || s.Records["two"].State != "done" || s.Records["one"].OutputPin == nil || s.Records["two"].OutputPin != nil {
+		t.Fatal("full binding outputs were not retained by exact pins")
+	}
+	if _, e := r.Status(); e != nil {
+		t.Fatal("status irrecoverable", e)
+	}
+}
+
 func TestImmutableWorkflowMetadataAvoidsSelfHashCycle(t *testing.T) {
 	r := fixture(t, Phase{ID: "bound-plan", Kind: "bind", TimeoutSec: 2, Template: raw(map[string]string{"plan": "", "device": ""}), Bind: map[string]Value{"/plan": {"workflow", "/plan_sha256"}, "/device": {"workflow", "/device"}}})
 	if e := r.Run(context.Background(), "", false); e != nil {
