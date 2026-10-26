@@ -38,8 +38,21 @@ type M1Backend struct {
 	Now    func() time.Time
 }
 
+// The legacy field/probe schema names cover exactly these two M1-family boards.
+func m1FamilyIdentity(device string) (board, model string, ok bool) {
+	switch device {
+	case "m1":
+		return "apple,j293", "Apple MacBook Pro (13-inch, M1, 2020)", true
+	case "m1air":
+		return "apple,j313", "Apple MacBook Air (M1, 2020)", true
+	default:
+		return "", "", false
+	}
+}
+
 func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string, minimum int, agentSHA string) (*api.Job, error) {
-	if !api.ValidRecoveryMode(spec.RecoveryMode) || spec.Device != "m1" || spec.Holder == "" || spec.InstalledManifest == "" || minimum < 2700 || minimum > 7200 || boot == "" || !shaRE.MatchString(agentSHA) {
+	board, model, supported := m1FamilyIdentity(spec.Device)
+	if !api.ValidRecoveryMode(spec.RecoveryMode) || !supported || spec.Holder == "" || spec.InstalledManifest == "" || minimum < 2700 || minimum > 7200 || boot == "" || !shaRE.MatchString(agentSHA) {
 		return nil, errors.New("invalid reviewed M1 installed submission admission")
 	}
 	now := b.Now
@@ -48,12 +61,12 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 	}
 	start := now()
 	check := func(d *client.Device) error {
-		if d == nil || d.Name != "m1" || d.State != api.StateReady || !d.Alive || d.ActiveJob != "" || d.Queued != 0 || d.BootID != boot || d.Kernel != "7.2.11-6-1-ARCH" || strings.Contains(d.Cmdline, "maclab.job=") {
+		if d == nil || d.Name != spec.Device || d.State != api.StateReady || !d.Alive || d.ActiveJob != "" || d.Queued != 0 || d.BootID != boot || d.Kernel != "7.2.11-6-1-ARCH" || strings.Contains(d.Cmdline, "maclab.job=") {
 			return errors.New("M1 submit-time ordinary boot/readiness drift")
 		}
-		modelOK := len(d.Facts.Compatible) > 0 && d.Facts.Compatible[0] == "apple,j293"
+		modelOK := len(d.Facts.Compatible) > 0 && d.Facts.Compatible[0] == board
 		if len(d.Facts.Compatible) == 0 {
-			modelOK = d.Facts.DTModel == "Apple MacBook Pro (13-inch, M1, 2020)"
+			modelOK = d.Facts.DTModel == model
 		}
 		requiredTier := 2
 		if spec.RecoveryMode == api.RecoveryNetworkOnly {
@@ -65,12 +78,15 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 		if spec.RecoveryMode == api.RecoveryNetworkOnly && (d.KnownGood != d.Kernel || !d.Facts.PreflightOK || !d.Facts.Watchdog || !d.Facts.WatchdogArmed || d.Facts.PanicTimeout <= 0) {
 			return errors.New("M1 network-only one-shot/panic/watchdog/known-good preflight facts are not ready")
 		}
+		if spec.Device == "m1air" && (spec.RecoveryTransaction == "" || d.EffectiveRecoveryMode != spec.RecoveryMode || d.RecoveryTransaction != spec.RecoveryTransaction || d.RecoveryHolder != spec.Holder) {
+			return errors.New("Air submit-time recovery transaction drift")
+		}
 		if d.Lease == nil || d.Lease.Holder != spec.Holder || d.Lease.Expires.Sub(now()) < time.Duration(minimum)*time.Second {
 			return errors.New("M1 submit-time lease does not cover job and cleanup")
 		}
 		return nil
 	}
-	d, err := b.Client.Device(ctx, "m1")
+	d, err := b.Client.Device(ctx, spec.Device)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +94,7 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 		return nil, err
 	}
 	if spec.RecoveryMode != api.RecoveryNetworkOnly {
-		oob, err := b.Client.OOBStatus(ctx, "m1")
+		oob, err := b.Client.OOBStatus(ctx, spec.Device)
 		if err != nil {
 			return nil, fmt.Errorf("M1 live recovery route: %w", err)
 		}
@@ -92,11 +108,11 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 	// The actual direct-agent process probes all four markers immediately before
 	// the second device read and POST. A retained prior helper receipt cannot
 	// replace this request; serial fallback fails before the probe can read devices.
-	if err := b.probeM1Markers(ctx, boot, agentSHA); err != nil {
+	if err := b.probeM1Markers(ctx, spec.Device, board, boot, agentSHA); err != nil {
 		return nil, err
 	}
 	// A slow status call or a boot/lease change during it cannot authorize POST.
-	d, err = b.Client.Device(ctx, "m1")
+	d, err = b.Client.Device(ctx, spec.Device)
 	if err != nil {
 		return nil, err
 	}
@@ -115,10 +131,10 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 // Read-only fixed probe. The agent's /exec currently accepts one shell string;
 // fixed interpreter/source plus properly single-quoted JSON data is intentional.
 func m1ShellQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'" }
-func (b *M1Backend) probeM1Markers(ctx context.Context, boot, agentSHA string) error {
-	pin, _ := json.Marshal(map[string]string{"boot_id": boot, "agent_sha256": agentSHA})
+func (b *M1Backend) probeM1Markers(ctx context.Context, device, board, boot, agentSHA string) error {
+	pin, _ := json.Marshal(map[string]string{"boot_id": boot, "agent_sha256": agentSHA, "device": device})
 	command := "/usr/bin/python3 -E -c " + m1ShellQuote(m1MarkerProbe) + " " + m1ShellQuote(string(pin))
-	r, err := b.Client.Exec(ctx, "m1", api.ExecArgs{Command: command, TimeoutSec: 15})
+	r, err := b.Client.Exec(ctx, device, api.ExecArgs{Command: command, TimeoutSec: 15})
 	if err != nil {
 		return errors.New("M1 submit-time marker probe transport failed; no job submitted")
 	}
@@ -140,7 +156,7 @@ func (b *M1Backend) probeM1Markers(ctx context.Context, boot, agentSHA string) e
 	if err = Decode([]byte(r.Stdout), &v); err != nil {
 		return errors.New("M1 marker reply is not exact typed JSON")
 	}
-	if v.Schema != "maclab.m1-submit-markers/1" || v.Status != "ALL_FOUR_MARKERS_ABSENT" || v.Device != "m1" || v.BootID != boot || v.Kernel != "7.2.11-6-1-ARCH" || v.Board != "apple,j293" || v.AgentPath != "/usr/local/bin/lab-agent" || v.AgentSHA != agentSHA || v.TargetMutations == nil || *v.TargetMutations || len(v.Markers) != 4 {
+	if v.Schema != "maclab.m1-submit-markers/1" || v.Status != "ALL_FOUR_MARKERS_ABSENT" || v.Device != device || v.BootID != boot || v.Kernel != "7.2.11-6-1-ARCH" || v.Board != board || v.AgentPath != "/usr/local/bin/lab-agent" || v.AgentSHA != agentSHA || v.TargetMutations == nil || *v.TargetMutations || len(v.Markers) != 4 {
 		return errors.New("M1 marker reply identity drift")
 	}
 	for _, kernel := range []string{"7.2.11-6-1-ARCH", "7.2.11-7-1-ARCH"} {
@@ -193,10 +209,11 @@ def markers():
  return out
 def run(pin):
  need(os.geteuid()==0);agent(pin)
+ device=pin.get('device','m1');boards={'m1':'apple,j293','m1air':'apple,j313'};need(device in boards);board=boards[device]
  def current():
-  need(small('/proc/sys/kernel/random/boot_id',128).decode().strip()==pin['boot_id'] and os.uname().release=='7.2.11-6-1-ARCH' and small('/proc/device-tree/compatible',4096).split(b'\0')[0]==b'apple,j293' and b'maclab.job=' not in small('/proc/cmdline',32768))
+  need(small('/proc/sys/kernel/random/boot_id',128).decode().strip()==pin['boot_id'] and os.uname().release=='7.2.11-6-1-ARCH' and small('/proc/device-tree/compatible',4096).split(b'\0')[0]==board.encode() and b'maclab.job=' not in small('/proc/cmdline',32768))
  current();out=markers();current();agent(pin)
- return {'schema':'maclab.m1-submit-markers/1','status':'ALL_FOUR_MARKERS_ABSENT','device':'m1','boot_id':pin['boot_id'],'kernel':'7.2.11-6-1-ARCH','board':'apple,j293','agent_path':'/usr/local/bin/lab-agent','agent_sha256':pin['agent_sha256'],'markers':out,'target_mutations':False}
+ return {'schema':'maclab.m1-submit-markers/1','status':'ALL_FOUR_MARKERS_ABSENT','device':device,'boot_id':pin['boot_id'],'kernel':'7.2.11-6-1-ARCH','board':board,'agent_path':'/usr/local/bin/lab-agent','agent_sha256':pin['agent_sha256'],'markers':out,'target_mutations':False}
 if __name__=='__main__':
  try:print(json.dumps(run(json.loads(sys.argv[1])),separators=(',',':')))
  except Exception:print('M1 submit-marker admission refused',file=sys.stderr);sys.exit(1)
