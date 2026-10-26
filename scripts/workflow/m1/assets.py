@@ -7,7 +7,7 @@ import argparse,base64,hashlib,json,shlex
 from pathlib import Path
 # Reuse accepted authenticated transport/type checks, not a new client service.
 SDK_SHA='d5e4a7cc72c2bffaf9fdbe7e44a56ac50486f9cb47fcb28aee047d292919094a'
-IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','old-owner-expectations.json','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
+IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','old-owner-expectations.json','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','CLOSURE-ADDITIONS.json','verify-package-files.py'}
 INPUTS={'transact-m1.py','packet-c-old5.py','rollback-hold-old6.py','transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','manifest.json'}
 PRODUCED={'transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','ESP-PREPARATION-EXPECTATIONS.json','ESP-ARRANGEMENT.json','ESP-PREPARATION-RECEIPT.json','ESP-RETIREMENT-RETENTION-RECEIPT.json','limine.conf.ARRANGED','FALLBACK-CONFIG-CLOSURE.json','MIRROR-RECEIPT.json','OWNER-BACKUP-DECISIONS.json'}
 INPUTS|=PRODUCED
@@ -22,7 +22,7 @@ def sdk():
 REMOTE=r'''import base64,fcntl,hashlib,json,os,re,stat,sys,time
 from pathlib import Path
 q=json.loads(sys.argv[1]);P=Path(q['packet']);S=Path(q['source_packet']);H=lambda b:hashlib.sha256(b).hexdigest();deadline=time.monotonic()+180
-IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','old-owner-expectations.json','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
+IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','old-owner-expectations.json','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','CLOSURE-ADDITIONS.json','verify-package-files.py'}
 INPUTS={'transact-m1.py','packet-c-old5.py','rollback-hold-old6.py','transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','manifest.json'}
 PRODUCED={'transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','ESP-PREPARATION-EXPECTATIONS.json','ESP-ARRANGEMENT.json','ESP-PREPARATION-RECEIPT.json','ESP-RETIREMENT-RETENTION-RECEIPT.json','limine.conf.ARRANGED','FALLBACK-CONFIG-CLOSURE.json','MIRROR-RECEIPT.json','OWNER-BACKUP-DECISIONS.json'}
 INPUTS|=PRODUCED
