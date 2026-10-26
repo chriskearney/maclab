@@ -566,7 +566,9 @@ func TestAmbiguousJSONKeysRefusedEveryIdentityPath(t *testing.T) {
 
 func TestAggregateCheckpointCannotBecomeUnreadable(t *testing.T) {
 	large := strings.Repeat("x", 2200000)
-	r := fixture(t, Phase{ID: "one", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": large})}, Phase{ID: "two", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": large})})
+	r := fixture(t, Phase{ID: "one", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": ""}), Bind: map[string]Value{"/data": {"inputs", "/data"}}}, Phase{ID: "two", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": ""}), Bind: map[string]Value{"/data": {"inputs", "/data"}}})
+	r.Plan.Inputs = raw(map[string]string{"data": large})
+	r.PlanSHA = Hash(raw(r.Plan))
 	if e := r.Run(context.Background(), "", false); e == nil {
 		t.Fatal("oversized aggregate checkpoint accepted")
 	}
