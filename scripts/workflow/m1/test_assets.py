@@ -55,5 +55,8 @@ class FiniteAssetTransport(unittest.TestCase):
     if body is not None:o=json.loads(r['stdout']);o.pop('root_plan_sha256');r['stdout']=json.dumps(o)
     return r
   self.assertEqual(m.run(b,Changed())['status'],'M1_ASSET_STAGE_FAILED')
+ def test_original_owner_expectation_data_has_one_exact_reviewed_pin(self):
+  b=self.b();b['assets'][0].update(name='old-owner-expectations.json',sha256=m.DATA['old-owner-expectations.json']);self.assertEqual(m.run(b,self.api())['status'],'M1_ASSETS_STAGED_ONLY');b['assets'][0]['sha256']='f'*64
+  with self.assertRaisesRegex(RuntimeError,'immutable expectation data'):m.run(b,self.api())
  def test_serial_result_cannot_be_completed(self):
   out=m.run(self.b(),self.api('serial'));self.assertEqual(out['status'],'M1_ASSET_STAGE_FAILED');self.assertEqual(out['actual_exec']['via'],'serial')
