@@ -59,4 +59,30 @@ class InstalledNamespace(unittest.TestCase):
   with self.assertRaisesRegex(RuntimeError,'finite supported'):m.run(b,self.api())
   b=self.api_binding();b['postinstall']['packet']+='-stale'
   with self.assertRaisesRegex(RuntimeError,'actual accepted candidate'):m.run(b,self.api())
+class GenuineReturn(unittest.TestCase):
+ def fixture(self):
+  p=Path('/dev/shm/sf-rc-m1-REPROBE-JOB-FINAL.json')
+  if not p.exists():self.skipTest('authentic historical job fixture absent')
+  j=json.loads(p.read_bytes());ir=j['result']['installed'];return {'action':'observe-job-return','profile':{'device':'m1','packet':'/var/lib/maclab/'+ir['release'],'holder':j['spec']['holder']},'source_reviewed_by':'CPU offline source check','job_result':j,'installed_manifest_sha256':ir['manifest_sha256'],'installer_entry_sha256':ir['installer_entry_sha256'],'prejob_boot_id':'original-fixture-UUID'}
+ def api(self,b,change_job=None,change_device=None):
+  class API:
+   def request(self,path,body=None,timeout=60):
+    if path.startswith('/api/jobs/'):
+     j=copy.deepcopy(b['job_result'])
+     if change_job:change_job(j)
+     return j
+    d={'name':'m1','state':'ready','alive':True,'boot_id':'new-fixture-UUID','kernel':'7.2.11-6-1-ARCH','cmdline':'ordinary','lease':{'holder':b['profile']['holder'],'expires':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).isoformat()}}
+    if change_device:change_device(d)
+    return d
+  return API()
+ def test_authentic_retained_success_binds_three_tests_and_fresh_normal_return(self):
+  b=self.fixture();v=m.run(b,self.api(b));self.assertEqual(v['status'],'ACTUAL_INSTALLED_JOB_AND_NORMAL6_RETURN_OBSERVED');self.assertTrue(v['ready_idle']);self.assertFalse(v['reference_changes'])
+ def test_actual_failed_or_drifted_report_never_salvaged(self):
+  for change in (lambda j:j.update(canceled=True),lambda j:j['result']['installed'].update(omt='REGRESSION'),lambda j:j['spec'].update(publish=True)):
+   b=self.fixture()
+   with self.assertRaises(RuntimeError):m.run(b,self.api(b,change_job=change))
+ def test_same_boot_or_still_tagged_return_refused(self):
+  for change in (lambda d:d.update(boot_id='original-fixture-UUID'),lambda d:d.update(cmdline='maclab.job=still-running'),lambda d:d.update(kernel=m.KERNEL)):
+   b=self.fixture()
+   with self.assertRaises(RuntimeError):m.run(b,self.api(b,change_device=change))
 if __name__=='__main__':unittest.main()

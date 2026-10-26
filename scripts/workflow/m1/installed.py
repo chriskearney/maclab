@@ -77,8 +77,18 @@ def api_action(b,client=None):
   need(entry['uki_sha256']==observed['candidate_uki']['sha256'] and entry['uki_sections']['.linux']['sha256']=='95b73368323e7886450369746d123cd24ab6c156704ecb2f7824eee22ee82e25' and entry['uki_sections']['.uname']['text']==KERNEL,'server installer entry differs from reviewed candidate')
   need(entry['limine_conf_sha256']==observed['menus']['temp6_sha256'] and entry['protocol']=='efi' and 'maclab.job=' not in entry['cmdline'],'frozen menu/ordinary entry drift')
  return {'status':'SUPPORTED_INSTALLED_'+action.upper().replace('-','_')+'_OBSERVED','packet':p['packet'],'release':release,'actual_api_response':result,'installed_manifest_sha256':b.get('installed_manifest_sha256',b.get('expectation',{}).get('manifest',{}).get('sha256')),'reference_changes':False,'boot_test_pass':False}
+def observe_return(b,client=None):
+ p,release=common(b);c=sdk();api=client or c.API(c.config());expected=b['job_result'];jobid=expected['id'];need(re.fullmatch('j[0-9-]+[a-f0-9]*',jobid),'actual job id required')
+ actual=api.request('/api/jobs/'+jobid);need(actual['id']==jobid and actual['spec']==expected['spec'] and actual['result']==expected['result'] and actual['state']=='done' and actual['outcome']=='pass' and not actual.get('canceled'),'actual retained successful job mismatch')
+ spec=actual['spec'];need(spec['device']=='m1' and spec['holder']==p['holder'] and spec['installed_manifest']==b['installed_manifest_sha256'] and not any(spec.get(k) for k in ('kernel','source','build','baseline','publish','omt_allow','mesa')),'exact unwaived installed job required')
+ tests=spec['tests'];need(len(tests)==3 and [(t['name'],t.get('builtin'),bool(t.get('gui'))) for t in tests]==[('boot-health','boot-health',False),('gui-smoke','gui-smoke',True),('omarchy-m-test','omarchy-m-test',True)] and tests[2]['timeout_sec']==900 and not any(t.get('script') for t in tests),'unchanged three builtins required')
+ result=actual['result'];ir=result['installed'];need(result['booted'] is True and result['boot_kernel']==KERNEL and not result.get('fell_back') and not result.get('recovery') and ir['release']==release and ir['manifest_sha256']==b['installed_manifest_sha256'] and ir['installer_entry_sha256']==b['installer_entry_sha256'],'candidate job/installer mismatch')
+ need(ir['verdicts']=={'before':'MATCH','booted':'MATCH','after':'MATCH'} and ir['omt']=='NO_REGRESSION' and ir['dmesg']=='NONE_NEW' and not ir.get('kernel_log_fatal'),'actual identity/regression verdicts required')
+ d=api.request('/api/devices/m1');c.state_gate(d,p,{'expected_boot_id':d['boot_id'],'expected_kernel':'7.2.11-6-1-ARCH'},True,900);need(d['boot_id']!=b['prejob_boot_id'] and 'maclab.job=' not in d.get('cmdline',''),'genuine changed-UUID ordinary old6 return required')
+ return {'status':'ACTUAL_INSTALLED_JOB_AND_NORMAL6_RETURN_OBSERVED','packet':p['packet'],'job':jobid,'boot_id':d['boot_id'],'kernel':d['kernel'],'cmdline':d['cmdline'],'ready_idle':True,'installed_manifest_sha256':b['installed_manifest_sha256'],'installer_entry_sha256':b['installer_entry_sha256'],'actual_device':d,'actual_job_result_sha256':H(raw(actual)),'reference_changes':False}
 def run(b,client=None):
  action=b['action']
+ if action=='observe-job-return':return observe_return(b,client)
  if action=='prepare-expectation':return prepare_expectation(b)
  if action=='freeze-preinstall':return freeze_preinstall(b)
  return api_action(b,client)
