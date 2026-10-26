@@ -546,7 +546,7 @@ func (ir *installedRun) copyFrozen(dst string) error {
 	return nil
 }
 
-// --- freezing and promotion (admin) ---
+// --- freezing and promotion (Maintainers) ---
 
 // writeOnce writes a file that must not exist yet, read-only and synced. The
 // create is exclusive, so two writers can't both succeed.
@@ -789,17 +789,17 @@ func (s *Server) hFreezeEntry(w http.ResponseWriter, r *http.Request) {
 }
 
 type promoteReq struct {
-	Device     string `json:"device"`
-	Job        string `json:"job"`
-	AcceptedBy string `json:"accepted_by"`
+	Device string `json:"device"`
+	Job    string `json:"job"`
 }
 
-// hPromote makes an accepted installed run the device's reference and known-good.
+// hPromote makes an accepted installed run the device's reference and
+// known-good, accepted by the Maintainer whose token asked.
 func (s *Server) hPromote(w http.ResponseWriter, r *http.Request) {
 	release := r.PathValue("release")
 	var req promoteReq
-	if json.NewDecoder(r.Body).Decode(&req) != nil || req.AcceptedBy == "" || req.Job == "" {
-		httpErr(w, 400, "need device, job and accepted_by")
+	if json.NewDecoder(r.Body).Decode(&req) != nil || req.Job == "" {
+		httpErr(w, 400, "need device and job")
 		return
 	}
 	j, err := s.store.job(req.Job)
@@ -896,7 +896,7 @@ func (s *Server) hPromote(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "%s is running %s (cmdline %q), not the installed %s outside a lab boot: boot it first", d.Name, d.Kernel, d.Cmdline, j.Result.BootKernel)
 		return
 	}
-	line, err := s.promote(r.Context(), v, release, j, req.AcceptedBy, ledger, map[string][]byte{s.omtBaselinePath(req.Device): ob, s.baselinePath(req.Device): dm})
+	line, err := s.promote(r.Context(), v, release, j, maintainerName(r), ledger, map[string][]byte{s.omtBaselinePath(req.Device): ob, s.baselinePath(req.Device): dm})
 	if err != nil {
 		httpErr(w, 500, "%v", err)
 		return

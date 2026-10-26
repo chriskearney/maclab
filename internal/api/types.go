@@ -431,6 +431,8 @@ type Job struct {
 	Events   []JobEvent `json:"events"`
 	Result   JobResult  `json:"result"`
 	Canceled bool       `json:"canceled,omitempty"`
+	// Maintainer is who submitted it, from their token; empty when labd queued it.
+	Maintainer string `json:"maintainer,omitempty"`
 	// RetryOf is the job this one retries (lab retry).
 	RetryOf string `json:"retry_of,omitempty"`
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
@@ -453,7 +455,7 @@ type GateExclusion struct {
 // ExcludeRequest sets a job aside in lab gate (POST /api/jobs/{id}/exclude).
 type ExcludeRequest struct {
 	Reason string `json:"reason"`       // required
-	By     string `json:"by,omitempty"` // who asks; labd names a tailnet admin by their login itself
+	By     string `json:"by,omitempty"` // who asks; labd names the Maintainer by their token itself
 }
 
 // DeviceSnapshot is what lab gate needs to know about a job's Mac, as it was
@@ -747,4 +749,22 @@ type GateReport struct {
 	// NotCounted holds the runs no family can take: those of Macs labd no
 	// longer has (lab forget) from jobs that didn't record their chip family.
 	NotCounted []GateRun `json:"not_counted,omitempty"`
+}
+
+// ---- Maintainers: the named people with their own access to labd ----
+
+type Maintainer struct {
+	Name    string    `json:"name"`
+	Added   time.Time `json:"added"`
+	AddedBy string    `json:"added_by,omitempty"` // empty for the first Maintainer
+}
+
+type MaintainerRequest struct {
+	Name string `json:"name"`
+}
+
+// NewMaintainer carries a new Maintainer's token, the only time labd shows it.
+type NewMaintainer struct {
+	Maintainer
+	Token string `json:"token"`
 }

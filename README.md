@@ -214,10 +214,17 @@ is stopped (`systemctl stop lab-agent`).
 
 ```sh
 make                                 # binaries in bin/
-labd                                 # prints the admin token on first start
-lab login http://<labd-host>:7770 <admin-token>
+labd --maintainer <you>              # first start: you become the first Maintainer (default $USER)
+lab login http://<labd-host>:7770 "$(cat ~/.local/share/maclab/admin.token)"
 lab enroll m1air --label "MacBook Air M1, left desk"
 ```
+
+Each Maintainer has their own labd token. `lab maintainer add <name>` prints
+a new one once (labd keeps only its hash); `lab maintainer list` and
+`lab maintainer remove <name>` do the rest, and removing someone revokes their
+token at once. Jobs and Promotions record the Maintainer whose token asked.
+Upgrading from a labd with a single admin token keeps that token, in the same
+`admin.token` file, as the first Maintainer's (`--maintainer`, default `$USER`).
 
 On the Mac:
 
@@ -523,8 +530,8 @@ who set it aside, why and when), and every `lab gate` after that, release script
 aside as `--exclude` would, without being asked. The report lists each such job of the kernel in
 `exclusions`, with who, why and when, and the summary names them; a run it sets aside that would
 have counted is in its family's `not_counted`, marked `excluded`, with the mark as `exclusion`.
-`lab job` shows the mark too. It takes a lab admin and a reason, and only a finished job; the person
-is the `lab` user and host, or a tailnet admin's login. `lab exclude <job> --clear` takes it off, and
+`lab job` shows the mark too. It takes a Maintainer's token and a reason, and only a finished job; the
+person is the Maintainer whose token asked. `lab exclude <job> --clear` takes it off, and
 the job counts again. It is for a failure the lab caused, never for one of the kernel's that would
 keep a release back. Jobs from before labd kept the mark have none, and count as before. The API is
 `POST /api/jobs/{id}/exclude` with `{"reason": "...", "by": "..."}`, and `DELETE` to clear; agents
@@ -657,23 +664,21 @@ token: asking again replaces it, so running `./volunteer` again after a setup
 that stopped half way just works. At most 20 people hold one at once; the next
 gets a 429 until one is used or expires a day later. Each person may have at
 most 3 Macs in the lab, counted by tailnet login; a fourth gets a 409 until
-`lab forget` drops one of them. Admins aren't limited. Next
+`lab forget` drops one of them. Maintainers, asking with their token, aren't
+limited. Next
 comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 `lab forget <name>`.
 
-## Phones and the LAN
+## Phones
 
-`labd --trust 192.168.1.0/24,127.0.0.1` (or `MACLAB_TRUST`) lets browsers on
-those networks use the UI with no admin token, so a phone can just open
-`http://<labd-host>:7770`. It judges the TCP peer address only, never a
-forwarded header. Everyone on a trusted network can reboot Macs, open
-their serial shell and run commands on them as root, so trust only a
-network you'd hand a root shell to. A token still works from anywhere. On a
-phone the UI switches to a bottom tab bar and can be added to the home
-screen.
+Open `http://<labd-host>:7770` and enter your Maintainer token; the UI keeps
+it. Every change needs a Maintainer's token, whatever network it comes from;
+with `--tailscale`, tailnet peers may look without one (see
+[Tailscale](#tailscale)). On a phone the UI
+switches to a bottom tab bar and can be added to the home screen.
 
-A browser on a trusted network carries that access to every page it opens,
-so labd refuses (403) any request but GET, HEAD and OPTIONS whose `Origin`
+A browser on the tailnet carries its access to every page it opens, so labd
+refuses (403) any request but GET, HEAD and OPTIONS whose `Origin`
 names another host or port than the `Host` it was sent to, or that comes with
 `Sec-Fetch-Site: cross-site` or `same-site` and no matching `Origin`. Another
 site's page can't run commands on the Macs, and labd's own UI, served from
@@ -683,8 +688,8 @@ pass on the `Host` the browser asked for.
 
 A page can get past that check by DNS rebinding: its site points the page's
 own name at labd's address once the page is open, and then the page and labd
-are one origin to the browser. So access that comes with no token, from
-`--trust` or a tailnet login, counts only on a request that asked for labd by
+are one origin to the browser. So access that comes with no token, from a
+tailnet login, counts only on a request that asked for labd by
 one of its own names: an IP address, `localhost`, this machine's host name
 (short, fully qualified and under `.local`) and, with `--tailscale`, its
 MagicDNS name. Any other name gets a 403 that names it, for GETs too, since a
@@ -692,7 +697,7 @@ page could read the lab as well; the UI shows why and asks for the token. If
 browsers reach labd by another name, a DNS alias say, run labd with
 `--allow-host labd.lan` (repeatable, or a comma-separated list). The token,
 device secrets and the builder token work by any name, so the lab CLI, agents,
-builders and scripts with the token don't care.
+builders and scripts with a token don't care.
 
 ## Tailscale
 
@@ -702,42 +707,18 @@ joins. Nothing in maclab holds a Tailscale API key; a maintainer does the
 tailnet side by hand.
 
 ```sh
-labd --listen <labd tailnet IP>:7770 --tailscale --admins alice@github,bob@github
+labd --listen <labd tailnet IP>:7770 --tailscale
 ```
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5
-seconds). Logins in `--admins` get admin
-access with no token. Every other peer, tagged devices included, may only
-look: the dashboard, Macs, jobs, builds, logs and saved screens, including
-the console output in the live view and in each job's logs. Anything that
-changes the lab, the console itself (`lab shell`), the Mac's stored serial
-log and new screenshots answer 403, and device views never carry the
-controller's token. Peers off the tailnet still need the admin token, which
-keeps working everywhere for `lab` and scripts.
-
-`--trust` still gives admin by the connection's address, so tailnet traffic
-that reaches labd from a trusted address gets admin too, whoever sent it.
-With `--tailscale`, labd refuses that trust where it can tell: a tailnet
-address is judged by its identity even inside a trusted network, and a
-request that came through an HTTP proxy gets no trust and needs the token.
-labd counts any request with an `X-Forwarded-*` or `Forwarded` header, or
-one of serve's `Tailscale-User-*`, `Tailscale-Headers-Info` or
-`Tailscale-Funnel-Request` headers, as proxied, whatever proxy set it:
-`tailscale serve` and Funnel always set `X-Forwarded-For`. Without
-`--tailscale`, headers change nothing and trust goes by address alone.
-
-labd can't see the rest, and can't be made to: raw TCP forwarding
-(`tailscale serve --tcp` or `--tls-terminated-tcp`, Funnel in TCP mode) adds
-no header at all, so a request it forwards from 127.0.0.1 or this host's LAN
-address looks local. So does traffic from a subnet router that brings
-tailnet traffic into a trusted network, or from someone who reaches a
-machine there over Tailscale SSH and connects from it. Trusting 127.0.0.1 or
-the lab LAN while also running `--tailscale` is safe only as long as nobody
-sets up TCP forwarding to labd on this host, or a route like those into that
-network. labd logs a warning at startup for each trusted network. With
-`--tailscale`, trust only networks no tailnet route leads into, or leave
-`--trust` off and use `--admins` and the token.
+seconds). Every peer, tagged devices included, may look with no token: the
+dashboard, Macs, jobs, builds, logs and saved screens, including the console
+output in the live view and in each job's logs. Anything that changes the
+lab, the console itself (`lab shell`), the Mac's stored serial log and new
+screenshots need a Maintainer's token and answer 403 without one, and device
+views never carry the controller's token. A Maintainer's token works from
+anywhere, on the tailnet or off it, for the UI, `lab` and scripts.
 
 To add a Mac, make a one-off auth key in the admin console (Settings, Keys,
 Generate auth key): not reusable, pre-approved, tagged `tag:maclab`, short

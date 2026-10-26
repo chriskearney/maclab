@@ -480,7 +480,7 @@ func (s *Server) hBuilderDone(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-// ---- admin API ----
+// ---- Maintainer API ----
 
 func (s *Server) hCreateBuild(w http.ResponseWriter, r *http.Request) {
 	var req api.BuildRequest

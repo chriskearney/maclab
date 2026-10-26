@@ -35,8 +35,7 @@ func volunteerLab(t *testing.T) (*Server, func(method, path, remote, token, body
 		}
 		return &TailnetPeer{Login: fmt.Sprintf("User-%d-%d@github", a, b), Node: "omarchy"}, nil
 	}
-	trust, _ := ParseTrust("10.1.1.0/24")
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", Trust: trust, Tailscale: true, WhoIs: whois},
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", Tailscale: true, WhoIs: whois},
 		log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -115,11 +114,11 @@ func TestVolunteerLimits(t *testing.T) {
 	if code, _ := ask(peer(1), "", `{}`); code != 200 {
 		t.Errorf("a volunteer who holds a token can't replace it when the lab is full: %d", code)
 	}
-	// Admins aren't held to it, by token or from a trusted network.
+	// Maintainers aren't held to it, with their token from anywhere.
 	if code, _ := ask("100.64.0.3:40000", "adm_secret", `{}`); code != 200 {
 		t.Errorf("admin token from a tagged device: %d", code)
 	}
-	if code, _ := ask("10.1.1.42:1", "", `{}`); code != 200 {
+	if code, _ := ask("10.1.1.42:1", "adm_secret", `{}`); code != 200 {
 		t.Errorf("admin on a trusted network: %d", code)
 	}
 
@@ -162,16 +161,16 @@ func TestVolunteerDevicesMarked(t *testing.T) {
 			t.Fatalf("enroll: %d %s", w.Code, w.Body)
 		}
 		var d api.Device
-		json.Unmarshal(do("GET", "/api/devices/"+e.Name, "10.1.1.42:1", "", "").Body.Bytes(), &d)
+		json.Unmarshal(do("GET", "/api/devices/"+e.Name, "10.1.1.42:1", "adm_secret", "").Body.Bytes(), &d)
 		return d
 	}
 	if d := device(mint("/api/volunteer", "100.64.1.1:1", "", `{"name":"viewer","volunteer":false}`)); !d.Volunteer || d.Label != "User-1-1@github" {
 		t.Errorf("a viewer's Mac: volunteer %v, label %q", d.Volunteer, d.Label)
 	}
-	if d := device(mint("/api/volunteer", "10.1.1.42:1", "", `{"name":"admins"}`)); !d.Volunteer {
+	if d := device(mint("/api/volunteer", "10.1.1.42:1", "adm_secret", `{"name":"admins"}`)); !d.Volunteer {
 		t.Error("a Mac an admin enrolled through ./volunteer isn't marked a volunteer's")
 	}
-	if d := device(mint("/api/enroll-tokens", "10.1.1.42:1", "", `{"name":"labmac"}`)); d.Volunteer {
+	if d := device(mint("/api/enroll-tokens", "10.1.1.42:1", "adm_secret", `{"name":"labmac"}`)); d.Volunteer {
 		t.Error("a lab Mac enrolled with lab enroll is marked a volunteer's")
 	}
 }
@@ -220,9 +219,9 @@ func TestVolunteerMacLimit(t *testing.T) {
 		login  = "user-1-1@github"
 		lan    = "10.1.1.42:1"
 	)
-	ask := func(remote string) (int, string, api.EnrollTokenResponse) {
+	ask := func(remote string, token ...string) (int, string, api.EnrollTokenResponse) {
 		t.Helper()
-		w := do("POST", "/api/volunteer", remote, "", `{"name":"omarchy"}`)
+		w := do("POST", "/api/volunteer", remote, strings.Join(token, ""), `{"name":"omarchy"}`)
 		var resp api.EnrollTokenResponse
 		json.Unmarshal(w.Body.Bytes(), &resp)
 		return w.Code, w.Body.String(), resp
@@ -253,7 +252,7 @@ func TestVolunteerMacLimit(t *testing.T) {
 	if code, body, _ := ask("100.64.1.2:40000"); code != 200 {
 		t.Errorf("someone else: %d %s", code, body)
 	}
-	if code, body, _ := ask(lan); code != 200 {
+	if code, body, _ := ask(lan, "adm_secret"); code != 200 {
 		t.Errorf("an admin: %d %s", code, body)
 	}
 	rows, err := s.store.devices()
@@ -271,7 +270,7 @@ func TestVolunteerMacLimit(t *testing.T) {
 	}
 
 	// lab forget frees a place.
-	if w := do("DELETE", "/api/devices/"+names[0], lan, "", ""); w.Code != 200 {
+	if w := do("DELETE", "/api/devices/"+names[0], lan, "adm_secret", ""); w.Code != 200 {
 		t.Fatalf("forget %s: %d %s", names[0], w.Code, w.Body)
 	}
 	code, body, tok := ask(person)
@@ -313,7 +312,7 @@ func (f *filler) Read(p []byte) (int, error) {
 func TestAgentBodyLimits(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret"}, log.New(io.Discard, "", 0))
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret"}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}

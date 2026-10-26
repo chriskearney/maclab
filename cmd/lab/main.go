@@ -27,7 +27,8 @@ import (
 
 const usage = `lab: run kernels and tests on Omarchy Macs
 
-  lab login <labd-url> <admin-token>
+  lab login <labd-url> <your-maintainer-token>
+  lab maintainer add <name> | remove <name> | list   the people with their own labd token
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
   lab device <name> [--label ..] [--model ..] [--oob-url http://m3:7780 --oob-token ..] [--no-oob]
@@ -56,7 +57,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
                                       Refused while someone else leases it or its agent checks in, unless --force
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
   lab installed freeze-entry <device> --release R    freeze the installer's boot entry, after the install
-  lab installed promote <device> --release R --job <id> --accepted-by <who>
+  lab installed promote <device> --release R --job <id>   accepted by you
                                       references + known-good, labd's and the agent's (Mac on that kernel, agent 0.7.3+)
   lab installed status --release R                   the frozen files of a release
   lab reset <device>                  run the recovery ladder on an idle Mac by hand; a Mac that left
@@ -352,6 +353,9 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 
 	case "installed":
 		return installedCmd(ctx, c, args)
+
+	case "maintainer":
+		return maintainerCmd(ctx, c, args)
 
 	case "builds":
 		l, err := c.Builds(ctx, 20)
@@ -714,6 +718,9 @@ func printJob(j *api.Job, events bool) {
 	if j.Summary != "" {
 		fmt.Printf("  %s\n", j.Summary)
 	}
+	if j.Maintainer != "" {
+		fmt.Printf("  submitted by %s\n", j.Maintainer)
+	}
 	if x := j.GateExclusion; x != nil {
 		fmt.Printf("  set aside in lab gate by %s at %s: %s\n", x.By, x.Time.Local().Format(time.DateTime), x.Reason)
 	}
@@ -995,7 +1002,7 @@ func trunc(s string, n int) string {
 
 func login(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: lab login <labd-url> <admin-token>")
+		return fmt.Errorf("usage: lab login <labd-url> <your-maintainer-token>")
 	}
 	c := &client.Client{URL: strings.TrimRight(args[0], "/"), Token: args[1]}
 	if err := c.Save(); err != nil {
@@ -1296,7 +1303,6 @@ func installedCmd(ctx context.Context, c *client.Client, args []string) error {
 	release := fs.String("release", "", "release name, e.g. 12.0")
 	approved := fs.String("approved-by", "", "who approved the manifest, comma-separated")
 	job := fs.String("job", "", "the installed job to promote")
-	accepted := fs.String("accepted-by", "", "who accepted it (required)")
 	pos := parse(fs, args[1:])
 	if *release == "" {
 		return errors.New("--release is required")
@@ -1324,10 +1330,10 @@ func installedCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		err = c.Installed(ctx, "POST", *release, "entry/"+pos[0], nil, &out)
 	case "promote":
-		if err := need(pos, 1, "lab installed promote <device> --release R --job <id> --accepted-by <who>"); err != nil {
+		if err := need(pos, 1, "lab installed promote <device> --release R --job <id>"); err != nil {
 			return err
 		}
-		err = c.Installed(ctx, "POST", *release, "promote", map[string]any{"device": pos[0], "job": *job, "accepted_by": *accepted}, &out)
+		err = c.Installed(ctx, "POST", *release, "promote", map[string]any{"device": pos[0], "job": *job}, &out)
 	case "status":
 		err = c.Installed(ctx, "GET", *release, "", nil, &out)
 	default:
@@ -1339,4 +1345,47 @@ func installedCmd(ctx context.Context, c *client.Client, args []string) error {
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))
 	return nil
+}
+
+// maintainerCmd handles `lab maintainer ...`: the people with their own labd
+// token. labd logs each change under the Maintainer who made it.
+func maintainerCmd(ctx context.Context, c *client.Client, args []string) error {
+	const use = "lab maintainer add <name> | remove <name> | list"
+	if len(args) < 1 {
+		return errors.New(use)
+	}
+	switch args[0] {
+	case "add":
+		if err := need(args[1:], 1, "lab maintainer add <name>"); err != nil {
+			return err
+		}
+		m, err := c.AddMaintainer(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Token for %s (shown only this once; labd keeps only its hash):\n\n  %s\n\n", m.Name, m.Token)
+		fmt.Printf("They log in with:\n\n  lab login %s <token>\n", c.URL)
+		return nil
+	case "remove":
+		if err := need(args[1:], 1, "lab maintainer remove <name>"); err != nil {
+			return err
+		}
+		if err := c.RemoveMaintainer(ctx, args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("removed %s; their token no longer works\n", args[1])
+		return nil
+	case "list":
+		ms, err := c.Maintainers(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(w, "MAINTAINER\tADDED\tBY")
+		for _, m := range ms {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", m.Name, m.Added.Format(time.DateOnly), orDash(m.AddedBy, "-"))
+		}
+		return w.Flush()
+	}
+	return errors.New(use)
 }

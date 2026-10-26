@@ -1,4 +1,4 @@
-// Package client is the Go client for labd's admin API, used by the lab CLI and MCP server.
+// Package client is the Go client for labd's Maintainer API, used by the lab CLI and MCP server.
 package client
 
 import (
@@ -43,7 +43,7 @@ func Load() (*Client, error) {
 		c.Token = v
 	}
 	if c.URL == "" || c.Token == "" {
-		return nil, fmt.Errorf("not configured: run `lab login <labd-url> <admin-token>` or set MACLAB_URL and MACLAB_TOKEN")
+		return nil, fmt.Errorf("not configured: run `lab login <labd-url> <your-maintainer-token>` or set MACLAB_URL and MACLAB_TOKEN")
 	}
 	c.URL = strings.TrimRight(c.URL, "/")
 	c.http = &http.Client{}
@@ -124,6 +124,21 @@ func (c *Client) PatchDevice(ctx context.Context, name string, p api.DevicePatch
 func (c *Client) EnrollToken(ctx context.Context, req api.EnrollTokenRequest) (*api.EnrollTokenResponse, error) {
 	var out api.EnrollTokenResponse
 	return &out, c.do(ctx, "POST", "/api/enroll-tokens", jsonBody(req), &out)
+}
+
+func (c *Client) Maintainers(ctx context.Context) ([]api.Maintainer, error) {
+	var out []api.Maintainer
+	return out, c.do(ctx, "GET", "/api/maintainers", nil, &out)
+}
+
+// AddMaintainer returns the new Maintainer's token, which labd shows only this once.
+func (c *Client) AddMaintainer(ctx context.Context, name string) (*api.NewMaintainer, error) {
+	var out api.NewMaintainer
+	return &out, c.do(ctx, "POST", "/api/maintainers", jsonBody(api.MaintainerRequest{Name: name}), &out)
+}
+
+func (c *Client) RemoveMaintainer(ctx context.Context, name string) error {
+	return c.do(ctx, "DELETE", "/api/maintainers/"+url.PathEscape(name), nil, nil)
 }
 
 func (c *Client) Lease(ctx context.Context, name, holder string, ttl time.Duration) (*api.Lease, error) {
@@ -365,7 +380,7 @@ func (c *Client) BuildFile(ctx context.Context, id, name, dst string) (string, e
 	return hex.EncodeToString(h.Sum(nil)), os.Rename(dst+".part", dst)
 }
 
-// Installed sends one of the installed-release admin requests
+// Installed sends one of the installed-release Maintainer requests
 // (/api/installed/<release>[/<what>]) and decodes the reply into out.
 func (c *Client) Installed(ctx context.Context, method, release, what string, body, out any) error {
 	var r io.Reader

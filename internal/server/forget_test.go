@@ -149,7 +149,7 @@ func TestForgetThenLateSave(t *testing.T) {
 	// What labd loads when it starts again.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s2, err := New(ctx, Config{DataDir: l.s.cfg.DataDir, AdminToken: "admin"}, log.New(io.Discard, "", 0))
+	s2, err := New(ctx, Config{DataDir: l.s.cfg.DataDir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestPublishForgottenMacsReport(t *testing.T) {
 	defer site.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "admin", OMTSite: site.URL}, log.New(io.Discard, "", 0))
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, OMTSite: site.URL}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}

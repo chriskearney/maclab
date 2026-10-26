@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -35,20 +34,19 @@ import (
 )
 
 type Config struct {
-	DataDir      string
-	AdminToken   string
-	Interval     time.Duration // agent heartbeat interval
-	BootTimeout  time.Duration // default time for a Mac to come back after a reboot
-	OfflineAfter time.Duration
-	NtfyURL      string
-	NotifyCmd    string
-	// Trust lists networks whose clients get admin access without a token,
-	// judged by the connection's source address only.
-	Trust []*net.IPNet
-	// Tailscale lets tailnet peers in by identity: logins in Admins get admin
-	// access, every other peer may only look.
+	DataDir string
+	// FirstMaintainer and FirstMaintainerToken name the Maintainer a labd
+	// with none starts with: on upgrade, whoever held the old admin token.
+	FirstMaintainer      string
+	FirstMaintainerToken string
+	Interval             time.Duration // agent heartbeat interval
+	BootTimeout          time.Duration // default time for a Mac to come back after a reboot
+	OfflineAfter         time.Duration
+	NtfyURL              string
+	NotifyCmd            string
+	// Tailscale lets tailnet peers look at the lab by identity; only a
+	// Maintainer's token changes it.
 	Tailscale bool
-	Admins    []string
 	// WhoIs names the peer behind a tailnet address; tests swap in fakes.
 	WhoIs func(ctx context.Context, ip string) (*TailnetPeer, error)
 	// AllowHosts are names labd answers to besides its own (--allow-host):
@@ -98,6 +96,7 @@ type Server struct {
 	hub         hub
 	builds      *buildMgr
 	notifyHooks []func(Notification)
+	conns       maintainerConns
 	serialMu    sync.Mutex
 	whoMu       sync.Mutex
 	whoCache    map[netip.Addr]whoisEntry
@@ -167,12 +166,11 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			cfg.TailnetNames = tailscaleNames
 		}
 	}
-	warnTrustedNetworks(cfg, logger)
 	var hosts []string
 	for _, h := range cfg.AllowHosts {
 		hosts = append(hosts, hostName(h))
 	}
-	if len(cfg.Trust) > 0 || cfg.Tailscale {
+	if cfg.Tailscale {
 		hosts = append(hosts, localNames()...)
 		logger.Printf("without a token, labd answers only to its own names: IP addresses, localhost, %s%s; --allow-host adds one",
 			strings.Join(hosts, ", "), map[bool]string{true: " and its MagicDNS names"}[cfg.Tailscale])
@@ -191,6 +189,9 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}, hosts: hosts}
 	s.start = s.now()
+	if err := s.firstMaintainer(); err != nil {
+		return nil, err
+	}
 	rows, err := st.devices()
 	if err != nil {
 		return nil, err
@@ -441,55 +442,58 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/auth", s.hAuth)
 	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
 	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
-	m.HandleFunc("PATCH /api/devices/{name}", s.admin(s.hPatchDevice))
-	m.HandleFunc("DELETE /api/devices/{name}", s.admin(s.hForgetDevice))
-	m.HandleFunc("POST /api/devices/{name}/lease", s.admin(s.hLease))
-	m.HandleFunc("DELETE /api/devices/{name}/lease", s.admin(s.hRelease))
-	m.HandleFunc("POST /api/devices/{name}/reset", s.admin(s.hReset))
-	m.HandleFunc("GET /api/devices/{name}/serial", s.admin(s.hSerial))
+	m.HandleFunc("PATCH /api/devices/{name}", s.maintainer(s.hPatchDevice))
+	m.HandleFunc("DELETE /api/devices/{name}", s.maintainer(s.hForgetDevice))
+	m.HandleFunc("POST /api/devices/{name}/lease", s.maintainer(s.hLease))
+	m.HandleFunc("DELETE /api/devices/{name}/lease", s.maintainer(s.hRelease))
+	m.HandleFunc("POST /api/devices/{name}/reset", s.maintainer(s.hReset))
+	m.HandleFunc("GET /api/devices/{name}/serial", s.maintainer(s.hSerial))
 	m.HandleFunc("GET /api/devices/{name}/oob", s.viewer(s.hOOBStatus))
 	m.HandleFunc("GET /api/stream", s.viewer(s.hStream))
-	m.HandleFunc("POST /api/devices/{name}/screenshot", s.admin(s.hScreenshot))
+	m.HandleFunc("POST /api/devices/{name}/screenshot", s.maintainer(s.hScreenshot))
 	m.HandleFunc("GET /api/devices/{name}/screen", s.viewer(s.hScreen))
 	m.HandleFunc("GET /api/devices/{name}/screens", s.viewer(s.hScreens))
 	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.viewer(s.hScreen))
 	m.HandleFunc("GET /api/devices/{name}/logs", s.viewer(s.hLogs))
-	m.HandleFunc("GET /api/devices/{name}/console", s.admin(s.hConsoleRaw))
-	m.HandleFunc("POST /api/devices/{name}/console", s.admin(s.hConsoleWrite))
-	m.HandleFunc("POST /api/devices/{name}/console/arm", s.admin(s.hConsoleArm))
+	m.HandleFunc("GET /api/devices/{name}/console", s.maintainer(s.hConsoleRaw))
+	m.HandleFunc("POST /api/devices/{name}/console", s.maintainer(s.hConsoleWrite))
+	m.HandleFunc("POST /api/devices/{name}/console/arm", s.maintainer(s.hConsoleArm))
 	m.HandleFunc("POST /api/agent/screen", s.agent(s.hAgentScreen))
-	m.HandleFunc("POST /api/enroll-tokens", s.admin(s.hEnrollToken))
+	m.HandleFunc("POST /api/enroll-tokens", s.maintainer(s.hEnrollToken))
 	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
 	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
-	m.HandleFunc("POST /api/artifacts", s.admin(s.hPutArtifact))
-	m.HandleFunc("POST /api/jobs", s.admin(s.hSubmit))
+	m.HandleFunc("POST /api/artifacts", s.maintainer(s.hPutArtifact))
+	m.HandleFunc("POST /api/jobs", s.maintainer(s.hSubmit))
 	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
 	m.HandleFunc("GET /api/jobs/{id}", s.viewer(s.hJob))
 	m.HandleFunc("GET /api/jobs/{id}/wait", s.viewer(s.hWait))
-	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
-	m.HandleFunc("POST /api/jobs/{id}/retry", s.admin(s.hRetry))
-	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
-	m.HandleFunc("POST /api/jobs/{id}/exclude", s.admin(s.hExclude))
-	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.admin(s.hExclude))
+	m.HandleFunc("POST /api/jobs/{id}/cancel", s.maintainer(s.hCancel))
+	m.HandleFunc("POST /api/jobs/{id}/retry", s.maintainer(s.hRetry))
+	m.HandleFunc("POST /api/jobs/{id}/publish", s.maintainer(s.hPublish))
+	m.HandleFunc("POST /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
+	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
 	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.viewer(s.hJobFile))
-	m.HandleFunc("GET /api/gate/{kernel}", s.admin(s.hGate))
+	m.HandleFunc("GET /api/gate/{kernel}", s.maintainer(s.hGate))
 	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
 	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
 	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hAgentArtifact))
-	m.HandleFunc("POST /api/builds", s.admin(s.hCreateBuild))
-	m.HandleFunc("POST /api/installed/{release}/manifest", s.admin(s.hFreezeManifest))
-	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.admin(s.hFreezeEntry))
-	m.HandleFunc("POST /api/installed/{release}/promote", s.admin(s.hPromote))
+	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
+	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
+	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
+	m.HandleFunc("POST /api/installed/{release}/promote", s.maintainer(s.hPromote))
 	m.HandleFunc("GET /api/installed/{release}", s.viewer(s.hInstalledStatus))
 	m.HandleFunc("GET /api/builds", s.viewer(s.hBuilds))
 	m.HandleFunc("GET /api/builds/{id}", s.viewer(s.hBuild))
 	m.HandleFunc("GET /api/builds/{id}/log", s.viewer(s.hBuildLog))
 	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
-	m.HandleFunc("POST /api/builds/{id}/cancel", s.admin(s.hCancelBuild))
+	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
 	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
-	m.HandleFunc("POST /api/devices/{name}/exec", s.admin(s.hExec))
+	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
+	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
+	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
+	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
 	web.Register(m)
 	return sameOrigin(m)
 }
@@ -507,78 +511,16 @@ func bearer(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
-// admin guards everything that changes the lab, the console (lab shell) and
-// the Mac's stored serial log.
-func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch a, who, foreign := s.accessHost(r); {
-		case a == adminAccess:
-			h(w, r)
-		case a == viewAccess:
-			httpErr(w, 403, "%s may only look; this needs a lab admin", who)
-		case foreign:
-			foreignHost(w, r)
-		default:
-			httpErr(w, 401, "bad admin token")
-		}
-	}
-}
-
-// viewer guards read-only endpoints, which tailnet viewers may use too.
-func (s *Server) viewer(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if a, _, foreign := s.accessHost(r); foreign {
-			foreignHost(w, r)
-			return
-		} else if a == noAccess {
-			httpErr(w, 401, "bad admin token")
-			return
-		}
-		h(w, r)
-	}
-}
-
-// trusted reports whether the client connected from a trusted network. It
-// uses the TCP peer address, never a forwarded header a client could forge.
-func (s *Server) trusted(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	for _, n := range s.cfg.Trust {
-		if ip != nil && n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// ParseTrust turns "10.1.1.0/24,127.0.0.1" into networks; a bare IP is one host.
-func ParseTrust(v string) ([]*net.IPNet, error) {
-	var out []*net.IPNet
-	for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if !strings.Contains(f, "/") {
-			if strings.Contains(f, ":") {
-				f += "/128"
-			} else {
-				f += "/32"
-			}
-		}
-		_, n, err := net.ParseCIDR(f)
-		if err != nil {
-			return nil, fmt.Errorf("trust %q: %w", f, err)
-		}
-		out = append(out, n)
-	}
-	return out, nil
-}
-
 // hAuth tells the UI whether this client needs a token at all, and whether
-// it may only look. Sent with a token, it says what that token is worth.
+// it may only look. Sent with a Maintainer's token, it names its Maintainer.
 // A request to a name labd doesn't know as its own needs a token, and
-// refused says why.
+// refused says why. Without --tailscale nothing gets in without a token, so
+// there is nothing to ask: labd answers 404, and the UI asks for the token.
 func (s *Server) hAuth(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Tailscale {
+		http.NotFound(w, r)
+		return
+	}
 	a, who, foreign := s.accessHost(r)
 	role := map[access]string{viewAccess: "viewer", adminAccess: "admin"}[a]
 	resp := map[string]any{"trusted": a == adminAccess, "token_required": a == noAccess, "role": role, "login": who}
@@ -718,12 +660,15 @@ func tooManyMacs(w http.ResponseWriter, login string, names []string) {
 // free device name, labelled with the volunteer's tailnet login and marked a
 // volunteer's. Tagged tailnet devices are machines, lab Macs among them, not
 // people, so they get no token, and a person with maxVolunteerMacs Macs in
-// the lab gets none either. Admins may ask too, outside the limits: they can
-// make any token with POST /api/enroll-tokens anyway.
+// the lab gets none either. Maintainers may ask too, with their token,
+// outside the limits: they can make any token with POST /api/enroll-tokens
+// anyway.
 func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	a, who := s.access(r)
 	volunteer := ""
-	if a != adminAccess {
+	if a == adminAccess {
+		who = "" // a Maintainer, not a volunteer's tailnet login
+	} else {
 		if s.taggedPeer(r) {
 			httpErr(w, 403, "%s is a tagged tailnet device, a machine rather than a person: only a person may volunteer a Mac", who)
 			return
@@ -752,7 +697,7 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "no free device name")
 		return
 	}
-	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(an admin)"))
+	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(Maintainer "+maintainerName(r)+")"))
 	s.issueToken(w, req, volunteer)
 }
 
@@ -1215,7 +1160,7 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
-	j, code, err := s.Submit(spec)
+	j, code, err := s.submit(maintainerName(r), spec, "")
 	if err != nil {
 		httpErr(w, code, "%v", err)
 		return
@@ -1223,8 +1168,8 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, j)
 }
 
-// Submit validates and queues a job.
-func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit(spec, "") }
+// Submit validates and queues a job that labd queues itself, for no Maintainer.
+func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit("", spec, "") }
 
 // Retry queues a finished job again as a new job: the same Mac, kernel,
 // tests and cmdline, recording which job it retries. holder, if given,
@@ -1233,7 +1178,10 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.subm
 // collected, it builds again from the commit and the config that build
 // recorded, never from wherever a branch points now or the Mac's config as
 // it is now.
-func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
+func (s *Server) Retry(id, holder string) (*api.Job, int, error) { return s.retry("", id, holder) }
+
+// retry is Retry for the Maintainer who asked.
+func (s *Server) retry(maintainer, id, holder string) (*api.Job, int, error) {
 	old, err := s.store.job(id)
 	if err != nil {
 		return nil, 404, fmt.Errorf("no job %s", id)
@@ -1269,7 +1217,7 @@ func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
 			notes = append(notes, note)
 		}
 	}
-	return s.submit(spec, old.ID, notes...)
+	return s.submit(maintainer, spec, old.ID, notes...)
 }
 
 // pinnedConfig is the config a retry of old builds its kernel again with: the
@@ -1319,11 +1267,11 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
-// submit queues a job; retryOf names the job it retries, whose source may
+// submit queues a job for the Maintainer who asked; retryOf names the job it retries, whose source may
 // come with the kernel already built from it, and notes go in the job's
 // events after the first. The job records what lab gate needs to know about
 // its Mac as it is now.
-func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api.Job, int, error) {
+func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, notes ...string) (*api.Job, int, error) {
 	v := s.dev(spec.Device)
 	if v == nil {
 		return nil, 404, fmt.Errorf("no device %q", spec.Device)
@@ -1425,7 +1373,7 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 	if retryOf != "" {
 		msg = "queued: a retry of job " + retryOf
 	}
-	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
+	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, Maintainer: maintainer, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: msg}}, RetryOf: retryOf,
 		DeviceAtSubmit: &api.DeviceSnapshot{Family: family(d.Facts), Volunteer: d.Volunteer, OMT: s.omtWanted(d.Device, api.JobSpec{})}}
 	for _, n := range notes {
@@ -1452,7 +1400,7 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 
 // hRetry submits a finished job again; ?holder= names who retries it.
 func (s *Server) hRetry(w http.ResponseWriter, r *http.Request) {
-	j, code, err := s.Retry(r.PathValue("id"), r.URL.Query().Get("holder"))
+	j, code, err := s.retry(maintainerName(r), r.PathValue("id"), r.URL.Query().Get("holder"))
 	if err != nil {
 		httpErr(w, code, "%v", err)
 		return

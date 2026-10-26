@@ -73,6 +73,32 @@ type lab struct {
 	secret string // its device secret
 	ctx    context.Context
 	agent  *agent.Config // the simulated Mac's enrolled lab-agent
+	logs   *logBuf
+}
+
+// harnessMaintainer is the first Maintainer of every harness labd, and
+// harnessToken its token: the one l.get and l.post send.
+const (
+	harnessMaintainer = "ada"
+	harnessToken      = "admin"
+)
+
+// logBuf collects labd's log so tests can read what it recorded.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *logBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *logBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "sim-mac") }
@@ -112,7 +138,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &lab{t: t, cancel: cancel, name: name, ctx: ctx}
+	l := &lab{t: t, cancel: cancel, name: name, ctx: ctx, logs: &logBuf{}}
 	sim := agent.NewSim(t.TempDir())
 	sim.RebootDelay = 300 * time.Millisecond
 	l.sim = sim
@@ -123,13 +149,14 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		default:
 		}
 	}
-	quiet := log.New(io.Discard, "", 0)
+	var logw io.Writer = l.logs
 	if os.Getenv("MACLAB_TEST_LOG") != "" {
-		quiet = log.New(os.Stderr, "labd: ", log.Ltime|log.Lmicroseconds)
+		logw = io.MultiWriter(l.logs, os.Stderr)
 	}
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "admin", Interval: 200 * time.Millisecond,
+	logger := log.New(logw, "labd: ", log.Ltime|log.Lmicroseconds)
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
 		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
-		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}, quiet)
+		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +178,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 	}
 	l.secret = resp.Secret
 	l.agent = &agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir(), Clock: clock}
-	a := agent.New(l.agent, sim, quiet)
+	a := agent.New(l.agent, sim, logger)
 	go a.Run(ctx)
 	if withOOB {
 		v := s.dev(name)
@@ -435,15 +462,7 @@ func TestFailingTest(t *testing.T) {
 
 func (l *lab) get(method, path string) (*http.Response, string) {
 	l.t.Helper()
-	req, _ := http.NewRequest(method, l.url+path, nil)
-	req.Header.Set("Authorization", "Bearer admin")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		l.t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	return resp, string(b)
+	return l.as(harnessToken, method, path, nil)
 }
 
 func TestLiveStreamScreenAndLogs(t *testing.T) {
@@ -507,7 +526,7 @@ func TestScreenAtRestoredOnStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	quiet := log.New(io.Discard, "", 0)
-	s, err := New(ctx, Config{DataDir: dir, AdminToken: "a"}, quiet)
+	s, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +534,7 @@ func TestScreenAtRestoredOnStart(t *testing.T) {
 	s.store.saveDevice(&d, "h")
 	os.MkdirAll(s.screenDir("mac"), 0o755)
 	os.WriteFile(filepath.Join(s.screenDir("mac"), "1790753481823.jpg"), []byte("x"), 0o644)
-	s2, err := New(ctx, Config{DataDir: dir, AdminToken: "a"}, quiet)
+	s2, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1472,7 +1491,7 @@ func TestRunningBuildSurvivesLabdRestart(t *testing.T) {
 	defer cancel()
 	dir := t.TempDir()
 	quiet := log.New(io.Discard, "", 0)
-	s1, err := New(ctx, Config{DataDir: dir, AdminToken: "a", BuilderToken: "bld"}, quiet)
+	s1, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a", BuilderToken: "bld"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1481,7 +1500,7 @@ func TestRunningBuildSurvivesLabdRestart(t *testing.T) {
 		ConfigSHA: "c", State: api.BuildRunning, Stage: "build", Created: now, Updated: now}
 	s1.saveBuild(b)
 	// labd restarts while the builder keeps compiling.
-	s2, err := New(ctx, Config{DataDir: dir, AdminToken: "a", BuilderToken: "bld"}, quiet)
+	s2, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a", BuilderToken: "bld"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
