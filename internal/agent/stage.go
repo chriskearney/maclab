@@ -49,7 +49,9 @@ func (l *Linux) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fe
 	}
 	if lim, ok := b.(*limineLayout); ok {
 		if a.Installed != nil {
-			return l.stageInstalled(job, a.Installed, lim, bootDir)
+			in := *a.Installed
+			in.Cmdline = withLabBootParams(in.Cmdline, labBootOpenTimeout(a))
+			return l.stageInstalled(job, &in, lim, bootDir)
 		}
 		return l.stageLimine(ctx, job, a, kg, lim, bootDir, fetch)
 	}
@@ -93,7 +95,7 @@ func (l *Linux) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fe
 	if err := g.writeEntries(); err != nil {
 		return res, err
 	}
-	return api.StageResult{KernelRelease: krel, Entry: entryPrefix + job, Cmdline: cmdline}, nil
+	return api.StageResult{KernelRelease: krel, Entry: entryPrefix + job, Cmdline: cmdline, NoAppleWDT: a.Artifact != "" && !hasAppleWDT(krel)}, nil
 }
 
 // stageLimine stages a job as a UKI on the ESP and lists it in limine.conf.
@@ -126,7 +128,23 @@ func (l *Linux) stageLimine(ctx context.Context, job string, a api.StageArgs, kg
 	if err := lim.writeEntries(); err != nil {
 		return res, err
 	}
-	return api.StageResult{KernelRelease: krel, Entry: entryPrefix + job, Cmdline: cmdline}, nil
+	return api.StageResult{KernelRelease: krel, Entry: entryPrefix + job, Cmdline: cmdline, NoAppleWDT: a.Artifact != "" && !hasAppleWDT(krel)}, nil
+}
+
+// hasAppleWDT is whether an installed lab kernel builds apple_wdt, by its
+// build .config or, without one, modules.builtin and the modules. A kernel
+// that shows neither counts as having it: the lab can't tell.
+func hasAppleWDT(krel string) bool {
+	dir := filepath.Join("/usr/lib/modules", krel)
+	if b, err := os.ReadFile(filepath.Join(dir, "build", ".config")); err == nil {
+		return kernelHasAppleWDT(string(b))
+	}
+	builtin, err := os.ReadFile(filepath.Join(dir, "modules.builtin"))
+	if err != nil || strings.Contains(string(builtin), "/apple_wdt.ko") {
+		return true
+	}
+	m, _ := filepath.Glob(filepath.Join(dir, "kernel", "drivers", "watchdog", "apple_wdt.ko*"))
+	return len(m) > 0
 }
 
 // installedMarker in a job's stage dir says its entry boots an installed UKI.
@@ -134,7 +152,8 @@ const installedMarker = "installed"
 
 // stageInstalled lists a one-shot lab entry that boots the installer's own UKI
 // (the same file, same path and #hash pin) with the cmdline labd built from the
-// installer's: nothing is copied, rebuilt or regenerated.
+// installer's and the Lab boot parameters: nothing is copied, rebuilt or
+// regenerated.
 func (l *Linux) stageInstalled(job string, in *api.InstalledStage, lim *limineLayout, bootDir string) (api.StageResult, error) {
 	var res api.StageResult
 	if in.Path == "" || in.UKISHA256 == "" || in.Cmdline == "" || strings.ContainsAny(in.Path+in.Cmdline, "\n\r") {
@@ -279,24 +298,22 @@ func stockCmdline() (string, error) {
 	return string(m[2]), nil
 }
 
-// testCmdline starts from the base cmdline, makes panics reboot, and tags the
-// boot so labd can tell which entry came up. It keeps the base's quiet, splash
+// testCmdline starts from the base cmdline, adds the Lab boot parameters
+// (panics reboot, early hangs reset, the Lab boot marker), and tags the boot so
+// labd can tell which entry came up. It keeps the base's quiet, splash
 // and loglevel, so a test boot starts the way the user's own boots do (an M1
 // Pro's desktop failed to start only with them removed); dmesg and the journal
 // record every level anyway. A serial console, or a.Verbose, makes the
 // boot verbose instead: no quiet or splash, and loglevel=7. The watchdog
 // parameters replace the base's: systemd stays off the watchdog so the agent
-// can hold it, and the boot gets its deadline, from labd's boot timeout (see
-// watchdog.go).
+// can hold it, and the boot gets its deadline, from labd's
+// --watchdog-open-timeout or else its boot timeout (see labBootOpenTimeout).
 func testCmdline(base string, a api.StageArgs, job string) string {
 	verbose := a.Serial || a.Verbose
 	var out []string
 	for _, f := range strings.Fields(base) {
 		switch {
-		case strings.HasPrefix(f, "BOOT_IMAGE="), strings.HasPrefix(f, "initrd="),
-			strings.HasPrefix(f, "maclab."), strings.HasPrefix(f, "panic="),
-			strings.HasPrefix(f, "systemd.watchdog_sec="), strings.HasPrefix(f, "watchdog.open_timeout="),
-			strings.HasPrefix(f, "watchdog.handle_boot_enabled="):
+		case strings.HasPrefix(f, "BOOT_IMAGE="), strings.HasPrefix(f, "initrd="), isLabBootParamName(f):
 			continue
 		case verbose && (strings.HasPrefix(f, "loglevel=") || f == "quiet" || f == "splash"):
 			continue
@@ -306,8 +323,10 @@ func testCmdline(base string, a api.StageArgs, job string) string {
 	if verbose {
 		out = append(out, "loglevel=7")
 	}
-	out = append(out, "panic=10", "systemd.watchdog_sec=0",
-		fmt.Sprintf("watchdog.open_timeout=%d", int(bootDeadline(time.Duration(a.BootTimeoutSec)*time.Second)/time.Second)))
+	// systemd stays off the watchdog, so the agent can hold it (see watchdog.go).
+	params := labBootParams(labBootOpenTimeout(a))
+	out = append(out, params[0], "systemd.watchdog_sec=0")
+	out = append(out, params[1:]...)
 	if a.Serial {
 		out = append(out, "console=ttySAC0,115200", "console=tty0")
 	}

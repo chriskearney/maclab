@@ -192,12 +192,14 @@ const (
 	CmdReboot   = "reboot"
 	CmdRunTest  = "run_test"
 	CmdCollect  = "collect"
-	CmdCleanup  = "cleanup"
-	CmdCrash    = "crash"
-	CmdScreen   = "screenshot"
-	CmdLogs     = "logs"
-	CmdConfig   = "config" // the running kernel's .config
-	CmdExec     = "exec"
+	// CmdCollectLost collects the Lab boot the Mac came back from (see LostBoot).
+	CmdCollectLost = "collect_lost"
+	CmdCleanup     = "cleanup"
+	CmdCrash       = "crash"
+	CmdScreen      = "screenshot"
+	CmdLogs        = "logs"
+	CmdConfig      = "config" // the running kernel's .config
+	CmdExec        = "exec"
 	// CmdRecordKnownGood makes the running kernel the agent's known-good, as
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
 	// outside a lab boot. Promotion sends it.
@@ -233,6 +235,10 @@ type StageArgs struct {
 	// console. Otherwise a test boot keeps the base's own; a Mac with a serial
 	// console is always verbose.
 	Verbose bool `json:"verbose,omitempty"`
+	// WatchdogOpenTimeoutSec is watchdog.open_timeout on the Lab boot's
+	// command line: how long the kernel keeps the hardware watchdog fed until
+	// systemd opens it. 0 is lab-agent's default.
+	WatchdogOpenTimeoutSec int `json:"watchdog_open_timeout_sec,omitempty"`
 	// Installed boots an installed release through its installer-made Limine
 	// entry instead of staging a kernel (the installed-kernel job mode).
 	Installed *InstalledStage `json:"installed,omitempty"`
@@ -240,6 +246,10 @@ type StageArgs struct {
 	// The agent takes the boot's watchdog deadline from it; 0 (an older
 	// labd) leaves the agent's default.
 	BootTimeoutSec int `json:"boot_timeout_sec,omitempty"`
+}
+
+func (a StageArgs) WatchdogOpenTimeout() time.Duration {
+	return time.Duration(a.WatchdogOpenTimeoutSec) * time.Second
 }
 
 // InstalledStage points a one-shot lab entry at the installer's own UKI, with
@@ -255,14 +265,46 @@ type StageResult struct {
 	KernelRelease string `json:"kernel_release"`
 	Entry         string `json:"entry"`
 	Cmdline       string `json:"cmdline"`
+	// NoAppleWDT is a test kernel built without apple_wdt: the watchdog U-Boot
+	// left running resets it about 60 s into every boot, healthy or not.
+	NoAppleWDT bool `json:"no_apple_wdt,omitempty"`
 }
 
+// BootOnceArgs arms a Lab boot. lab-agent first writes its deadline record,
+// on its own clock: no contact (2x BootTimeoutSec from now, unless lab-agent
+// reaches labd) and the hard ceiling (the job's end, JobSec from now).
 type BootOnceArgs struct {
-	Entry string `json:"entry"`
+	Entry          string `json:"entry"`
+	BootTimeoutSec int    `json:"boot_timeout_sec"`
+	JobSec         int    `json:"job_sec"`
 }
 
 type CollectArgs struct {
-	Boot string `json:"boot"` // journalctl -b value: "0" or "-1"
+	Boot string `json:"boot"` // journalctl -b value: "0", "-1" or a boot ID
+}
+
+// LostBoot is what lab-agent collected of a Lab boot it came back from.
+type LostBoot struct {
+	BootID string `json:"boot_id,omitempty"` // "" when the journal never saw the boot
+	// Deadline is the deadline the early unit rebooted the boot at, "" when it
+	// came back some other way (a panic, the watchdog, a hard reset).
+	Deadline Deadline `json:"deadline,omitempty"`
+	Files    []string `json:"files,omitempty"` // its journal, kernel log and pstore records
+}
+
+// Deadline is one of a Lab boot's deadlines.
+type Deadline string
+
+const (
+	DeadlineNoContact Deadline = "no_contact" // lab-agent never reached labd in time
+	DeadlineCeiling   Deadline = "ceiling"    // the hard ceiling: the job's end
+)
+
+func (d Deadline) String() string {
+	if d == DeadlineCeiling {
+		return "hard ceiling"
+	}
+	return "no-contact"
 }
 
 type CleanupArgs struct {
@@ -345,10 +387,14 @@ const (
 	// how long it was silent, which hints at a crash or a watchdog reset
 	OutcomeCrashedOrHung = "crashed_or_hung"
 	OutcomeBootFailed    = "boot_failed" // came back on the known-good kernel without a clear cause
-	OutcomeStageFailed   = "stage_failed"
-	OutcomeBuildFailed   = "build_failed"
-	OutcomeInfra         = "infra_error"
-	OutcomeCanceled      = "canceled"
+	// OutcomeLostContact is a Lab boot that came back only through its
+	// deadline: it booted, but never reached labd (the kernel or Release broke
+	// networking), so lab-agent's early unit rebooted it.
+	OutcomeLostContact = "lost_contact"
+	OutcomeStageFailed = "stage_failed"
+	OutcomeBuildFailed = "build_failed"
+	OutcomeInfra       = "infra_error"
+	OutcomeCanceled    = "canceled"
 )
 
 type JobSpec struct {

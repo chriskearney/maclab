@@ -17,11 +17,12 @@ var (
 )
 
 // waitBack waits for the Mac to come up on a new boot after `since`. When it
-// doesn't, it walks the recovery ladder. It returns the ladder steps used and
-// whether the Mac is back.
-func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout time.Duration) ([]string, bool, error) {
+// doesn't, it gives the Mac selfRecovery more to come back by itself (a Lab
+// boot's deadlines reboot it), then walks the recovery ladder. It returns the
+// ladder steps used and whether the Mac is back.
+func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout, selfRecovery time.Duration) ([]string, bool, error) {
 	var reason string
-	err := v.waitFor(ctx, timeout, func() bool {
+	err := v.waitFor(ctx, timeout+selfRecovery, func() bool {
 		if v.d.BootID != oldBoot && v.d.LastSeen.After(since) {
 			return true
 		}
@@ -52,9 +53,12 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 		return nil, true, nil
 	}
 	if reason == "" {
-		if stillUp {
-			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout)
-		} else {
+		switch {
+		case stillUp:
+			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout+selfRecovery)
+		case selfRecovery > 0:
+			reason = fmt.Sprintf("did not check in within %s, nor come back by itself %s after that", timeout, selfRecovery)
+		default:
 			reason = fmt.Sprintf("did not check in within %s", timeout)
 		}
 	}

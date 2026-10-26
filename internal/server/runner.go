@@ -33,7 +33,8 @@ type jobRun struct {
 
 	omtRef []byte // a known-good run's omarchy-m-test reference, written only if the job passes
 
-	failedOwn int // tests that failed by themselves, not cut short by a cancel
+	failedOwn  int  // tests that failed by themselves, not cut short by a cancel
+	noAppleWDT bool // the test kernel was built without apple_wdt
 }
 
 func (r *jobRun) ev(format string, args ...any) {
@@ -199,6 +200,9 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	if r.omtRef != nil {
 		r.promoteOMT(outcome)
 	}
+	if r.noAppleWDT {
+		summary += "; " + noAppleWDTNote
+	}
 	at := s.now()
 	if r.ir != nil {
 		// the evidence copy carries the final record, and can still fail the job
@@ -275,6 +279,7 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	if r.ir != nil {
 		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
 	}
+	args.WatchdogOpenTimeoutSec = int(r.s.cfg.WatchdogOpenTimeout / time.Second)
 	sr, why := r.stage(ctx, args)
 	if why != "" {
 		return api.OutcomeStageFailed, why
@@ -286,17 +291,22 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	if sr.Cmdline != "" {
 		r.ev("cmdline: %s", sr.Cmdline)
 	}
+	if sr.NoAppleWDT {
+		r.noAppleWDT = true
+		r.ev("warning: %s", noAppleWDTNote)
+	}
 
 	r.state(api.JobBooting)
 	oldBoot := v.snapshot().BootID
 	t0 := r.s.now()
 	r.armedBoot, r.armedAt = oldBoot, t0
-	if err := v.call(ctx, api.CmdBootOnce, j.ID, api.BootOnceArgs{Entry: sr.Entry}, 2*time.Minute, nil); err != nil {
+	arm := api.BootOnceArgs{Entry: sr.Entry, BootTimeoutSec: int(r.boot / time.Second), JobSec: int(r.labBootJob() / time.Second)}
+	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); err != nil {
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
 	}
 	r.ev("one-shot armed, rebooting into %s", sr.Entry)
 	v.rearmSerial(3 * time.Minute)
-	steps, ok, err := v.waitBack(ctx, oldBoot, t0, r.boot)
+	steps, ok, err := v.waitBack(ctx, oldBoot, t0, r.boot, r.selfRecovery())
 	r.addRecovery(steps)
 	if err != nil {
 		return api.OutcomeCanceled, "canceled while booting"
@@ -310,7 +320,10 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		o, cause := r.classify(t0, steps)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.FellBack = true })
 		r.ev("came back on %s instead of the test entry: %s", d.Kernel, cause)
-		r.collect(ctx, "-1")
+		if lost := r.collectLost(ctx); lost.Deadline != "" {
+			return api.OutcomeLostContact, fmt.Sprintf("%s booted but never reached labd; its %s deadline rebooted the Mac to %s",
+				sr.KernelRelease, lost.Deadline, d.Kernel)
+		}
 		if j.Spec.Baseline {
 			return api.OutcomeInfra, "the one-shot did not select the lab entry (check the maclab hook in custom.cfg): " + cause
 		}
@@ -333,21 +346,14 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 
 	r.state(api.JobTesting)
 	failed := 0
-	tests := testsFor(j.Spec)
-	if r.ir != nil {
-		tests = append(append([]api.TestSpec{r.ir.test(installed.PhaseBooted)}, tests...), r.ir.test(installed.PhaseAfter))
-	}
+	tests := r.tests()
 	for _, t := range tests {
-		timeout := time.Duration(t.TimeoutSec)*time.Second + r.s.cfg.TestGrace
-		if t.TimeoutSec == 0 {
-			timeout = 7 * time.Minute
-		}
 		if n := realSleepNote(v.snapshot(), t); n != "" {
 			r.ev("warning: %s", n)
 		}
 		r.ev("test %s: running", t.Name)
 		var tr api.TestResult
-		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, timeout+r.s.guiWait(t), &tr, func(n string) { r.ev("%s", n) })
+		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, r.testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
 		}
@@ -528,6 +534,46 @@ func errText(msg string) string {
 	return reDigits.ReplaceAllString(strings.ToLower(strings.Join(strings.Fields(msg), " ")), "#")
 }
 
+// tests are the tests a job runs on its Lab boot.
+func (r *jobRun) tests() []api.TestSpec {
+	tests := testsFor(r.j.Spec)
+	if r.ir != nil {
+		tests = append(append([]api.TestSpec{r.ir.test(installed.PhaseBooted)}, tests...), r.ir.test(installed.PhaseAfter))
+	}
+	return tests
+}
+
+// testTimeout is how long labd gives a test: its own timeout and TestGrace,
+// and a GUI test guiWait more.
+func (r *jobRun) testTimeout(t api.TestSpec) time.Duration {
+	timeout := time.Duration(t.TimeoutSec)*time.Second + r.s.cfg.TestGrace
+	if t.TimeoutSec == 0 {
+		timeout = 7 * time.Minute
+	}
+	return timeout + r.s.guiWait(t)
+}
+
+// labBootJob is how long the job can take from arming its Lab boot: the
+// boot (with the time labd gives it to come back by itself), every test's
+// timeout, collecting its logs. The Lab boot's hard ceiling is that far off;
+// on a Volunteer's Mac lab-agent caps it at the Availability window's end.
+func (r *jobRun) labBootJob() time.Duration {
+	d := r.boot + r.selfRecovery() + 5*time.Minute
+	for _, t := range r.tests() {
+		d += r.testTimeout(t)
+	}
+	return d
+}
+
+// selfRecovery is how long past its boot timeout labd waits for a Lab boot to
+// come back by itself before the recovery ladder: lab-agent's early unit
+// reboots one that never reaches labd at its no-contact deadline (twice the
+// boot timeout), and the Mac then needs a boot to check in. A Lab-owned Mac's
+// OOB hard resets are the next rung.
+func (r *jobRun) selfRecovery() time.Duration { return 2 * r.boot }
+
+const noAppleWDTNote = "the test kernel was built without apple_wdt: the watchdog U-Boot leaves running resets it about 60 s into every boot, healthy or not"
+
 // runTest runs one test outside the job's test list (identity-before).
 func (r *jobRun) runTest(ctx context.Context, t api.TestSpec) api.TestResult {
 	r.ev("test %s: running", t.Name)
@@ -647,7 +693,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	r.ev("lost the Mac during test %s; waiting for it to come back", test)
 	lost := r.s.now()
 	// A hang has already had quietGrace of silence to show itself.
-	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-r.s.quietGrace(), time.Minute))
+	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-r.s.quietGrace(), time.Minute), 0)
 	r.addRecovery(steps)
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {
@@ -667,7 +713,9 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	})
 	if err == nil && ok {
 		r.ev("back after %.0fs", r.s.since(lost).Seconds())
-		r.collect(ctx, "-1")
+		if lostBoot := r.collectLost(ctx); lostBoot.Deadline != "" {
+			o, cause = api.OutcomeLostContact, fmt.Sprintf("labd lost the Lab boot and its %s deadline rebooted it", lostBoot.Deadline)
+		}
 	}
 	if o == api.OutcomeCrashedOrHung {
 		return o, fmt.Sprintf("crashed or hung during test %s: %s", test, cause)
@@ -682,7 +730,7 @@ func (r *jobRun) crashTest(ctx context.Context) (string, string) {
 	r.ev("triggering a deliberate kernel %s", r.j.Spec.Crash)
 	r.v.send(api.CmdCrash, r.j.ID, api.CrashArgs{Mode: r.j.Spec.Crash})
 	r.v.rearmSerial(3 * time.Minute)
-	steps, ok, err := r.v.waitBack(ctx, old, t0, r.boot)
+	steps, ok, err := r.v.waitBack(ctx, old, t0, r.boot, 0)
 	r.addRecovery(steps)
 	if err != nil {
 		return api.OutcomeCanceled, "canceled during crash test"
@@ -690,7 +738,7 @@ func (r *jobRun) crashTest(ctx context.Context) (string, string) {
 	if !ok {
 		return api.OutcomeHung, "the Mac did not recover from a deliberate panic"
 	}
-	r.collect(ctx, "-1")
+	r.collectLost(ctx)
 	d := r.v.snapshot()
 	took := r.s.since(t0).Seconds()
 	if len(steps) == 0 {
@@ -699,9 +747,24 @@ func (r *jobRun) crashTest(ctx context.Context) (string, string) {
 	return api.OutcomePass, fmt.Sprintf("recovered in %.0fs, but only via the recovery ladder (%s); check kernel.panic", took, strings.Join(steps, "; "))
 }
 
-func (r *jobRun) collect(ctx context.Context, boot string) []string {
-	files, _ := r.collectE(ctx, boot)
-	return files
+// collectLost brings back what is left of the Lab boot the Mac came back
+// from: its journal by boot ID and any pstore/ramoops records.
+func (r *jobRun) collectLost(ctx context.Context) api.LostBoot {
+	var lost api.LostBoot
+	if err := r.v.call(ctx, api.CmdCollectLost, r.j.ID, nil, 5*time.Minute, &lost); err != nil {
+		r.ev("collect the lost boot's logs: %v", err)
+		return lost
+	}
+	r.s.updateJob(r.j, func(j *api.Job) { j.Result.Logs = append(j.Result.Logs, lost.Files...) })
+	switch {
+	case lost.BootID == "":
+		r.ev("the lost boot left no journal")
+	case lost.Deadline != "":
+		r.ev("lost boot %s never reached labd; the %s deadline rebooted it", lost.BootID, lost.Deadline)
+	default:
+		r.ev("collected the lost boot %s", lost.BootID)
+	}
+	return lost
 }
 
 func (r *jobRun) collectE(ctx context.Context, boot string) ([]string, error) {
@@ -727,7 +790,7 @@ func (r *jobRun) restore(ctx context.Context) error {
 		v.mu.Unlock()
 		if pending {
 			r.ev("waiting for %s to finish rebooting before restoring", r.j.Spec.Device)
-			steps, _, err := v.waitBack(ctx, r.armedBoot, r.armedAt, r.boot)
+			steps, _, err := v.waitBack(ctx, r.armedBoot, r.armedAt, r.boot, r.selfRecovery())
 			r.addRecovery(steps)
 			if err != nil {
 				return err
@@ -740,7 +803,7 @@ func (r *jobRun) restore(ctx context.Context) error {
 		t0 := r.s.now()
 		v.send(api.CmdReboot, r.j.ID, nil)
 		v.rearmSerial(3 * time.Minute)
-		steps, ok, err := v.waitBack(ctx, d.BootID, t0, r.boot)
+		steps, ok, err := v.waitBack(ctx, d.BootID, t0, r.boot, 0)
 		r.addRecovery(steps)
 		if err != nil {
 			return err

@@ -29,6 +29,8 @@ const usage = `lab-agent: the Mac side of the test lab
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)
+  lab-agent lab-boot-deadlines    reboot a Lab boot that misses its deadline (started early in boot by
+                                  maclab-lab-boot-deadlines.service)
   lab-agent sim --server .. --token ..   a simulated Mac, to try the lab without hardware
   lab-agent version
 `
@@ -105,6 +107,8 @@ func main() {
 			sys := &agent.Linux{WorkDir: "/var/lib/maclab", GUIUser: cfg.GUIUser}
 			err = agent.New(cfg, sys, nil).Run(ctx)
 		}
+	case "lab-boot-deadlines":
+		err = agent.EnforceLabBootDeadlines(ctx, "/var/lib/maclab")
 	case "sim":
 		server := fs.String("server", "", "labd URL")
 		token := fs.String("token", "", "enrollment token")

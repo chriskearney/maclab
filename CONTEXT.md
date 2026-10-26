@@ -27,6 +27,18 @@ The kernel a Mac returns to after every lab boot, recorded on both labd and the 
 **Lab boot**:
 A boot of a Mac from an entry the lab put there (a test kernel or an installed Release), as opposed to a boot of the Mac's own default entry.
 
+**No-contact deadline**:
+The time by which a Lab boot must reach labd, about twice the job's boot timeout; a Lab boot that hasn't reached labd by then reboots to the Known-good kernel.
+_Avoid_: Boot timeout (labd's own wait, a different thing)
+
+**Hard ceiling**:
+The time a Lab boot ends whatever happens, even in contact with labd: the job's end, or the Availability window's end if that comes first.
+_Avoid_: Job timeout
+
+**Lost boot**:
+A Lab boot the Mac came back from without labd ending it (a panic, a watchdog reset, a deadline or a hard reset); its logs are collected afterwards.
+_Avoid_: Crashed boot, failed boot
+
 **Availability window**:
 A time when a Volunteer's Mac may be used for lab jobs, set only by its Volunteer: a weekly schedule in the Mac's local time, plus a Pause or an "open now until" they add by hand. Outside it, the Mac is the Volunteer's own and nothing from the lab runs on it.
 _Avoid_: Slot, schedule (for the window itself)

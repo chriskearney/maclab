@@ -169,7 +169,7 @@ func TestInstalledJob(t *testing.T) {
 		t.Fatalf("tests %v (before %v)", names, ir.Before)
 	}
 	want := strings.Join(entry.CmdlineTokens, " ") + " maclab.job=" + j.ID + " panic=10"
-	if j.Result.BootKernel != tKrel || j.Result.BootCmdline != want {
+	if j.Result.BootKernel != tKrel || withoutLabBootAdditions(j.Result.BootCmdline) != want {
 		t.Fatalf("booted %s with %q, want %q", j.Result.BootKernel, j.Result.BootCmdline, want)
 	}
 	for _, f := range []string{"identity-before.json", "identity-booted.json", "identity-after.json", "omt-compare.json", "dmesg-compare.json", "dmesg-errors.txt", "job.json"} {

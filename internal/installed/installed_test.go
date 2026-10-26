@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/iconidentify/maclab/internal/agent"
 )
 
 const (
@@ -73,7 +75,14 @@ func compare(t *testing.T, phase string, o map[string]any, booted *Identity) *Id
 func TestCompareMatch(t *testing.T) {
 	_, _, _, obs := fixture(t)
 	good := Cmdline(installerTokens, "j1", false)
-	if good != "root=UUID=x rw quiet splash maclab.job=j1 panic=10" {
+	var pinned []string // all but #30's watchdog.open_timeout=N and Lab boot marker
+	for _, f := range strings.Fields(good) {
+		if v, ok := strings.CutPrefix(f, "watchdog.open_timeout="); ok && v != "" && strings.Trim(v, "0123456789") == "" || agent.IsLabBoot(f) && !strings.HasPrefix(f, "maclab.job=") {
+			continue
+		}
+		pinned = append(pinned, f)
+	}
+	if strings.Join(pinned, " ") != "root=UUID=x rw quiet splash maclab.job=j1 panic=10" {
 		t.Fatalf("cmdline %q", good)
 	}
 	b := compare(t, PhaseBooted, obs(PhaseBooted, "j1", "boot1", good), nil)

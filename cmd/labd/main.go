@@ -28,6 +28,7 @@ func main() {
 	aliveWindow := flag.Duration("alive-window", time.Minute, "how stale a heartbeat may be before a Mac counts unresponsive")
 	quietGrace := flag.Duration("quiet-grace", 3*time.Minute, "how long a Mac may go silent on the same boot before a command on it counts lost")
 	stageTimeout := flag.Duration("stage-timeout", 45*time.Minute, "time a Mac gets for each attempt to stage a kernel, download included")
+	watchdogOpenTimeout := flag.Duration("watchdog-open-timeout", 0, "watchdog.open_timeout on every Lab boot: how long the kernel feeds the hardware watchdog before systemd must open it; an early hang resets about 30s after it (0 is half the job's boot timeout, at least 120s)")
 	artifactGB := flag.Int64("artifact-budget-gb", 20, "cap on the kernel artifact store; unreferenced artifacts go first")
 	tailscale := flag.Bool("tailscale", false, "let tailnet peers look at the lab by their Tailscale identity; changes still need a Maintainer's token")
 	var allowHosts []string
@@ -75,7 +76,7 @@ func main() {
 	s, err := server.New(ctx, server.Config{DataDir: *data, FirstMaintainer: *maintainer, FirstMaintainerToken: tok,
 		Tailscale: *tailscale, AllowHosts: allowHosts,
 		OMT: *omt, OMTSite: *omtSite, OMTPublish: *omtPublish, OMTEvery: *omtEvery,
-		BootTimeout: *bootTimeout, OfflineAfter: *offlineAfter, AliveWindow: *aliveWindow, QuietGrace: *quietGrace, StageTimeout: *stageTimeout, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
+		BootTimeout: *bootTimeout, OfflineAfter: *offlineAfter, AliveWindow: *aliveWindow, QuietGrace: *quietGrace, StageTimeout: *stageTimeout, WatchdogOpenTimeout: *watchdogOpenTimeout, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
 		BuilderToken: strings.TrimSpace(string(btok)), ArtifactBudget: *artifactGB << 30,
 		AgentBinary: filepath.Join(filepath.Dir(exe), "lab-agent-linux-arm64")}, nil)
 	if err != nil {

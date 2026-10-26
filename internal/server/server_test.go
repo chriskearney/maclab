@@ -1152,7 +1152,7 @@ func TestCmdlineBaseAndStrip(t *testing.T) {
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), CmdlineBase: "default", Cmdline: "extra=1"})
 	l.expect(j, api.OutcomePass)
 	c := j.Result.BootCmdline
-	if !strings.HasPrefix(c, "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") || !strings.Contains(c, "extra=1") || !strings.Contains(c, "maclab.job="+j.ID) {
+	if !strings.HasPrefix(withoutLabBootAdditions(c), "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") || !strings.Contains(c, "extra=1") || !strings.Contains(c, "maclab.job="+j.ID) {
 		t.Fatalf("booted with %q", c)
 	}
 	var shown bool
@@ -1464,12 +1464,12 @@ func TestQuietTestBoots(t *testing.T) {
 	l.baseline()
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-quiet behavior=ok"), CmdlineBase: "default"})
 	l.expect(j, api.OutcomePass)
-	if c := j.Result.BootCmdline; !strings.HasPrefix(c, "root=UUID=sim rw quiet splash panic=10") || strings.Contains(c, "loglevel=7") {
+	if c := j.Result.BootCmdline; !strings.HasPrefix(withoutLabBootAdditions(c), "root=UUID=sim rw quiet splash panic=10") || strings.Contains(c, "loglevel=7") {
 		t.Fatalf("quiet boot: %q", c)
 	}
 	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-verbose behavior=ok"), CmdlineBase: "default", VerboseBoot: true})
 	l.expect(j, api.OutcomePass)
-	if c := j.Result.BootCmdline; !strings.HasPrefix(c, "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") {
+	if c := j.Result.BootCmdline; !strings.HasPrefix(withoutLabBootAdditions(c), "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") {
 		t.Fatalf("verbose boot: %q", c)
 	}
 }
@@ -1605,7 +1605,7 @@ func TestCancelKeepsKernelFailure(t *testing.T) {
 	k := l.artifact("krel=7.2-oops behavior=crash-in-test")
 	// collecting the crashed boot's logs takes long enough to cancel meanwhile
 	l.sim.CollectHook = func(boot, outDir string) error {
-		if boot == "-1" {
+		if boot != "0" { // the crashed boot, which the lost-boot collection names by its ID
 			time.Sleep(2 * time.Second)
 		}
 		return nil

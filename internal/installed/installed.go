@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/detect"
 )
 
@@ -351,7 +352,8 @@ type Identity struct {
 	Mismatches           []string        `json:"mismatches"`
 }
 
-// Additions are the only cmdline tokens a lab boot may add to the installer's.
+// Additions are the only cmdline tokens labd adds to the installer's. lab-agent
+// adds its Lab boot parameters on top (agent.IsLabBootParam).
 func Additions(job string, serial bool) []string {
 	a := []string{"maclab.job=" + job, "panic=10"}
 	if serial {
@@ -504,9 +506,10 @@ func Compare(phase string, raw []byte, m *Manifest, manifestSHA string, payload 
 	add(Check{ID: "dt_board", Expected: mac.Board, Observed: o.DT.Board, Match: o.DT.Board == mac.Board}) // hardware: binding in every phase
 	if e != nil {
 		want := strings.Fields(Cmdline(e.CmdlineTokens, o.Job, serial))
-		got := strings.Fields(o.Running.ProcCmdline)
+		observed := strings.Fields(o.Running.ProcCmdline)
+		got := slices.DeleteFunc(slices.Clone(observed), func(f string) bool { return agent.IsLabBootParam(f) && !slices.Contains(want, f) })
 		add(Check{ID: "cmdline", PhaseBinding: "booted|after only",
-			Expected: want, Observed: got,
+			Expected: want, Observed: observed,
 			Detail: map[string]any{"installer": e.CmdlineTokens, "permitted_additions": Additions(o.Job, serial),
 				"unexpected": nz(minus(got, want)), "missing": nz(minus(want, got))},
 			Match: strings.Join(got, " ") == strings.Join(want, " ")})

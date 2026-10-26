@@ -37,7 +37,7 @@ func TestGrubPaths(t *testing.T) {
 func TestTestCmdline(t *testing.T) {
 	base := "BOOT_IMAGE=/@/boot/vmlinuz-linux-aurora root=UUID=725346d2 rw rootflags=subvol=@ loglevel=3 quiet splash"
 	got := testCmdline(base, api.StageArgs{Cmdline: "nvme_apple.flush_interval=0", Serial: true}, "j1")
-	want := "root=UUID=725346d2 rw rootflags=subvol=@ loglevel=7 panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 console=ttySAC0,115200 console=tty0 nvme_apple.flush_interval=0 maclab.job=j1"
+	want := "root=UUID=725346d2 rw rootflags=subvol=@ loglevel=7 panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.lab_boot=1 console=ttySAC0,115200 console=tty0 nvme_apple.flush_interval=0 maclab.job=j1"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
@@ -46,13 +46,13 @@ func TestTestCmdline(t *testing.T) {
 	}
 	// Without a serial console the boot keeps the user's quiet, splash and loglevel.
 	got = testCmdline(base, api.StageArgs{}, "j2")
-	want = "root=UUID=725346d2 rw rootflags=subvol=@ loglevel=3 quiet splash panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.job=j2"
+	want = "root=UUID=725346d2 rw rootflags=subvol=@ loglevel=3 quiet splash panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.lab_boot=1 maclab.job=j2"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}
 	// Unless the job asks for a verbose boot.
 	got = testCmdline(base, api.StageArgs{Verbose: true}, "j3")
-	want = "root=UUID=725346d2 rw rootflags=subvol=@ loglevel=7 panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.job=j3"
+	want = "root=UUID=725346d2 rw rootflags=subvol=@ loglevel=7 panic=10 systemd.watchdog_sec=0 watchdog.open_timeout=120 maclab.lab_boot=1 maclab.job=j3"
 	if got != want {
 		t.Fatalf("\n got %s\nwant %s", got, want)
 	}

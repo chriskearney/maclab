@@ -278,6 +278,65 @@ func (l *Linux) Collect(ctx context.Context, boot, outDir string) error {
 	return os.WriteFile(filepath.Join(outDir, "collect-status.txt"), []byte(status.String()), 0o644)
 }
 
+func (l *Linux) PreviousBoot(since time.Time) string {
+	out, err := exec.Command("journalctl", "--list-boots", "-o", "json", "--no-pager").Output()
+	if err != nil {
+		return ""
+	}
+	var boots []struct {
+		Index      int    `json:"index"`
+		BootID     string `json:"boot_id"`
+		FirstEntry int64  `json:"first_entry"` // µs since the epoch
+	}
+	if json.Unmarshal(out, &boots) != nil {
+		return ""
+	}
+	for _, b := range boots {
+		if b.Index == -1 && !time.UnixMicro(b.FirstEntry).Before(since) {
+			return dashedID(b.BootID)
+		}
+	}
+	return ""
+}
+
+// dashedID writes a 128-bit ID the way /proc/sys/kernel/random/boot_id does.
+func dashedID(id string) string {
+	if len(id) != 32 {
+		return id
+	}
+	return id[:8] + "-" + id[8:12] + "-" + id[12:16] + "-" + id[16:20] + "-" + id[20:]
+}
+
+// pstoreArchive is where systemd-pstore moves records out of /sys/fs/pstore
+// at boot, one directory per crash.
+const pstoreArchive = "/var/lib/systemd/pstore"
+
+func (l *Linux) CollectPstore(since time.Time, outDir string) ([]string, error) {
+	names, err := collectPstore("/sys/fs/pstore", filepath.Join(outDir, "sys"))
+	for i, n := range names {
+		// Collected, a record is gone from pstore, so a later recovery
+		// doesn't attach it again (and ramoops has room for the next).
+		if err == nil {
+			os.Remove(filepath.Join("/sys/fs/pstore", n))
+		}
+		names[i] = filepath.Join("sys", n)
+	}
+	dirs, _ := os.ReadDir(pstoreArchive)
+	for _, d := range dirs {
+		if info, ierr := d.Info(); ierr != nil || !d.IsDir() || info.ModTime().Before(since) {
+			continue
+		}
+		n, aerr := collectPstore(filepath.Join(pstoreArchive, d.Name()), filepath.Join(outDir, d.Name()))
+		for _, f := range n {
+			names = append(names, filepath.Join(d.Name(), f))
+		}
+		if err == nil {
+			err = aerr
+		}
+	}
+	return names, err
+}
+
 // dirSize is the total size of the regular files under dir.
 func dirSize(dir string) uint64 {
 	var n uint64

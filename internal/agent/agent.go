@@ -96,6 +96,7 @@ type Agent struct {
 	sentFactsRevision uint64
 	lastFacts         time.Time
 	after             []func() // actions to run once pending results reach labd
+	contacted         string   // the Lab boot whose contact with labd is on record
 	wake              chan struct{}
 	life              context.Context // commands outlive the poll that delivered them
 	// wd is the watchdog, held on a test boot; nil otherwise, and until the
@@ -174,6 +175,11 @@ func (a *Agent) Run(ctx context.Context) error {
 			}
 			pollMu.Unlock()
 		}
+		s.setEarlyUnit(func(ctx context.Context) {
+			if err := enforceLabBootDeadlines(ctx, a.clock(), a.labBootDir(), s, a.log.Printf); err != nil {
+				a.log.Printf("Lab boot deadlines: %v", err)
+			}
+		})
 	}
 	for ctx.Err() == nil {
 		if !a.sys.Alive() {
@@ -373,11 +379,20 @@ func (a *Agent) poll(ctx context.Context) error {
 		ci.Facts = &f
 	}
 
+	// A Lab boot's first check-in doesn't wait: its no-contact deadline lifts
+	// only once the answer is back.
+	wait := 10000
+	a.mu.Lock()
+	if IsLabBoot(cmdline) && a.contacted != bootID {
+		wait = 0
+	}
+	a.mu.Unlock()
 	var resp api.CheckinResponse
-	if err := postJSON(ctx, a.http, a.url("/api/agent/checkin?wait_ms=10000"), a.cfg.Secret, ci, &resp); err != nil {
+	if err := postJSON(ctx, a.http, a.url(fmt.Sprintf("/api/agent/checkin?wait_ms=%d", wait)), a.cfg.Secret, ci, &resp); err != nil {
 		return err
 	}
 	a.wd.Load().idle() // labd is in touch
+	a.reachedLabd(bootID, cmdline)
 	a.mu.Lock()
 	if ci.Facts != nil {
 		// Cleanup can finish while this request is in flight. Acknowledge
@@ -642,6 +657,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		if err := json.Unmarshal(c.Args, &args); err != nil {
 			return nil, nil, err
 		}
+		if err := a.armLabBoot(args); err != nil {
+			return nil, nil, err
+		}
 		if err := a.sys.BootOnce(args.Entry); err != nil {
 			return nil, nil, err
 		}
@@ -698,6 +716,12 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 			prefix = "prevboot"
 		}
 		return a.uploadDir(ctx, c.JobID, prefix, dir), nil, nil
+	case api.CmdCollectLost:
+		dir, err := a.outDir(c)
+		if err != nil {
+			return nil, nil, err
+		}
+		return a.collectLost(ctx, c.JobID, dir), nil, nil
 	case api.CmdCleanup:
 		var args api.CleanupArgs
 		_ = json.Unmarshal(c.Args, &args)
@@ -785,6 +809,85 @@ func (a *Agent) uploadScreen(ctx context.Context, path string) (string, error) {
 		return "", fmt.Errorf("screen upload: %s", strings.TrimSpace(string(b)))
 	}
 	return strings.TrimSpace(string(b)), nil
+}
+
+func (a *Agent) labBootDir() string { return filepath.Join(a.workDir(), labBootDir) }
+
+// armLabBoot writes the deadline record the early unit enforces on the Lab
+// boot labd is about to start, and forgets the last one.
+func (a *Agent) armLabBoot(args api.BootOnceArgs) error {
+	if args.BootTimeoutSec <= 0 || args.JobSec <= 0 {
+		return errors.New("a Lab boot needs its deadlines: boot_timeout_sec and job_sec")
+	}
+	now := a.clock().Now()
+	// The ceiling is the job's end. On a Volunteer's Mac the Availability
+	// window's end caps it too, once windows exist: take the earlier here.
+	jobEnd := now.Add(time.Duration(args.JobSec) * time.Second)
+	d := newLabBootDeadlines(now, time.Duration(args.BootTimeoutSec)*time.Second, jobEnd)
+	dir := a.labBootDir()
+	for _, f := range []string{labBootContactFile, labBootSeenFile} {
+		if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("forget the last Lab boot: %w", err)
+		}
+	}
+	if err := writeLabBootDeadlines(filepath.Join(dir, labBootDeadlineFile), d); err != nil {
+		return fmt.Errorf("deadline record: %w", err)
+	}
+	a.log.Printf("Lab boot deadlines: no contact %s, ceiling %s", d.NoContact.Format(time.RFC3339), d.Ceiling.Format(time.RFC3339))
+	return nil
+}
+
+// reachedLabd records that a Lab boot has reached labd, which lifts its
+// no-contact deadline.
+func (a *Agent) reachedLabd(bootID, cmdline string) {
+	a.mu.Lock()
+	done := a.contacted == bootID
+	a.mu.Unlock()
+	if done || !IsLabBoot(cmdline) {
+		return
+	}
+	if err := os.MkdirAll(a.labBootDir(), 0o755); err != nil {
+		a.log.Printf("Lab boot contact: %v", err)
+		return
+	}
+	if err := writeAtomic(filepath.Join(a.labBootDir(), labBootContactFile), []byte(bootID+"\n")); err != nil {
+		a.log.Printf("Lab boot contact: %v", err)
+		return
+	}
+	a.mu.Lock()
+	a.contacted = bootID
+	a.mu.Unlock()
+}
+
+// collectLost uploads what is left of the Lab boot the Mac came back from: its
+// journal by boot ID and any pstore/ramoops records, and says whether the
+// early unit rebooted it at a deadline.
+func (a *Agent) collectLost(ctx context.Context, job, dir string) api.LostBoot {
+	var lost api.LostBoot
+	ld := a.labBootDir()
+	d, _ := readLabBootDeadlines(filepath.Join(ld, labBootDeadlineFile)) // none: any previous boot will do
+	var seen labBootSeen
+	if b, err := os.ReadFile(filepath.Join(ld, labBootSeenFile)); err == nil {
+		if err := json.Unmarshal(b, &seen); err != nil {
+			a.log.Printf("lost boot: %s: %v", labBootSeenFile, err)
+		}
+	}
+	lost.BootID, lost.Deadline = seen.BootID, seen.Deadline
+	if lost.BootID == "" {
+		// The early unit never ran: the Lab boot went down before userspace.
+		lost.BootID = a.sys.PreviousBoot(d.Armed)
+	}
+	// Whatever is missing, labd still needs to hear how the boot ended.
+	if lost.BootID != "" {
+		if err := a.sys.Collect(ctx, lost.BootID, dir); err != nil {
+			a.log.Printf("lost boot %s: journal: %v", lost.BootID, err)
+		}
+	}
+	if _, err := a.sys.CollectPstore(d.Armed, filepath.Join(dir, "pstore")); err != nil {
+		a.log.Printf("lost boot %s: pstore: %v", lost.BootID, err)
+	}
+	lost.Files = a.uploadDir(ctx, job, "prevboot", dir)
+	return lost
 }
 
 func (a *Agent) rebootLater() {

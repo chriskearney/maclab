@@ -49,8 +49,12 @@ type Config struct {
 	// keeps the LAN default; labd's flags default to remote-sized values.
 	AliveWindow time.Duration // how stale a heartbeat may be before a Mac counts unresponsive
 	QuietGrace  time.Duration // silence on the same boot before a command counts lost
-	NtfyURL     string
-	NotifyCmd   string
+	// WatchdogOpenTimeout is watchdog.open_timeout on every Lab boot's command
+	// line; 0 leaves it to lab-agent: half the job's boot timeout, at least
+	// 120 s.
+	WatchdogOpenTimeout time.Duration
+	NtfyURL             string
+	NotifyCmd           string
 	// Tailscale lets tailnet peers look at the lab by identity; only a
 	// Maintainer's token changes it.
 	Tailscale bool

@@ -223,12 +223,16 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := os.WriteFile(unitPath, []byte(unit), 0o644); err != nil {
 		return err
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "lab-agent.service"}, {"restart", "lab-agent.service"}} {
+	if err := os.WriteFile(labBootDeadlineUnitPath, []byte(labBootDeadlineUnit()), 0o644); err != nil {
+		return err
+	}
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", "lab-agent.service", labBootDeadlineUnitName}, {"restart", "lab-agent.service"}} {
 		if out, err := exec.Command("systemctl", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(args, " "), err, out)
 		}
 	}
 	say("lab-agent.service enabled and running")
+	say("%s enabled: a Lab boot that misses its deadline reboots to the known-good kernel", labBootDeadlineUnitName)
 
 	if e := cfg.Enrollment; e.IsVolunteer() {
 		var code strings.Builder

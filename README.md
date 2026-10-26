@@ -89,8 +89,9 @@ AI agents get the same operations over MCP (`lab mcp`).
 6. **Restore.** The agent reboots to the known-good kernel, checks that the
    one-shot really cleared, and removes the staged kernel.
 
-A test boot's command line starts from the known-good kernel's and adds `panic=10`
-and `maclab.job=<id>`. It keeps `quiet`, `splash` and `loglevel=`, so the Mac boots
+A test boot's command line starts from the known-good kernel's and adds the Lab
+boot parameters (`panic=10`, `watchdog.open_timeout=N` and the Lab boot marker
+`maclab.lab_boot=1`) and `maclab.job=<id>`. It keeps `quiet`, `splash` and `loglevel=`, so the Mac boots
 the way its user's boots do; dmesg and the journal record every level anyway. On a Mac
 with a serial console, or with `lab run --verbose-boot`, it drops them instead and adds
 `loglevel=7` (and the serial console). `lab run --cmdline-base default` starts from the distro's stock
@@ -101,12 +102,39 @@ appends. The job records the staged and the booted command line. Test boots also
 keep `systemd-analyze` time, blame and critical-chain.
 
 Outcomes: `pass`, `tests_failed`, `booted_unhealthy`, `panicked`, `hung`,
-`crashed_or_hung`, `boot_failed`, `stage_failed`, `infra_error`, `canceled`.
+`crashed_or_hung`, `boot_failed`, `lost_contact`, `stage_failed`, `infra_error`, `canceled`.
 `crashed_or_hung` means the Mac rebooted during a test with no kernel error
 captured (`panicked` needs one); its summary gives the seconds from the last
 check-in to the next boot's first, and back within about 90s reads as a crash
 (`panic=10` reboots in seconds), later as a watchdog reset after a hang, which is
 an inference, not a diagnosis.
+
+## Lab boots come back by themselves
+
+Every Lab boot gets the Mac back to its known-good kernel without help, on
+every Mac. The one-shot is spent by the time anything below fires, so each
+reboot lands on the Mac's own entry.
+
+- `panic=10` reboots a panic, even one before the sysctl applies.
+- `watchdog.open_timeout=N` (labd `--watchdog-open-timeout`; by default half the job's boot timeout, at least 120s)
+  resets an early hang: U-Boot leaves the hardware watchdog running into the
+  kernel, `apple_wdt` takes it over, and the kernel stops feeding it unless
+  systemd opens it within N seconds (worst case N + 30s). A test kernel must
+  be built with `apple_wdt`, or the watchdog resets it about 60s into every
+  boot; the job flags one without it.
+- Before every Lab boot, lab-agent writes a deadline record to
+  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout,
+  unless lab-agent reaches labd first) and a **hard ceiling** (the job's end).
+  `maclab-lab-boot-deadlines.service`, an early unit with no network
+  dependency, reboots a Lab boot when either passes. labd waits for that
+  before its recovery ladder, so a Lab-owned Mac's OOB hard resets are a later rung.
+- After any recovery, lab-agent uploads the lost boot's journal (by boot ID)
+  and any pstore/ramoops records, as `prevboot/` in the job.
+- A boot that came back only through its deadline fails as `lost_contact`:
+  the kernel or Release broke networking.
+
+[docs/lab-boot-hardware-check.md](docs/lab-boot-hardware-check.md) is the
+check that the early unit and the watchdog work on a real Mac.
 
 ## When things go wrong
 
@@ -147,7 +175,8 @@ retried (a build from another config would be another kernel), and the refusal
 says to run it afresh with `lab run`.
 `lab retry` holds the new job as you, and the web UI's Retry as `web`.
 
-Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback,
+Each Mac gets a recovery tier: 0 = panic reboot + one-shot fallback and the
+Lab boot deadlines,
 1 = + hardware watchdog (`apple_wdt`, armed through systemd),
 2 = + out-of-band reset and serial.
 
@@ -253,6 +282,7 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
   `/etc/systemd/journald.conf.d/90-maclab.conf` (`Storage=persistent`), and
   moves this boot's journal there, so labd can read a failed lab boot's journal.
   `--volatile-journal` leaves journald alone.
+- Installs and enables `maclab-lab-boot-deadlines.service`, which reboots a Lab boot that misses its deadline.
 - With `--autologin`, logs the GUI user into the desktop on boot; with `--autologin` or `--stay-awake`, turns their idle lock and screensaver off (Lab-owned Macs only).
 - Installs and starts `lab-agent.service`.
 
