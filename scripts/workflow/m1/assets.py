@@ -7,7 +7,7 @@ import argparse,base64,hashlib,json,shlex
 from pathlib import Path
 # Reuse accepted authenticated transport/type checks, not a new client service.
 SDK_SHA='d5e4a7cc72c2bffaf9fdbe7e44a56ac50486f9cb47fcb28aee047d292919094a'
-IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OWNER-BACKUP-DECISIONS.json','OUTPUT-CEILING-PROOF.json','FALLBACK-CONFIG-CLOSURE.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
+IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','FALLBACK-CONFIG-CLOSURE.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
 INPUTS={'transact-m1.py','packet-c-old5.py','rollback-hold-old6.py','transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','manifest.json'}
 CODE={'transact-m1.py':'23b7227bdf76c22047784dc37776458a4fea7c8a5936a72eb857d3eeafbc3e3b','packet-c-old5.py':'02f4c7e0210e1f28f1d945323d1b2a8503aa6c33bb1c95950fe1097fc422fa14','rollback-hold-old6.py':'0a746b40d63a0d1d8b19b3b50613af764c8d2486f73035da9089b18ecd816fcb'}
 def need(v,msg):
@@ -19,7 +19,7 @@ def sdk():
 REMOTE=r'''import base64,fcntl,hashlib,json,os,re,stat,sys,time
 from pathlib import Path
 q=json.loads(sys.argv[1]);P=Path(q['packet']);S=Path(q['source_packet']);H=lambda b:hashlib.sha256(b).hexdigest();deadline=time.monotonic()+180
-IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OWNER-BACKUP-DECISIONS.json','OUTPUT-CEILING-PROOF.json','FALLBACK-CONFIG-CLOSURE.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
+IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','FALLBACK-CONFIG-CLOSURE.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
 INPUTS={'transact-m1.py','packet-c-old5.py','rollback-hold-old6.py','transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','manifest.json'}
 CODE={'transact-m1.py':'23b7227bdf76c22047784dc37776458a4fea7c8a5936a72eb857d3eeafbc3e3b','packet-c-old5.py':'02f4c7e0210e1f28f1d945323d1b2a8503aa6c33bb1c95950fe1097fc422fa14','rollback-hold-old6.py':'0a746b40d63a0d1d8b19b3b50613af764c8d2486f73035da9089b18ecd816fcb'}
 def need(v,msg):

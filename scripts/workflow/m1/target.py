@@ -235,9 +235,15 @@ def collect_capture(p,request,deadline,kind):
  else:need(r['supplement_script_sha256']==p['supplement_source']['sha256'],'supplement source drift')
  objects={}
  for name,pin in r['objects'].items():need(Path(name).name==name,'invalid capture object leaf');objects[name]=verify(q.parent/name,pin,deadline)
+ original_state=None
+ if kind=='backup':
+  state_path=q.parent/'state.original.json';state_pin=r['objects']['state.original.json']
+  with held_regular(state_path,1048576) as (fd,s):
+   state_raw=os.pread(fd,s.st_size+1,0);need(len(state_raw)==s.st_size==state_pin['bytes'] and digest(state_raw)==state_pin['sha256'],'actual original state raw/pin drift')
+  original_state={'base64':base64.b64encode(state_raw).decode(),'sha256':digest(state_raw),'bytes':len(state_raw)}
  freeze=packet/'BACKUP-SOURCE-FREEZE.json'
  with held_regular(freeze,MAX_JSON) as (fd,s):freeze_raw=os.pread(fd,s.st_size,0)
- return {'schema':'maclab.m1-capture-collection/1','kind':kind,'packet':p['packet'],'boot_id':request['expected_boot_id'],'receipt':r,'receipt_base64':base64.b64encode(raw).decode(),'receipt_sha256':digest(raw),'source_freeze_sha256':digest(freeze_raw),'objects':objects,'package_changes':False,'boot_changes':False,'independent_retention_claim':False}
+ return {'schema':'maclab.m1-capture-collection/1','kind':kind,'packet':p['packet'],'boot_id':request['expected_boot_id'],'receipt':r,'receipt_base64':base64.b64encode(raw).decode(),'receipt_sha256':digest(raw),'source_freeze_sha256':digest(freeze_raw),'original_state':original_state,'objects':objects,'package_changes':False,'boot_changes':False,'independent_retention_claim':False}
 
 def dispatch_packet(p,request,deadline):
  """Preserve direct lab-agent parent: replace adapter, never subprocess owner.
