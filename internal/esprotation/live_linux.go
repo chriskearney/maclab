@@ -190,31 +190,8 @@ func observeLive(p Plan, work string) (Snapshot, error) {
 	if err != nil {
 		return s, err
 	}
-	version := efiText(info)
-	if version != "Limine 12.9.0" && version != "Limine 12.9.3" {
-		return s, errors.New("unreviewed Limine BLI ID contract")
-	}
-	s.Files["BLI:LoaderInfo"] = Digest(info)
-	for _, name := range []string{"LoaderEntrySelected", "LoaderEntryDefault", "LoaderEntryOneShot"} {
-		b, e := efiRead(name)
-		if e != nil {
-			return s, e
-		}
-		s.Files["BLI:"+name] = Digest(b)
-		if name == "LoaderEntryOneShot" && efiText(b) != "" {
-			return s, errors.New("armed one-shot protected")
-		}
-		if name == "LoaderEntryDefault" && efiText(b) == entryID(p.Entry) {
-			return s, errors.New("BLI default entry is protected")
-		}
-		if name == "LoaderEntrySelected" {
-			if efiText(b) == "" {
-				return s, errors.New("selected BLI entry required")
-			}
-			if efiText(b) == entryID(p.Entry) {
-				return s, errors.New("current selected entry is protected")
-			}
-		}
+	if err := observeBLI(p, info, efiRead, s.Files); err != nil {
+		return s, err
 	}
 	// Any local pending job workspace is conservatively active. Never use a
 	// stale controller list as permission to retire a possible in-flight entry.
@@ -334,4 +311,37 @@ func observeLive(p Plan, work string) (Snapshot, error) {
 		s.Files["mutable-store:"+path] = Digest(b)
 	}
 	return s, nil
+}
+
+// observeBLI retains the exact live protection checks while permitting host
+// controls without reading EFI variables or touching a target. Limine v12.9.1
+// contract reviewed at upstream c82c3708b3304be806b2492dc2ce34e219c6f989.
+func observeBLI(p Plan, info []byte, read func(string) ([]byte, error), files map[string]string) error {
+	version := efiText(info)
+	if version != "Limine 12.9.0" && version != "Limine 12.9.1" && version != "Limine 12.9.3" {
+		return errors.New("unreviewed Limine BLI ID contract")
+	}
+	files["BLI:LoaderInfo"] = Digest(info)
+	for _, name := range []string{"LoaderEntrySelected", "LoaderEntryDefault", "LoaderEntryOneShot"} {
+		b, e := read(name)
+		if e != nil {
+			return e
+		}
+		files["BLI:"+name] = Digest(b)
+		if name == "LoaderEntryOneShot" && efiText(b) != "" {
+			return errors.New("armed one-shot protected")
+		}
+		if name == "LoaderEntryDefault" && efiText(b) == entryID(p.Entry) {
+			return errors.New("BLI default entry is protected")
+		}
+		if name == "LoaderEntrySelected" {
+			if efiText(b) == "" {
+				return errors.New("selected BLI entry required")
+			}
+			if efiText(b) == entryID(p.Entry) {
+				return errors.New("current selected entry is protected")
+			}
+		}
+	}
+	return nil
 }
