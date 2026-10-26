@@ -56,19 +56,20 @@ type Helper struct {
 	Closure []Pin `json:"closure"`
 }
 type Phase struct {
-	ID          string                 `json:"id"`
-	Kind        string                 `json:"kind"` // cache, upload, bind, helper, submit, wait
-	TimeoutSec  int                    `json:"timeout_sec"`
-	Mutates     bool                   `json:"mutates"`
-	Scope       string                 `json:"scope,omitempty"`
-	File        *Pin                   `json:"file,omitempty"`
-	Template    json.RawMessage        `json:"template,omitempty"`
-	Bind        map[string]Value       `json:"bind,omitempty"`
-	Helper      string                 `json:"helper,omitempty"`
-	InputPhase  string                 `json:"input_phase,omitempty"`
-	Checks      []Check                `json:"checks,omitempty"`
-	Recovery    bool                   `json:"recovery,omitempty"` // explicit branch; never auto-runs
-	M1Admission *M1SubmissionAdmission `json:"m1_submission_admission,omitempty"`
+	ID             string                 `json:"id"`
+	Kind           string                 `json:"kind"` // cache, upload, bind, helper, submit, wait
+	TimeoutSec     int                    `json:"timeout_sec"`
+	Mutates        bool                   `json:"mutates"`
+	Scope          string                 `json:"scope,omitempty"`
+	File           *Pin                   `json:"file,omitempty"`
+	Template       json.RawMessage        `json:"template,omitempty"`
+	Bind           map[string]Value       `json:"bind,omitempty"`
+	Helper         string                 `json:"helper,omitempty"`
+	InputPhase     string                 `json:"input_phase,omitempty"`
+	Checks         []Check                `json:"checks,omitempty"`
+	Recovery       bool                   `json:"recovery,omitempty"`        // explicit branch; never auto-runs
+	WaitCompletion bool                   `json:"wait_completion,omitempty"` // retain any terminal result for restoration; never asserts tests passed
+	M1Admission    *M1SubmissionAdmission `json:"m1_submission_admission,omitempty"`
 }
 type Plan struct {
 	Schema  string            `json:"schema"`
@@ -228,6 +229,9 @@ func (p Plan) Validate() error {
 			}
 		default:
 			return fmt.Errorf("unknown phase kind %q", s.Kind)
+		}
+		if s.WaitCompletion && s.Kind != "wait" {
+			return errors.New("wait_completion is valid only for wait phases")
 		}
 		if s.M1Admission != nil {
 			g := s.M1Admission
@@ -660,7 +664,7 @@ func (r *Runner) execute(ctx context.Context, s *State, p Phase) ([]byte, error)
 				return nil, err
 			}
 			if actual.State == api.JobDone {
-				if actual.Canceled || actual.Outcome != api.OutcomePass {
+				if !p.WaitCompletion && (actual.Canceled || actual.Outcome != api.OutcomePass) {
 					return nil, fmt.Errorf("job %s finished %s; restoration must be inspected, never salvaged as PASS", j.ID, actual.Outcome)
 				}
 				return json.Marshal(actual)

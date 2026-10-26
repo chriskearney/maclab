@@ -273,7 +273,7 @@ func (r *jobRun) newInstalled() (*installedRun, error) {
 	if c.entry == nil {
 		return nil, errors.New("no frozen installer entry")
 	}
-	ir := &installedRun{r: r, c: c, serial: r.v.snapshot().OOB != nil, scripts: map[string]string{},
+	ir := &installedRun{r: r, c: c, serial: r.serialEnabled(), scripts: map[string]string{},
 		res: api.InstalledResult{Release: c.release, ManifestSHA256: c.manSHA, EntrySHA256: c.entrySHA, Verdicts: map[string]string{}}}
 	var pkgs []string
 	for _, a := range c.man.Artifacts {

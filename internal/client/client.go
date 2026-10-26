@@ -187,6 +187,15 @@ func (c *Client) Upload(ctx context.Context, path string) (string, error) {
 }
 
 func (c *Client) Submit(ctx context.Context, spec api.JobSpec) (*api.Job, error) {
+	if err := c.requireRecoveryMode(ctx, spec.RecoveryMode); err != nil {
+		return nil, err
+	}
+	if spec.RecoveryTransaction != "" {
+		var caps api.RecoveryCapabilities
+		if e := c.do(ctx, "GET", "/api/recovery", nil, &caps); e != nil || !caps.TransactionIsolation {
+			return nil, fmt.Errorf("controller lacks transaction recovery isolation; no job submitted")
+		}
+	}
 	var out api.Job
 	if spec.Mesa != nil {
 		var caps api.MesaCapabilities
@@ -203,6 +212,9 @@ func (c *Client) Submit(ctx context.Context, spec api.JobSpec) (*api.Job, error)
 	}
 	if err := c.do(ctx, "POST", route, jsonBody(spec), &out); err != nil {
 		return nil, err
+	}
+	if out.Spec.RecoveryMode != spec.RecoveryMode || out.Spec.RecoveryTransaction != spec.RecoveryTransaction {
+		return &out, fmt.Errorf("job %s returned different recovery_mode; do not retry blindly", out.ID)
 	}
 	if spec.Mesa != nil && out.Spec.Mesa == nil {
 		return nil, fmt.Errorf("controller omitted Mesa request identity; job is not valid Mesa evidence")

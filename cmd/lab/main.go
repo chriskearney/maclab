@@ -189,23 +189,43 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		return showDevice(ctx, c, pos[0])
 
+	case "recovery-mode":
+		mode := fs.String("mode", "", "network-only or serial-assisted")
+		transaction := fs.String("transaction", "", "fresh reviewed transaction identity")
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab recovery-mode <device> --mode MODE --transaction ID"); err != nil {
+			return err
+		}
+		out, err := c.SelectRecoveryMode(ctx, pos[0], api.RecoveryModeRequest{Mode: *mode, Holder: holder(), Transaction: *transaction})
+		if err != nil {
+			return err
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
 	case "baseline":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		noWait := fs.Bool("no-wait", false, "")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab baseline <device>"); err != nil {
 			return err
 		}
-		return submit(ctx, c, api.JobSpec{Device: pos[0], Baseline: true, Holder: holder()}, *noWait)
+		return submit(ctx, c, api.JobSpec{Device: pos[0], Baseline: true, RecoveryMode: *mode, RecoveryTransaction: *transaction, Holder: holder()}, *noWait)
 
 	case "crashtest":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		noWait := fs.Bool("no-wait", false, "")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab crashtest <device>"); err != nil {
 			return err
 		}
-		return submit(ctx, c, api.JobSpec{Device: pos[0], Crash: "panic", Holder: holder()}, *noWait)
+		return submit(ctx, c, api.JobSpec{Device: pos[0], Crash: "panic", RecoveryMode: *mode, RecoveryTransaction: *transaction, Holder: holder()}, *noWait)
 
 	case "run":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		kernel := fs.String("kernel", "", "kernel artifact: a file to upload, or a sha256 already uploaded")
 		cmdline := fs.String("cmdline", "", "extra kernel arguments, appended to the base")
 		runConfig := fs.String("config", "", "with a source URL --kernel: build with this .config (file or uploaded sha256) instead of the Mac's own")
@@ -233,7 +253,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if err := need(pos, 1, "lab run <device> [flags]"); err != nil {
 			return err
 		}
-		spec := api.JobSpec{Device: pos[0], Cmdline: *cmdline, BootTimeoutSec: *bootTimeout, Holder: holder(), Publish: *publish}
+		spec := api.JobSpec{Device: pos[0], Cmdline: *cmdline, RecoveryMode: *mode, RecoveryTransaction: *transaction, BootTimeoutSec: *bootTimeout, Holder: holder(), Publish: *publish}
 		spec.OMTAllow = splitAllow(*omtAllow)
 		spec.CmdlineBase = *cmdlineBase
 		spec.CmdlineStrip = strings.FieldsFunc(*cmdlineStrip, func(r rune) bool { return r == ',' || r == ' ' })

@@ -53,24 +53,28 @@ type HumanAction struct {
 }
 
 type Device struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Label       string       `json:"label"` // physical description for humans
-	Model       string       `json:"model"`
-	Volunteer   bool         `json:"volunteer,omitempty"` // enrolled with ./volunteer: an agent the lab doesn't control, so lab gate leaves it out
-	OOB         *OOBConfig   `json:"oob,omitempty"`
-	State       DeviceState  `json:"state"`
-	StateReason string       `json:"state_reason,omitempty"`
-	Action      *HumanAction `json:"action,omitempty"`
-	LastSeen    time.Time    `json:"last_seen"`
-	BootID      string       `json:"boot_id"`
-	Kernel      string       `json:"kernel"`
-	Cmdline     string       `json:"cmdline"`
-	KnownGood   string       `json:"known_good,omitempty"` // kernel release the baseline ran on
-	Facts       Facts        `json:"facts"`
-	Health      Health       `json:"health"`
-	Lease       *Lease       `json:"lease,omitempty"`
-	ActiveJob   string       `json:"active_job,omitempty"`
+	EffectiveRecoveryMode string       `json:"effective_recovery_mode,omitempty"` // last explicit transaction policy; OOB config is preserved
+	RecoveryTransaction   string       `json:"recovery_transaction,omitempty"`
+	RecoveryHolder        string       `json:"recovery_holder,omitempty"`
+	RecoveryModeJob       string       `json:"recovery_mode_job,omitempty"`
+	ID                    string       `json:"id"`
+	Name                  string       `json:"name"`
+	Label                 string       `json:"label"` // physical description for humans
+	Model                 string       `json:"model"`
+	Volunteer             bool         `json:"volunteer,omitempty"` // enrolled with ./volunteer: an agent the lab doesn't control, so lab gate leaves it out
+	OOB                   *OOBConfig   `json:"oob,omitempty"`
+	State                 DeviceState  `json:"state"`
+	StateReason           string       `json:"state_reason,omitempty"`
+	Action                *HumanAction `json:"action,omitempty"`
+	LastSeen              time.Time    `json:"last_seen"`
+	BootID                string       `json:"boot_id"`
+	Kernel                string       `json:"kernel"`
+	Cmdline               string       `json:"cmdline"`
+	KnownGood             string       `json:"known_good,omitempty"` // kernel release the baseline ran on
+	Facts                 Facts        `json:"facts"`
+	Health                Health       `json:"health"`
+	Lease                 *Lease       `json:"lease,omitempty"`
+	ActiveJob             string       `json:"active_job,omitempty"`
 
 	// VolunteeredBy is the tailnet login whose ./volunteer token enrolled the
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward
@@ -85,7 +89,7 @@ func (d *Device) Tier() int {
 	if d.Facts.WatchdogArmed {
 		t = 1
 	}
-	if d.OOB != nil {
+	if d.OOB != nil && d.EffectiveRecoveryMode != RecoveryNetworkOnly {
 		t = 2
 	}
 	return t
@@ -331,6 +335,7 @@ const (
 
 // Outcomes, most specific first. Only "pass" is success.
 const (
+	OutcomeUnknown     = "unknown" // no observation proves what happened; never a pass
 	OutcomePass        = "pass"
 	OutcomeTestsFailed = "tests_failed"
 	OutcomeUnhealthy   = "booted_unhealthy" // booted, but kernel errors or degraded system
@@ -347,20 +352,22 @@ const (
 )
 
 type JobSpec struct {
-	Device         string     `json:"device"`
-	Kernel         string     `json:"kernel,omitempty"` // artifact sha256; empty = reboot on the current kernel
-	Source         string     `json:"source,omitempty"` // build this first: a GitHub/git URL of a repo, branch, commit or PR
-	Config         string     `json:"config,omitempty"` // source builds: artifact sha256 of a .config to build with, instead of the Mac's own
-	Build          string     `json:"build,omitempty"`  // the build job that produced Kernel
-	Cmdline        string     `json:"cmdline,omitempty"`
-	CmdlineBase    string     `json:"cmdline_base,omitempty"`  // see StageArgs.CmdlineBase
-	CmdlineStrip   []string   `json:"cmdline_strip,omitempty"` // see StageArgs.CmdlineStrip
-	VerboseBoot    bool       `json:"verbose_boot,omitempty"`  // see StageArgs.Verbose
-	Tests          []TestSpec `json:"tests,omitempty"`
-	BootTimeoutSec int        `json:"boot_timeout_sec,omitempty"`
-	Crash          string     `json:"crash,omitempty"` // crash test mode, see CrashArgs
-	Baseline       bool       `json:"baseline,omitempty"`
-	Holder         string     `json:"holder,omitempty"`
+	RecoveryTransaction string     `json:"recovery_transaction,omitempty"`
+	RecoveryMode        string     `json:"recovery_mode,omitempty"` // explicit per-job controller policy; empty retains legacy/inherited behavior
+	Device              string     `json:"device"`
+	Kernel              string     `json:"kernel,omitempty"` // artifact sha256; empty = reboot on the current kernel
+	Source              string     `json:"source,omitempty"` // build this first: a GitHub/git URL of a repo, branch, commit or PR
+	Config              string     `json:"config,omitempty"` // source builds: artifact sha256 of a .config to build with, instead of the Mac's own
+	Build               string     `json:"build,omitempty"`  // the build job that produced Kernel
+	Cmdline             string     `json:"cmdline,omitempty"`
+	CmdlineBase         string     `json:"cmdline_base,omitempty"`  // see StageArgs.CmdlineBase
+	CmdlineStrip        []string   `json:"cmdline_strip,omitempty"` // see StageArgs.CmdlineStrip
+	VerboseBoot         bool       `json:"verbose_boot,omitempty"`  // see StageArgs.Verbose
+	Tests               []TestSpec `json:"tests,omitempty"`
+	BootTimeoutSec      int        `json:"boot_timeout_sec,omitempty"`
+	Crash               string     `json:"crash,omitempty"` // crash test mode, see CrashArgs
+	Baseline            bool       `json:"baseline,omitempty"`
+	Holder              string     `json:"holder,omitempty"`
 	// Publish uploads the job's omarchy-m-test report to omarchy-m-testing.org.
 	// Only a run on the Mac's known-good (packaged) kernel is ever published:
 	// the site names a report's build from pacman, which doesn't know lab kernels.
@@ -503,16 +510,17 @@ type OMTCheck struct {
 }
 
 type Job struct {
-	ID       string     `json:"id"`
-	Spec     JobSpec    `json:"spec"`
-	State    JobState   `json:"state"`
-	Outcome  string     `json:"outcome,omitempty"`
-	Summary  string     `json:"summary,omitempty"`
-	Created  time.Time  `json:"created"`
-	Updated  time.Time  `json:"updated"`
-	Events   []JobEvent `json:"events"`
-	Result   JobResult  `json:"result"`
-	Canceled bool       `json:"canceled,omitempty"`
+	EffectiveRecoveryMode string     `json:"effective_recovery_mode,omitempty"` // resolved without rewriting the requested Spec
+	ID                    string     `json:"id"`
+	Spec                  JobSpec    `json:"spec"`
+	State                 JobState   `json:"state"`
+	Outcome               string     `json:"outcome,omitempty"`
+	Summary               string     `json:"summary,omitempty"`
+	Created               time.Time  `json:"created"`
+	Updated               time.Time  `json:"updated"`
+	Events                []JobEvent `json:"events"`
+	Result                JobResult  `json:"result"`
+	Canceled              bool       `json:"canceled,omitempty"`
 	// RetryOf is the job this one retries (lab retry).
 	RetryOf string `json:"retry_of,omitempty"`
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.

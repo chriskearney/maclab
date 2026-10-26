@@ -620,3 +620,58 @@ func TestCompletedElapsedTimeDoesNotGrowAfterReturn(t *testing.T) {
 		t.Fatal("completed runtime grew with later polling")
 	}
 }
+
+type completionBackend struct {
+	fakeBackend
+	outcome  string
+	canceled bool
+	drift    bool
+}
+
+func (f *completionBackend) Submit(ctx context.Context, s api.JobSpec) (*api.Job, error) {
+	j, e := f.fakeBackend.Submit(ctx, s)
+	j.Outcome = f.outcome
+	j.Canceled = f.canceled
+	return j, e
+}
+func (f *completionBackend) Job(ctx context.Context, id string) (*api.Job, error) {
+	j, e := f.fakeBackend.Job(ctx, id)
+	if f.drift {
+		copy := *j
+		copy.Spec.Kernel = strings.Repeat("b", 64)
+		return &copy, e
+	}
+	return j, e
+}
+func TestWaitCompletionRetainsFailureAndCanceledResultForRestoration(t *testing.T) {
+	for _, outcome := range []string{api.OutcomeTestsFailed, api.OutcomeUnknown, api.OutcomeCanceled, api.OutcomePass} {
+		t.Run(outcome, func(t *testing.T) {
+			phases := jobPhases()
+			phases[2].WaitCompletion = true
+			phases = append(phases, Phase{ID: "restore-binding", Kind: "bind", TimeoutSec: 2, Template: raw(map[string]any{"actual_outcome": ""}), Bind: map[string]Value{"/actual_outcome": {From: "wait", Pointer: "/outcome"}}})
+			r := fixture(t, phases...)
+			r.Backend = &completionBackend{outcome: outcome, canceled: outcome == api.OutcomeCanceled}
+			if e := r.Run(context.Background(), authFor(t, r, time.Now().Add(time.Hour), "boot-test"), false); e != nil {
+				t.Fatal(e)
+			}
+			s := readState(t, r)
+			var j api.Job
+			if e := json.Unmarshal(s.Records["wait"].Output, &j); e != nil || j.Outcome != outcome {
+				t.Fatal("terminal outcome rewritten", e, j)
+			}
+			if s.Records["restore-binding"].State != "done" {
+				t.Fatal("restoration binding unreachable")
+			}
+		})
+	}
+}
+func TestWaitCompletionPreservesIdentityGateAndDefaultFailureStop(t *testing.T) {
+	for _, completion := range []bool{false, true} {
+		r := fixture(t, func() []Phase { p := jobPhases(); p[2].WaitCompletion = completion; return p }()...)
+		f := &completionBackend{outcome: api.OutcomeTestsFailed, drift: completion}
+		r.Backend = f
+		if e := r.Run(context.Background(), authFor(t, r, time.Now().Add(time.Hour), "boot-test"), false); e == nil {
+			t.Fatal("default failure or changed job identity admitted", completion)
+		}
+	}
+}

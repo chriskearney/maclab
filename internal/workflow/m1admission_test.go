@@ -195,3 +195,78 @@ func TestM1MarkerActualForeignParentCannotReachMetadataOrMarkers(t *testing.T) {
 		t.Fatalf("foreign actual parent accepted: %s %v", out, err)
 	}
 }
+
+func TestM1AdmissionNetworkSkipsStaleOOBAndAcceptsActualLegacyModel(t *testing.T) {
+	b, f, s, _ := admissionFixture()
+	s.RecoveryMode = api.RecoveryNetworkOnly
+	f.d.KnownGood = f.d.Kernel
+	f.d.Facts.PreflightOK = true
+	f.d.Facts.Watchdog = true
+	f.d.Facts.WatchdogArmed = true
+	f.d.Facts.PanicTimeout = 10
+	f.d.Tier = 1
+	f.d.Facts.Compatible = nil
+	f.d.Facts.DTModel = "Apple MacBook Pro (13-inch, M1, 2020)"
+	f.oob = map[string]any{"error": "stale route points another machine"}
+	j, e := b.SubmitM1(context.Background(), s, "actual-fixture-boot", 2700, strings.Repeat("9", 64))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if strings.Join(f.calls, ",") != "device,marker,device,POST" || j.Spec.RecoveryMode != api.RecoveryNetworkOnly {
+		t.Fatal(f.calls, j)
+	}
+}
+func TestM1AdmissionLegacyModelFallbackNeverOverridesActualCompatible(t *testing.T) {
+	for _, mode := range []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted} {
+		for _, bad := range []string{"Apple MacBook Pro (13-inch, M1, 2020) ", "Apple MacBook Air (M1, 2020)"} {
+			b, f, s, _ := admissionFixture()
+			s.RecoveryMode = mode
+			f.d.Facts.Compatible = nil
+			f.d.Facts.DTModel = bad
+			if _, e := b.SubmitM1(context.Background(), s, "actual-fixture-boot", 2700, strings.Repeat("9", 64)); e == nil || f.submitted != 0 {
+				t.Fatal("wrong actual model admitted", bad)
+			}
+		}
+	}
+	b, f, s, _ := admissionFixture()
+	s.RecoveryMode = api.RecoveryNetworkOnly
+	f.d.Facts.DTModel = "Apple MacBook Pro (13-inch, M1, 2020)"
+	f.d.Facts.Compatible = []string{"apple,j313"}
+	if _, e := b.SubmitM1(context.Background(), s, "actual-fixture-boot", 2700, strings.Repeat("9", 64)); e == nil {
+		t.Fatal("DT model overrode contradictory physical compatible")
+	}
+}
+
+func TestM1AdmissionNetworkRequiresActualRecoveryFacts(t *testing.T) {
+	for _, name := range []string{"known-good", "preflight", "watchdog", "armed", "panic"} {
+		t.Run(name, func(t *testing.T) {
+			b, f, s, _ := admissionFixture()
+			s.RecoveryMode = api.RecoveryNetworkOnly
+			f.d.KnownGood = f.d.Kernel
+			f.d.Facts.PreflightOK = true
+			f.d.Facts.Watchdog = true
+			f.d.Facts.WatchdogArmed = true
+			f.d.Facts.PanicTimeout = 10
+			switch name {
+			case "known-good":
+				f.d.KnownGood = "stale"
+			case "preflight":
+				f.d.Facts.PreflightOK = false
+			case "watchdog":
+				f.d.Facts.Watchdog = false
+			case "armed":
+				f.d.Facts.WatchdogArmed = false
+			case "panic":
+				f.d.Facts.PanicTimeout = 0
+			}
+			if _, e := b.SubmitM1(context.Background(), s, "actual-fixture-boot", 2700, strings.Repeat("9", 64)); e == nil || f.submitted > 0 {
+				t.Fatal("missing network-only recovery fact admitted", e)
+			}
+			for _, c := range f.calls {
+				if c == "oob" {
+					t.Fatal("invalid network facts touched OOB")
+				}
+			}
+		})
+	}
+}

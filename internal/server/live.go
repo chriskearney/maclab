@@ -5,6 +5,7 @@ package server
 // from a running Mac. The web UI and a future TUI use the same endpoints.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -140,14 +141,10 @@ func (v *dev) publishLocked() {
 // rearmSerial asks the controller to put the Mac's debug UART back into
 // serial mode: the Mac drops out of it on every reboot.
 func (v *dev) rearmSerial(window time.Duration) {
-	v.mu.Lock()
-	ctl := v.oob
-	v.mu.Unlock()
-	if ctl == nil {
-		return
-	}
 	go func() {
-		if err := ctl.Arm(v.s.ctx, window); err != nil {
+		ctx, cancel := context.WithTimeout(v.s.ctx, window+30*time.Second)
+		defer cancel()
+		if err := v.armOOB(ctx, window); err != nil {
 			v.s.log.Printf("%s: serial re-arm: %v", v.d.Name, err)
 		}
 	}()
@@ -323,7 +320,7 @@ func (s *Server) consoleCtl(w http.ResponseWriter, r *http.Request) (*dev, oob.C
 		return nil, nil
 	}
 	v.mu.Lock()
-	ctl := v.oob
+	ctl := v.effectiveOOBLocked()
 	v.mu.Unlock()
 	if ctl == nil {
 		httpErr(w, 409, "%s has no out-of-band controller, so there is no serial console", v.d.Name)
@@ -334,7 +331,7 @@ func (s *Server) consoleCtl(w http.ResponseWriter, r *http.Request) (*dev, oob.C
 
 // hConsoleRaw streams console bytes; it works whatever state the Mac's network is in.
 func (s *Server) hConsoleRaw(w http.ResponseWriter, r *http.Request) {
-	_, ctl := s.consoleCtl(w, r)
+	v, ctl := s.consoleCtl(w, r)
 	if ctl == nil {
 		return
 	}
@@ -345,7 +342,7 @@ func (s *Server) hConsoleRaw(w http.ResponseWriter, r *http.Request) {
 	if fl != nil {
 		fl.Flush()
 	}
-	ctl.Raw(r.Context(), flushWriter{w, fl})
+	v.rawOOB(r.Context(), flushWriter{w, fl})
 }
 
 type flushWriter struct {
@@ -362,7 +359,7 @@ func (f flushWriter) Write(b []byte) (int, error) {
 }
 
 func (s *Server) hConsoleWrite(w http.ResponseWriter, r *http.Request) {
-	_, ctl := s.consoleCtl(w, r)
+	v, ctl := s.consoleCtl(w, r)
 	if ctl == nil {
 		return
 	}
@@ -371,7 +368,7 @@ func (s *Server) hConsoleWrite(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
-	if err := ctl.Write(r.Context(), b); err != nil {
+	if err := v.writeOOB(r.Context(), b); err != nil {
 		httpErr(w, 502, "%v", err)
 		return
 	}
@@ -380,17 +377,17 @@ func (s *Server) hConsoleWrite(w http.ResponseWriter, r *http.Request) {
 
 // hConsoleArm puts the Mac's UART into serial mode now (it leaves it on reboot).
 func (s *Server) hConsoleArm(w http.ResponseWriter, r *http.Request) {
-	_, ctl := s.consoleCtl(w, r)
+	v, ctl := s.consoleCtl(w, r)
 	if ctl == nil {
 		return
 	}
-	if err := ctl.Arm(r.Context(), 0); err != nil {
+	if err := v.armOOB(r.Context(), 0); err != nil {
 		httpErr(w, 502, "%v", err)
 		return
 	}
 	// Switching the port into serial mode glitches the line, and the Mac's
 	// shell reads the glitch as a stray 0xFF. Ctrl-U discards it.
 	time.Sleep(200 * time.Millisecond)
-	ctl.Write(r.Context(), []byte{0x15})
+	v.writeOOB(r.Context(), []byte{0x15})
 	w.Write([]byte("armed\n"))
 }

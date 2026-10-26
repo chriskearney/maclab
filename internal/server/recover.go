@@ -27,12 +27,12 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 		}
 		now := time.Now()
 		for _, e := range v.events {
-			if e.Time.After(since) && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
+			if e.Time.After(since) && !(v.networkOnlyLocked() && e.Source == "serial") && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
 				reason = "kernel panicked and did not reboot within " + panicGrace.String()
 				return true
 			}
 		}
-		if v.oob != nil && v.serialUp && v.serialLast.After(since) && now.Sub(v.serialLast) > serialStall &&
+		if v.effectiveOOBLocked() != nil && v.serialUp && v.serialLast.After(since) && now.Sub(v.serialLast) > serialStall &&
 			v.marker != detect.MarkUserspace && !v.aliveLocked() {
 			reason = fmt.Sprintf("boot stalled: serial console silent for %s after %q", now.Sub(v.serialLast).Round(time.Second), v.serialLine)
 			return true
@@ -74,7 +74,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 	v.mu.Lock()
 	stuck := v.d.BootID
 	alive := trySoft && v.aliveLocked()
-	ctl := v.oob
+	ctl := v.effectiveOOBLocked()
 	prev := v.d.State
 	v.mu.Unlock()
 	v.setState(api.StateRecovering, reason)
@@ -110,7 +110,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 			t0 := time.Now()
 			steps = append(steps, fmt.Sprintf("hard reset %d via %s", i, ctl.Name()))
 			rctx, cancel := context.WithTimeout(ctx, time.Minute)
-			err := ctl.Reset(rctx)
+			err := v.resetOOB(rctx)
 			cancel()
 			if err != nil {
 				steps = append(steps, "hard reset failed: "+err.Error())
@@ -142,11 +142,11 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 
 func (v *dev) lastLogLocked() string {
 	for i := len(v.events) - 1; i >= 0; i-- {
-		if detect.Fatal(v.events[i].Kind) {
+		if detect.Fatal(v.events[i].Kind) && !(v.networkOnlyLocked() && v.events[i].Source == "serial") {
 			return v.events[i].Line
 		}
 	}
-	if v.serialLine != "" {
+	if !v.networkOnlyLocked() && v.serialLine != "" {
 		return v.serialLine
 	}
 	return ""
@@ -176,7 +176,9 @@ func humanAction(d api.Device, reason, lastLog string) *api.HumanAction {
 	}
 	a.Steps = append(a.Steps, "That's it. The lab notices when it checks in again and picks up from there.")
 	a.Why = reason
-	if d.OOB == nil {
+	if d.EffectiveRecoveryMode == api.RecoveryNetworkOnly {
+		a.Why += ". Network-only recovery is selected; no configured remote reset was attempted"
+	} else if d.OOB == nil {
 		a.Why += ". No out-of-band controller is attached, so the lab can't reset it remotely"
 	} else {
 		a.Why += ". Two remote resets did not bring it back"

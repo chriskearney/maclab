@@ -163,8 +163,18 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	interrupted, err := st.jobs("", 1000, true)
+	if err != nil {
+		return nil, err
+	}
 	for _, row := range rows {
 		d := row.d
+		for _, j := range interrupted {
+			if j.Spec.Device == d.Name && j.State != api.JobQueued && (j.Spec.RecoveryMode == api.RecoveryNetworkOnly || j.EffectiveRecoveryMode == api.RecoveryNetworkOnly) {
+				d.EffectiveRecoveryMode = api.RecoveryNetworkOnly
+				d.RecoveryModeJob = j.ID
+			}
+		}
 		d.ActiveJob = ""
 		if d.State == api.StateBusy || d.State == api.StateRecovering {
 			d.State = api.StateOffline
@@ -257,6 +267,9 @@ func (s *Server) attachOOB(v *dev) {
 		v.oobStop, v.oob, v.serialUp = nil, nil, false
 	}
 	cfg := v.d.OOB
+	if v.networkOnlyLocked() {
+		cfg = nil
+	}
 	v.mu.Unlock()
 	if cfg == nil {
 		return
@@ -274,18 +287,36 @@ func (s *Server) attachOOB(v *dev) {
 		cancel()
 		return
 	}
+	if v.networkOnlyLocked() {
+		v.mu.Unlock()
+		cancel()
+		return
+	}
+	done := make(chan struct{})
+	v.oobSerialDone = done
 	v.oob, v.oobStop = ctl, cancel
 	v.mu.Unlock()
 	go func() {
+		defer close(done)
 		backoff := time.Second
 		for ctx.Err() == nil {
 			v.mu.Lock()
+			if v.networkOnlyLocked() {
+				v.mu.Unlock()
+				return
+			}
 			v.serialUp = true
 			v.mu.Unlock()
 			err := ctl.Serial(ctx, func(line string) {
 				backoff = time.Second
 				if strings.TrimSpace(line) == "" {
 					return // oobd keepalive
+				}
+				v.mu.Lock()
+				blocked := v.networkOnlyLocked()
+				v.mu.Unlock()
+				if blocked {
+					return
 				}
 				s.appendSerial(d.Name, line)
 				v.onSerial(line)
@@ -407,6 +438,10 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
+	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.admin(s.hRecoveryMode))
+	m.HandleFunc("GET /api/recovery", s.viewer(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
+	}))
 	m.HandleFunc("GET /api/mesa", s.viewer(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, api.MesaCapabilities{Schema: 1, Staged: true, OfficialGPU: false, AgentMin: mesaMinAgent})
 	}))
@@ -1167,13 +1202,13 @@ func (s *Server) hOOBStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	v.mu.Lock()
-	ctl, up, last := v.oob, v.serialUp, v.serialLast
+	ctl, up, last := v.effectiveOOBLocked(), v.serialUp, v.serialLast
 	v.mu.Unlock()
 	if ctl == nil {
 		httpErr(w, 404, "%s has no out-of-band controller", v.d.Name)
 		return
 	}
-	st, err := ctl.Status(r.Context())
+	st, err := v.statusOOB(r.Context())
 	out := map[string]any{"controller": ctl.Name(), "serial_connected": up, "serial_last": last, "status": st}
 	if err != nil {
 		out["error"] = err.Error()
@@ -1304,6 +1339,17 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 	if v == nil {
 		return nil, 404, fmt.Errorf("no device %q", spec.Device)
 	}
+	v.recoveryMu.Lock()
+	defer v.recoveryMu.Unlock()
+	if err := validateRecoveryTransaction(v.snapshot(), spec); err != nil {
+		return nil, 409, err
+	}
+	if !api.ValidRecoveryMode(spec.RecoveryMode) {
+		return nil, 400, errors.New("recovery_mode must be network-only or serial-assisted")
+	}
+	if spec.RecoveryMode == api.RecoverySerialAssisted && v.snapshot().OOB == nil {
+		return nil, 409, errors.New("serial-assisted requested but no controller is configured")
+	}
 	if spec.Config != "" {
 		if spec.Source == "" {
 			return nil, 400, errors.New("--config applies to a kernel built from a source URL")
@@ -1415,6 +1461,7 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 	for _, n := range notes {
 		j.Events = append(j.Events, api.JobEvent{Time: now, Msg: n})
 	}
+	j.EffectiveRecoveryMode = effectiveRecoveryMode(spec.RecoveryMode, d.EffectiveRecoveryMode)
 	if err := s.store.saveJob(j); err != nil {
 		return nil, 500, err
 	}

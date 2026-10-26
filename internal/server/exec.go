@@ -32,7 +32,7 @@ func (s *Server) hExec(w http.ResponseWriter, r *http.Request) {
 		a.TimeoutSec = 120
 	}
 	v.mu.Lock()
-	alive, ctl := v.aliveLocked(), v.oob
+	alive, ctl := v.aliveLocked(), v.effectiveOOBLocked()
 	v.mu.Unlock()
 	var res api.ExecResult
 	var err error
@@ -41,7 +41,7 @@ func (s *Server) hExec(w http.ResponseWriter, r *http.Request) {
 		err = v.call(r.Context(), api.CmdExec, "", a, time.Duration(a.TimeoutSec+30)*time.Second, &res)
 		res.Via = "agent"
 	case ctl != nil:
-		res, err = serialExec(r.Context(), ctl, a)
+		res, err = v.execOOB(r.Context(), a)
 		res.Via = "serial"
 	default:
 		httpErr(w, 409, "%s is offline and has no serial console", v.d.Name)

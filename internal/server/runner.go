@@ -90,6 +90,10 @@ func (s *Server) deviceLoop(v *dev) {
 
 func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	r := &jobRun{s: s, v: v, j: j, boot: s.cfg.BootTimeout}
+	if err := s.beginJobRecoveryMode(ctx, v, j); err != nil {
+		r.finish(api.OutcomeInfra, "recovery mode admission failed before device commands: "+err.Error())
+		return
+	}
 	if j.Spec.BootTimeoutSec > 0 {
 		r.boot = time.Duration(j.Spec.BootTimeoutSec) * time.Second
 	}
@@ -146,9 +150,13 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	v.setStateLocked(api.StateBusy, "job "+j.ID)
 	v.mu.Unlock()
 	r.started = time.Now()
-	r.serial0 = s.serialOffset(v.d.Name)
+	if r.serialEnabled() {
+		r.serial0 = s.serialOffset(v.d.Name)
+	}
 	defer func() {
-		s.copySerial(v.d.Name, r.serial0, j.ID)
+		if r.serialEnabled() {
+			s.copySerial(v.d.Name, r.serial0, j.ID)
+		}
 		v.mu.Lock()
 		v.d.ActiveJob = ""
 		if v.d.State == api.StateBusy || v.d.State == api.StateRecovering {
@@ -293,11 +301,11 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	}
 	r.ev("staging %s", what)
 	d := v.snapshot()
-	args := api.StageArgs{Artifact: j.Spec.Kernel, Cmdline: j.Spec.Cmdline, Serial: d.OOB != nil,
+	args := api.StageArgs{Artifact: j.Spec.Kernel, Cmdline: j.Spec.Cmdline, Serial: r.serialEnabled(),
 		CmdlineBase: j.Spec.CmdlineBase, CmdlineStrip: j.Spec.CmdlineStrip, Verbose: j.Spec.VerboseBoot,
 		BootTimeoutSec: int(r.boot / time.Second)}
 	if r.ir != nil {
-		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
+		args = api.StageArgs{Serial: r.serialEnabled(), Installed: r.ir.stageArgs()}
 	}
 	sr, why := r.stage(ctx, args)
 	if why != "" {
@@ -698,6 +706,12 @@ func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
 			return api.OutcomeHung, fmt.Sprintf("kernel hung (%s): %s", worst.Kind, worst.Line)
 		}
 		return api.OutcomePanicked, fmt.Sprintf("kernel crashed (%s): %s", worst.Kind, worst.Line)
+	}
+	if r.networkOnly() {
+		d := r.v.snapshot()
+		if d.State == api.StateNeedsHands || !r.v.alive() {
+			return api.OutcomeUnknown, "network-only: no return was observed; serial diagnosis and hard reset were disabled"
+		}
 	}
 	for _, s := range steps {
 		if strings.HasPrefix(s, "detected: ") {

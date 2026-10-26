@@ -39,7 +39,7 @@ type M1Backend struct {
 }
 
 func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string, minimum int, agentSHA string) (*api.Job, error) {
-	if spec.Device != "m1" || spec.Holder == "" || spec.InstalledManifest == "" || minimum < 2700 || minimum > 7200 || boot == "" || !shaRE.MatchString(agentSHA) {
+	if !api.ValidRecoveryMode(spec.RecoveryMode) || spec.Device != "m1" || spec.Holder == "" || spec.InstalledManifest == "" || minimum < 2700 || minimum > 7200 || boot == "" || !shaRE.MatchString(agentSHA) {
 		return nil, errors.New("invalid reviewed M1 installed submission admission")
 	}
 	now := b.Now
@@ -51,8 +51,19 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 		if d == nil || d.Name != "m1" || d.State != api.StateReady || !d.Alive || d.ActiveJob != "" || d.Queued != 0 || d.BootID != boot || d.Kernel != "7.2.11-6-1-ARCH" || strings.Contains(d.Cmdline, "maclab.job=") {
 			return errors.New("M1 submit-time ordinary boot/readiness drift")
 		}
-		if d.Facts.Machine != "aarch64" || len(d.Facts.Compatible) == 0 || d.Facts.Compatible[0] != "apple,j293" || d.Tier < 2 {
+		modelOK := len(d.Facts.Compatible) > 0 && d.Facts.Compatible[0] == "apple,j293"
+		if len(d.Facts.Compatible) == 0 {
+			modelOK = d.Facts.DTModel == "Apple MacBook Pro (13-inch, M1, 2020)"
+		}
+		requiredTier := 2
+		if spec.RecoveryMode == api.RecoveryNetworkOnly {
+			requiredTier = 1
+		}
+		if d.Facts.Machine != "aarch64" || !modelOK || d.Tier < requiredTier {
 			return errors.New("M1 submit-time model/recovery tier mismatch")
+		}
+		if spec.RecoveryMode == api.RecoveryNetworkOnly && (d.KnownGood != d.Kernel || !d.Facts.PreflightOK || !d.Facts.Watchdog || !d.Facts.WatchdogArmed || d.Facts.PanicTimeout <= 0) {
+			return errors.New("M1 network-only one-shot/panic/watchdog/known-good preflight facts are not ready")
 		}
 		if d.Lease == nil || d.Lease.Holder != spec.Holder || d.Lease.Expires.Sub(now()) < time.Duration(minimum)*time.Second {
 			return errors.New("M1 submit-time lease does not cover job and cleanup")
@@ -66,15 +77,17 @@ func (b *M1Backend) SubmitM1(ctx context.Context, spec api.JobSpec, boot string,
 	if err = check(d); err != nil {
 		return nil, err
 	}
-	oob, err := b.Client.OOBStatus(ctx, "m1")
-	if err != nil {
-		return nil, fmt.Errorf("M1 live recovery route: %w", err)
-	}
-	controller, cok := oob["controller"].(string)
-	status, sok := oob["status"].(string)
-	failure := oob["error"]
-	if !cok || !strings.HasPrefix(controller, "oobd ") || !sok || strings.TrimSpace(status) == "" || (failure != nil && failure != "") {
-		return nil, errors.New("M1 live OOB route is unhealthy; no job submitted")
+	if spec.RecoveryMode != api.RecoveryNetworkOnly {
+		oob, err := b.Client.OOBStatus(ctx, "m1")
+		if err != nil {
+			return nil, fmt.Errorf("M1 live recovery route: %w", err)
+		}
+		controller, cok := oob["controller"].(string)
+		status, sok := oob["status"].(string)
+		failure := oob["error"]
+		if !cok || !strings.HasPrefix(controller, "oobd ") || !sok || strings.TrimSpace(status) == "" || (failure != nil && failure != "") {
+			return nil, errors.New("M1 live OOB route is unhealthy; no job submitted")
+		}
 	}
 	// The actual direct-agent process probes all four markers immediately before
 	// the second device read and POST. A retained prior helper receipt cannot

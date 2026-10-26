@@ -26,21 +26,25 @@ type dev struct {
 	// volunteer's Macs under s.mu alone, without each Mac's mu.
 	volunteeredBy string
 
-	mu       sync.Mutex
-	d        api.Device
-	pending  []api.Command
-	inflight map[string]time.Time
-	sent     map[string]api.Command
-	target   map[string]string // command ID -> the boot it was issued for
-	results  map[string]api.CommandResult
-	changed  chan struct{}
-	events   []api.KernelEvent
-	dirty    bool // a lab kernel may still be staged on the Mac
-	restore  api.DeviceState
-	queue    chan string
-	gone     chan struct{} // closed when the device is forgotten: ends deviceLoop
-	oob      oob.Controller
-	oobStop  context.CancelFunc
+	mu            sync.Mutex
+	d             api.Device
+	pending       []api.Command
+	inflight      map[string]time.Time
+	sent          map[string]api.Command
+	target        map[string]string // command ID -> the boot it was issued for
+	results       map[string]api.CommandResult
+	changed       chan struct{}
+	events        []api.KernelEvent
+	dirty         bool // a lab kernel may still be staged on the Mac
+	restore       api.DeviceState
+	queue         chan string
+	gone          chan struct{} // closed when the device is forgotten: ends deviceLoop
+	oob           oob.Controller
+	oobStop       context.CancelFunc
+	oobSerialDone chan struct{}
+	recoveryMu    sync.Mutex
+	oobCallMu     sync.Mutex
+	oobCallCancel context.CancelFunc
 
 	// forgotten: lab forget deleted the device's row. Set under mu, which
 	// every save holds, so nothing still holding the device writes it back.
@@ -187,7 +191,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		v.inflight = map[string]time.Time{}
 		v.sent = map[string]api.Command{}
 		v.s.log.Printf("%s: new boot %s kernel %s", v.d.Name, short(ci.BootID), ci.Kernel)
-		if v.oob != nil {
+		if v.effectiveOOBLocked() != nil {
 			go v.rearmSerial(20 * time.Second) // unplanned reboots too: keep the console live
 		}
 	}
@@ -333,7 +337,7 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 	defer v.mu.Unlock()
 	var out []api.KernelEvent
 	for _, e := range v.events {
-		if !e.Time.Before(t) {
+		if !e.Time.Before(t) && !(v.networkOnlyLocked() && e.Source == "serial") {
 			out = append(out, e)
 		}
 	}
@@ -344,6 +348,9 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 func (v *dev) onSerial(line string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	if v.networkOnlyLocked() {
+		return
+	}
 	now := time.Now()
 	v.serialLast, v.serialLine = now, line
 	v.s.hub.publish("serial", v.d.Name, map[string]any{"device": v.d.Name, "time": now, "line": line})
