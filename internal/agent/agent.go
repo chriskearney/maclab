@@ -762,6 +762,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		if err := json.Unmarshal(c.Args, &args); err != nil {
 			return nil, nil, err
 		}
+		if err := a.warnBeforeReboot(ctx, c, args); err != nil {
+			return nil, nil, err
+		}
 		if err := a.armLabBoot(args); err != nil {
 			return nil, nil, err
 		}

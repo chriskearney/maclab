@@ -60,6 +60,10 @@ _Avoid_: Supervised window
 **Pause**:
 A Volunteer closing their Mac's Availability window early: by default only the current window, or until a date they choose. Work in progress stops as it would at the window's end.
 
+**Reboot warning**:
+The desktop notice a Volunteer's Mac shows about 5 minutes before a job's first reboot, naming the job and the reboot's time, with a Pause button. One per job; the job waits that long after it, and the Audit log records whether it was shown.
+_Avoid_: Reboot alert, countdown
+
 **Incomplete**:
 How a job ends when its Availability window's end or a Pause cuts it short: lab-agent stops it and puts the Mac back on its own system by itself. It is not a failure, and labd tries it again as a new job in a later window.
 _Avoid_: Interrupted, aborted (aborted by the Volunteer is a different ending)

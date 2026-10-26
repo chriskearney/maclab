@@ -398,6 +398,10 @@ type BootOnceArgs struct {
 	// them in its Audit log, and holds them to its Access level for as long
 	// as the Lab boot lasts.
 	Tests []TestSpec `json:"tests,omitempty"`
+	// RebootWarningSec, on a Volunteer's Mac, is how long before the reboot
+	// lab-agent warns the Volunteer on their desktop, and how long it then
+	// waits before arming the Lab boot; 0 is neither.
+	RebootWarningSec int `json:"reboot_warning_sec,omitempty"`
 }
 
 type CollectArgs struct {

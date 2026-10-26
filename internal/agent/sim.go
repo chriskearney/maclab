@@ -101,6 +101,10 @@ type Sim struct {
 	unlock   func() // the boot waiting at the disk password prompt
 	snapshot *simDisk
 	notices  []string
+	// noDesktop is a Mac whose GUI user has no session that can show a notice;
+	// pausers[i] is the Pause button of notices[i], nil for a notice without one.
+	noDesktop bool
+	pausers   []func()
 
 	// earlyUnit runs from the start of each boot's userspace until the boot
 	// ends, as lab-agent's early systemd unit does; the agent sets it.
@@ -490,6 +494,45 @@ func (s *Sim) Notify(text string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.notices = append(s.notices, text)
+	s.pausers = append(s.pausers, nil)
+}
+
+// NotifyWithPause shows a notice with a Pause button that runs onPause when
+// pressed; false if the GUI user has no desktop session to show it in.
+func (s *Sim) NotifyWithPause(ctx context.Context, text string, onPause func()) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.noDesktop {
+		return false
+	}
+	s.notices = append(s.notices, text)
+	s.pausers = append(s.pausers, onPause)
+	return true
+}
+
+// SetDesktopSession says whether the GUI user has a desktop session that can
+// show a notice (true by default); without one, nothing is shown. Safe to
+// call while the agent runs.
+func (s *Sim) SetDesktopSession(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.noDesktop = !on
+}
+
+// PressNoticePause presses the Pause button on the latest shown notice that
+// has one, as the Volunteer would; it is an error if none has.
+func (s *Sim) PressNoticePause() error {
+	s.mu.Lock()
+	var press func()
+	for i := len(s.pausers) - 1; i >= 0 && press == nil; i-- {
+		press = s.pausers[i]
+	}
+	s.mu.Unlock()
+	if press == nil {
+		return errors.New("no notice has a Pause button")
+	}
+	press()
+	return nil
 }
 
 func (s *Sim) Notices() []string {

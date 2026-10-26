@@ -383,7 +383,12 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	if j.Spec.Crash == "" {
 		arm.Tests = r.tests()
 	}
-	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); errors.Is(err, errWindowClosed) {
+	armTimeout := 2 * time.Minute
+	if d := v.snapshot(); d.IsVolunteer() && r.s.cfg.RebootWarning > 0 {
+		arm.RebootWarningSec = int(r.s.cfg.RebootWarning / time.Second)
+		armTimeout += r.s.cfg.RebootWarning
+	}
+	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, armTimeout, nil); errors.Is(err, errWindowClosed) {
 		r.armedBoot = "" // nothing was armed: there is no reboot for restore to wait for
 		return windowCut("before the Lab boot (" + err.Error() + ")")
 	} else if errors.Is(err, errAccessLevel) {
@@ -391,6 +396,11 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		return accessCut("before the Lab boot (" + err.Error() + ")")
 	} else if err != nil {
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
+	}
+	if arm.RebootWarningSec > 0 {
+		// the boot's clocks start once armed, not when the Volunteer's warning did
+		t0 = r.s.now()
+		r.armedAt = t0
 	}
 	r.ev("one-shot armed, rebooting into %s", sr.Entry)
 	v.rearmSerial(3 * time.Minute)
@@ -675,9 +685,13 @@ func (r *jobRun) labBootJob() time.Duration {
 // expectedLength is how long the job is expected to hold the Mac, which on a
 // Volunteer's Mac must fit in what's left of the Availability window: its
 // staging, its Lab boot and, before an Installed run has its tests, its
-// identity checks before, booted and after.
+// identity checks before, booted and after, and on a Volunteer's Mac the
+// Reboot warning's wait.
 func (r *jobRun) expectedLength() time.Duration {
 	d := r.s.cfg.StageTimeout + r.labBootJob()
+	if r.v.snapshot().IsVolunteer() {
+		d += r.s.cfg.RebootWarning
+	}
 	if r.j.Spec.InstalledManifest != "" && r.ir == nil {
 		const identityChecks = 3
 		d += identityChecks * r.testTimeout(api.TestSpec{})

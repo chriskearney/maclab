@@ -53,8 +53,12 @@ type Config struct {
 	// line; 0 leaves it to lab-agent: half the job's boot timeout, at least
 	// 120 s.
 	WatchdogOpenTimeout time.Duration
-	NtfyURL             string
-	NotifyCmd           string
+	// RebootWarning is how long before a Volunteer job's first reboot its Mac
+	// shows the Volunteer a notice, and how long the job waits after it; 0 is
+	// no notice and no wait. labd's flag defaults to 5m.
+	RebootWarning time.Duration
+	NtfyURL       string
+	NotifyCmd     string
 	// Tailscale lets tailnet peers look at the lab by identity; only a
 	// Maintainer's token changes it.
 	Tailscale bool
@@ -145,6 +149,10 @@ func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.C
 	}()
 	return ctx, cancel
 }
+
+// SetRebootWarning sets how long before a Volunteer job's first reboot labd
+// has the Mac warn its Volunteer (Config.RebootWarning).
+func (c *Config) SetRebootWarning(d time.Duration) { c.RebootWarning = d }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {

@@ -412,6 +412,13 @@ Mac, lab-agent blocks suspend (`systemd-inhibit --what=sleep --mode=block`)
 and releases it after; the idle lock and screensaver are never touched.
 Nothing wakes a sleeping Mac: a window it sleeps through is missed.
 
+About 5 minutes before a job's first reboot (labd's `--reboot-warning`, 0 for
+none), a desktop notice in the Volunteer's session names the job and the
+reboot's time, with a Pause button that does what `pause` does; the job waits
+those minutes, and one warning is shown per job. With no desktop session to
+show it, the job goes ahead within the window. The Audit log records, per job,
+whether the warning was shown. Lab-owned Macs get no warning and no wait.
+
 The Volunteer also chooses what Maintainers may do on the Mac, its Access
 level, and can read everything done to it, its Audit log:
 
