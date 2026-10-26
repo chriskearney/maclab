@@ -32,6 +32,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
              [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one
+  lab remove <mac>                    end a Mac's enrollment: its device secret stops working at once, and lab-agent
+                                      removes the lab from the Mac at its next check-in (a Volunteer is told)
   lab device <name> [--label ..] [--model ..] [--oob-url http://m3:7780 --oob-token ..] [--no-oob]
   lab baseline <device>               prove the one-shot boot works; required once per Mac
   lab build <github-url> --device <mac> | --config <file>   build a kernel from a repo, branch, commit or PR URL (reused if built before)
@@ -644,6 +646,17 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		out, err := c.Serial(ctx, pos[0], *n)
 		fmt.Print(out)
 		return err
+
+	case "remove":
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab remove <mac>"); err != nil {
+			return err
+		}
+		if err := c.EndEnrollment(ctx, pos[0]); err != nil {
+			return err
+		}
+		fmt.Printf("ended %s's enrollment; its device secret no longer works\n", pos[0])
+		return nil
 
 	case "audit":
 		pos := parse(fs, args)

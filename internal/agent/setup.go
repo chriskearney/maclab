@@ -216,6 +216,9 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := cfg.Save(ConfigPath); err != nil {
 		return err
 	}
+	if err := os.Remove(filepath.Join(l.WorkDir, leftFile)); err != nil && !os.IsNotExist(err) { // enrolling again after leaving
+		return err
+	}
 
 	if err := installBinary(); err != nil {
 		return err

@@ -74,6 +74,10 @@ _Avoid_: Permissions, trust level
 **Audit log**:
 The record, per Volunteer Mac, of every Maintainer action on it (who, what, when, which job), kept on the Mac itself and written before each action, which its Volunteer can read. labd keeps a copy.
 
+**Leaving**:
+A Mac ending its enrollment, from either side: its Volunteer runs `leave`, or a Maintainer ends the enrollment in labd. Any job stops incomplete, the Mac returns to its Known-good kernel, and the lab's boot entries, units, autologin drop-in and device secret are removed. The Audit log stays with the Volunteer.
+_Avoid_: Unenrolling, removing (for the Mac side)
+
 ## Releases
 
 **Release**:

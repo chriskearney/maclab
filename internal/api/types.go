@@ -980,3 +980,7 @@ type NewMaintainer struct {
 	Maintainer
 	Token string `json:"token"`
 }
+
+// EndedHeader is the header on the 401 that tells a Mac its enrollment was
+// ended by the Maintainers, not merely revoked: it holds the Maintainer's name.
+const EndedHeader = "X-Maclab-Enrollment-Ended-By"

@@ -141,6 +141,11 @@ func (c *Client) RemoveMaintainer(ctx context.Context, name string) error {
 	return c.do(ctx, "DELETE", "/api/maintainers/"+url.PathEscape(name), nil, nil)
 }
 
+// EndEnrollment ends a Mac's enrollment: labd forgets it and revokes its device secret at once.
+func (c *Client) EndEnrollment(ctx context.Context, name string) error {
+	return c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/end-enrollment", nil, nil)
+}
+
 func (c *Client) Lease(ctx context.Context, name, holder string, ttl time.Duration) (*api.Lease, error) {
 	var out api.Lease
 	return &out, c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/lease", jsonBody(api.LeaseRequest{Holder: holder, TTLSec: int(ttl.Seconds())}), &out)

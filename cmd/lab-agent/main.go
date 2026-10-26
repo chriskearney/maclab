@@ -41,6 +41,9 @@ const usage = `lab-agent: the Mac side of the test lab
                                   you turn it on); on lists the deletion links of those published
   sudo lab-agent log              every Maintainer action on this Mac, from its own Audit log (works offline)
   sudo lab-agent jobs             the lab's jobs on this Mac
+  sudo lab-agent leave            leave the lab now (asks first; --yes skips the question): stops any job, returns
+                                  to your own kernel, removes the lab's boot entries, units and device secret,
+                                  tells labd, and lists what is left to remove by hand
   sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
@@ -121,7 +124,10 @@ func main() {
 		cfgPath := fs.String("config", agent.ConfigPath, "")
 		fs.Parse(os.Args[2:])
 		var cfg *agent.Config
-		if cfg, err = agent.LoadConfig(*cfgPath); err == nil {
+		if agent.HasLeft("/var/lib/maclab") {
+			// This Mac left the lab; all that remains is to tell labd.
+			err = agent.Farewell(ctx, "/var/lib/maclab", &agent.Linux{WorkDir: "/var/lib/maclab"}, log.Printf)
+		} else if cfg, err = agent.LoadConfig(*cfgPath); err == nil {
 			sys := &agent.Linux{WorkDir: "/var/lib/maclab", GUIUser: cfg.GUIUser}
 			err = agent.New(cfg, sys, nil).Run(ctx)
 		}
@@ -157,9 +163,17 @@ func main() {
 	default:
 		if agent.IsVolunteerCommand(os.Args[1]) {
 			var cfg *agent.Config
-			if cfg, err = agent.LoadConfig(agent.ConfigPath); err == nil {
+			cfg, err = agent.LoadConfig(agent.ConfigPath)
+			if err != nil && os.Args[1] == "log" && agent.HasLeft("/var/lib/maclab") {
+				cfg, err = &agent.Config{}, nil // a Mac that left still reads its own Audit log
+			}
+			if err == nil {
+				args := os.Args[1:]
+				if args[0] == "leave" && len(args) == 1 && confirmLeaving() {
+					args = append(args, "--yes")
+				}
 				sys := &agent.Linux{WorkDir: "/var/lib/maclab", GUIUser: cfg.GUIUser}
-				err = agent.Volunteer(ctx, cfg, sys, os.Args[1:], os.Stdout)
+				err = agent.Volunteer(ctx, cfg, sys, args, os.Stdout)
 			}
 			break
 		}
@@ -178,4 +192,16 @@ func main() {
 // to undo, such as the Tailscale key file, gets undone.
 func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+}
+
+// confirmLeaving asks the Volunteer, on their terminal, whether to leave the
+// lab. Without a terminal it says no, and leave asks for --yes.
+func confirmLeaving() bool {
+	if st, err := os.Stdin.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	fmt.Print("Leave the lab now? Any job stops, your Mac returns to its own kernel, and the lab is removed from it. [y/N] ")
+	var answer string
+	fmt.Scanln(&answer)
+	return strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes")
 }

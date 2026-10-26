@@ -29,6 +29,7 @@ var volunteerCommands = map[string]volunteerCommand{
 	"publish": publishCmd,
 	"log":     logCmd,
 	"jobs":    jobsCmd,
+	"leave":   leaveCmd,
 }
 
 // IsVolunteerCommand is whether lab-agent's command line routes name here.

@@ -71,6 +71,11 @@ type System interface {
 	// Alive is false while a simulated machine is hung. Always true on Linux.
 	Alive() bool
 
+	// LeaveLab removes the lab from the Mac: its boot entries, units, autologin
+	// drop-in and device secret. keepAgent keeps lab-agent itself until labd
+	// has been told the Mac left.
+	LeaveLab(keepAgent bool) error
+
 	// SnapshotEligible is nil when @ can be snapshotted, else why not.
 	SnapshotEligible() error
 }

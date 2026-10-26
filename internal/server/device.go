@@ -40,6 +40,8 @@ type dev struct {
 	restore  api.DeviceState
 	queue    chan string
 	gone     chan struct{} // closed when the device is forgotten: ends deviceLoop
+	stop     chan struct{} // closed when the Mac's enrollment ends
+	goneWhy  string        // why it ended, once it has
 	oob      oob.Controller
 	oobStop  context.CancelFunc
 
@@ -82,7 +84,7 @@ type dev struct {
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), auditHave: -1}
+		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), stop: make(chan struct{}), auditHave: -1}
 	return v
 }
 
@@ -535,7 +537,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 				delete(v.results, id)
 				return true
 			}
-			if v.d.BootID != boot {
+			if v.goneWhy != "" || v.d.BootID != boot {
 				lost = true
 				return true
 			}

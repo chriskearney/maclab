@@ -57,6 +57,7 @@ func (s *Server) deviceLoop(v *dev) {
 		case <-s.ctx.Done():
 			return
 		case <-v.gone:
+		case <-v.stop:
 			return
 		case id := <-v.queue:
 			j, err := s.store.job(id)
@@ -186,6 +187,12 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		// going down, which the job can't tell from the kernel's doing.
 		outcome, summary = api.OutcomeCanceled, "canceled: "+left
 	}
+	// A Mac that left the lab mid-job leaves nothing to restore, and the job
+	// is not a failure: it is cut short, as when a window closes.
+	gone := v.goneReason()
+	if gone != "" {
+		outcome, summary = api.OutcomeIncomplete, "the Mac left the lab: "+gone
+	}
 
 	// Always put the Mac back on its known-good kernel, even after a cancel,
 	// unless it is leaving the lab: its agent is stopping, so a restore would
@@ -193,6 +200,8 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	rctx, cancel := s.withTimeout(s.ctx, 3*r.boot+5*time.Minute)
 	defer cancel()
 	switch {
+	case gone != "":
+		// nothing to put back: lab-agent returned the Mac to its own system as it left
 	case left != "":
 		r.ev("not restoring the known-good kernel: %s", left)
 		summary += "; not restored: lab-agent uninstall clears the lab's one-shot and staged kernels"
@@ -232,7 +241,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		outcome, summary = r.ir.seal(outcome, summary, at)
 	}
 	r.finishAt(outcome, summary, at)
-	if outcome == api.OutcomeIncomplete {
+	if outcome == api.OutcomeIncomplete && gone == "" {
 		r.retry()
 	}
 }

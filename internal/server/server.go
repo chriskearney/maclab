@@ -461,6 +461,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/checkin", s.agent(s.hCheckin))
 	m.HandleFunc("POST /api/agent/report", s.agent(s.hReport))
 	m.HandleFunc("GET /api/agent/enrollment", s.agent(s.hAgentEnrollment))
+	m.HandleFunc("POST /api/agent/left", s.agent(s.hAgentLeave))
 	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
 	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
@@ -471,6 +472,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
 	m.HandleFunc("PATCH /api/devices/{name}", s.maintainer(s.hPatchDevice))
 	m.HandleFunc("DELETE /api/devices/{name}", s.maintainer(s.hForgetDevice))
+	m.HandleFunc("POST /api/devices/{name}/end-enrollment", s.maintainer(s.hEndEnrollment))
 	m.HandleFunc("POST /api/devices/{name}/lease", s.maintainer(s.hLease))
 	m.HandleFunc("DELETE /api/devices/{name}/lease", s.maintainer(s.hRelease))
 	m.HandleFunc("POST /api/devices/{name}/reset", s.maintainer(s.hReset))
@@ -571,6 +573,9 @@ func (s *Server) agent(h http.HandlerFunc) http.HandlerFunc {
 				h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, v)))
 				return
 			}
+		}
+		if s.ended(w, bearer(r)) {
+			return
 		}
 		httpErr(w, 401, "unknown device secret")
 	}
