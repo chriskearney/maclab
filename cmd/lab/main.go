@@ -218,7 +218,10 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		omtAllow := fs.String("omt-allow", "", "omarchy-m-test checks this kernel is expected to fail, comma-separated (hardware.drivers:<compatible> for one unbound node)")
 		publish := fs.Bool("publish", false, "publish the omarchy-m-test report to omarchy-m-testing.org (known-good kernel runs only)")
 		installedMan := fs.String("installed", "", "boot the INSTALLED release through its installer entry and check it against a frozen expected manifest (file or sha256); see `lab installed`")
-		var tests, guiTests, scripts, guiScripts multi
+		mesaMode := fs.String("mesa-mode", api.MesaStaged, "with --mesa-package: staged (a diagnostic of the packages in a private prefix; the desktop keeps the installed Mesa)")
+		mesaBuild := fs.String("mesa-build", "", "with --mesa-package: the package build that produced the packages, for the record")
+		var tests, guiTests, scripts, guiScripts, mesaPkgs multi
+		fs.Var(&mesaPkgs, "mesa-package", "a pinned Mesa split package to test, name=FILE or name=SHA256 (repeatable), e.g. mesa-aurora=mesa-aurora-…pkg.tar.zst")
 		fs.Var(&tests, "test", "builtin test to run (repeatable)")
 		fs.Var(&guiTests, "gui-test", "builtin GUI test to run in the Wayland session (repeatable)")
 		fs.Var(&scripts, "script", "shell script test to upload and run (repeatable)")
@@ -238,6 +241,23 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 				return err
 			}
 			spec.InstalledManifest = sha
+		}
+		if len(mesaPkgs) > 0 {
+			m := &api.MesaSpec{Mode: *mesaMode, Build: *mesaBuild}
+			for _, p := range mesaPkgs {
+				name, src, ok := strings.Cut(p, "=")
+				if !ok || name == "" || src == "" {
+					return fmt.Errorf("--mesa-package %q: want name=FILE or name=SHA256", p)
+				}
+				sha, err := artifact(ctx, c, src)
+				if err != nil {
+					return fmt.Errorf("--mesa-package %s: %w", name, err)
+				}
+				m.Packages = append(m.Packages, api.MesaPackage{Name: name, SHA256: sha})
+			}
+			spec.Mesa = m
+		} else if *mesaBuild != "" || *mesaMode != api.MesaStaged {
+			return errors.New("--mesa-mode and --mesa-build need at least one --mesa-package")
 		}
 		if *scriptTimeout > 4*time.Hour {
 			return fmt.Errorf("--script-timeout %s: at most 4h", *scriptTimeout)

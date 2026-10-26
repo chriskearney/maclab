@@ -354,6 +354,44 @@ type JobSpec struct {
 	// expectation before, on and after the boot, compares omarchy-m-test and
 	// kernel errors with the frozen pre-install baseline, and never promotes.
 	InstalledManifest string `json:"installed_manifest,omitempty"`
+	// Mesa makes the job a first-class Mesa test of pinned split packages.
+	// See MesaSpec for what each mode does and does not claim.
+	Mesa *MesaSpec `json:"mesa,omitempty"`
+}
+
+// Mesa test modes. Staged is a diagnostic of the packages: they are unpacked
+// into a private per-job prefix on the Mac and only the job's own probe
+// processes are pointed at it, while the desktop keeps the installed Mesa.
+// A staged result therefore says nothing about the installed desktop.
+// Installed (a real package transaction with a recovery contract, judged
+// through the installed manifest/acceptance machinery) is not supported yet.
+const (
+	MesaStaged    = "staged"
+	MesaInstalled = "installed"
+)
+
+// MesaSpec pins the split packages a Mesa job tests.
+type MesaSpec struct {
+	Mode     string        `json:"mode"`            // MesaStaged (MesaInstalled is refused for now)
+	Packages []MesaPackage `json:"packages"`        // the exact split packages, as uploaded artifacts
+	Build    string        `json:"build,omitempty"` // the package build that produced them, if any
+}
+
+// MesaPackage is one pinned split package (for example mesa-aurora or
+// vulkan-aurora): its pacman name and the sha256 of its .pkg.tar.zst artifact.
+type MesaPackage struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
+// MesaResult is a Mesa job's verdicts. Semantics restates what the mode
+// covers, so a staged result can never be read as an installed one.
+type MesaResult struct {
+	Mode      string            `json:"mode"`
+	Semantics string            `json:"semantics"`
+	Packages  []MesaPackage     `json:"packages"`
+	Provider  map[string]string `json:"provider,omitempty"` // api (gl, vulkan) -> NATIVE_STAGED, SYSTEM_PROVIDER, SOFTWARE or MISSING
+	Verdict   string            `json:"verdict"`            // PASS, FAIL or INCOMPLETE
 }
 
 type JobEvent struct {
@@ -374,6 +412,7 @@ type JobResult struct {
 	Logs          []string         `json:"logs,omitempty"`
 	OMT           *OMTResult       `json:"omt,omitempty"` // omarchy-m-test, when it ran
 	Installed     *InstalledResult `json:"installed,omitempty"`
+	Mesa          *MesaResult      `json:"mesa,omitempty"`
 }
 
 // InstalledResult is an installed-mode job's verdicts. The evidence files are

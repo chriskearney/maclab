@@ -1385,6 +1385,11 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 	} else if !d.Facts.PreflightOK {
 		return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, strings.Join(d.Facts.Problems, "; "))
 	}
+	if spec.Mesa != nil {
+		if code, err := s.validateMesa(spec, d.Device); err != nil {
+			return nil, code, err
+		}
+	}
 	if l := d.Lease; l != nil && l.Holder != spec.Holder {
 		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 	}

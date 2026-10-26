@@ -241,6 +241,12 @@ func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 func (r *jobRun) execute(ctx context.Context) (string, string) {
 	v, j := r.v, r.j
 
+	// Submission refuses Mesa jobs until an agent implements them; a stored
+	// one (an older labd's, or a retry) must still never run without that.
+	if j.Spec.Mesa != nil {
+		return api.OutcomeInfra, "Mesa jobs are not dispatched by this labd yet (no agent command for the staged mode)"
+	}
+
 	if j.Spec.InstalledManifest != "" {
 		ir, err := r.newInstalled()
 		if err != nil {

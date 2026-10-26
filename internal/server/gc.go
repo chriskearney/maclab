@@ -43,7 +43,7 @@ func (s *Server) gcArtifacts() {
 	keep := map[string]bool{}   // deleted only when over budget
 	jobs, _ := s.store.jobs("", 300, false)
 	for _, j := range jobs {
-		refs := []string{j.Spec.Kernel}
+		refs := append([]string{j.Spec.Kernel}, mesaRefs(j.Spec)...)
 		for _, t := range j.Spec.Tests {
 			refs = append(refs, t.Script)
 		}
