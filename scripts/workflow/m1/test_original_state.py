@@ -16,5 +16,5 @@ class ActualOriginalState(unittest.TestCase):
     out=m.collect_capture(profile,request,time.monotonic()+10,'backup');self.assertEqual(base64.b64decode(out['original_state']['base64']),raw);self.assertEqual(out['original_state']['sha256'],pin['sha256']);self.assertEqual(out['original_state']['bytes'],len(raw));f.write_bytes(raw+b' ')
     with self.assertRaises(RuntimeError):m.collect_capture(profile,request,time.monotonic()+10,'backup')
  def test_historical_backup_decision_is_not_reusable_asset(self):
-  s=importlib.util.spec_from_file_location('asset_policy',HERE/'assets.py');a=importlib.util.module_from_spec(s);s.loader.exec_module(a);self.assertNotIn('OWNER-BACKUP-DECISIONS.json',a.IMMUTABLE);self.assertNotIn("'OWNER-BACKUP-DECISIONS.json'",a.REMOTE)
+  s=importlib.util.spec_from_file_location('asset_policy',HERE/'assets.py');a=importlib.util.module_from_spec(s);s.loader.exec_module(a);self.assertNotIn('OWNER-BACKUP-DECISIONS.json',a.IMMUTABLE);self.assertIn('OWNER-BACKUP-DECISIONS.json',a.PRODUCED);self.assertNotIn('FALLBACK-CONFIG-CLOSURE.json',a.IMMUTABLE)
 if __name__=='__main__':unittest.main()

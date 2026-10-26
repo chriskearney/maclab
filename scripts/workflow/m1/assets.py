@@ -7,8 +7,10 @@ import argparse,base64,hashlib,json,shlex
 from pathlib import Path
 # Reuse accepted authenticated transport/type checks, not a new client service.
 SDK_SHA='d5e4a7cc72c2bffaf9fdbe7e44a56ac50486f9cb47fcb28aee047d292919094a'
-IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','FALLBACK-CONFIG-CLOSURE.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
+IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
 INPUTS={'transact-m1.py','packet-c-old5.py','rollback-hold-old6.py','transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','manifest.json'}
+PRODUCED={'transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','ESP-PREPARATION-EXPECTATIONS.json','ESP-ARRANGEMENT.json','ESP-PREPARATION-RECEIPT.json','ESP-RETIREMENT-RETENTION-RECEIPT.json','limine.conf.ARRANGED','FALLBACK-CONFIG-CLOSURE.json','MIRROR-RECEIPT.json','OWNER-BACKUP-DECISIONS.json'}
+INPUTS|=PRODUCED
 CODE={'transact-m1.py':'23b7227bdf76c22047784dc37776458a4fea7c8a5936a72eb857d3eeafbc3e3b','packet-c-old5.py':'02f4c7e0210e1f28f1d945323d1b2a8503aa6c33bb1c95950fe1097fc422fa14','rollback-hold-old6.py':'0a746b40d63a0d1d8b19b3b50613af764c8d2486f73035da9089b18ecd816fcb'}
 def need(v,msg):
  if not v:raise RuntimeError(msg)
@@ -19,8 +21,10 @@ def sdk():
 REMOTE=r'''import base64,fcntl,hashlib,json,os,re,stat,sys,time
 from pathlib import Path
 q=json.loads(sys.argv[1]);P=Path(q['packet']);S=Path(q['source_packet']);H=lambda b:hashlib.sha256(b).hexdigest();deadline=time.monotonic()+180
-IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','FALLBACK-CONFIG-CLOSURE.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
+IMMUTABLE={'candidate-files.jsonl','old-package-files.jsonl','linux-aurora.files.sha256','owner-expectations.json','owner-sidecars.json','owner-preinstall-guards.json','OUTPUT-CEILING-PROOF.json','CLOSURE-ADDITIONS.json','verify-package-files.py','resolved-preflight.py'}
 INPUTS={'transact-m1.py','packet-c-old5.py','rollback-hold-old6.py','transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','manifest.json'}
+PRODUCED={'transaction-spec.json','execution-clearance.json','packet-c-clearance.json','BOOT-RECOVERY-PLAN.json','ESP-PREPARATION-EXPECTATIONS.json','ESP-ARRANGEMENT.json','ESP-PREPARATION-RECEIPT.json','ESP-RETIREMENT-RETENTION-RECEIPT.json','limine.conf.ARRANGED','FALLBACK-CONFIG-CLOSURE.json','MIRROR-RECEIPT.json','OWNER-BACKUP-DECISIONS.json'}
+INPUTS|=PRODUCED
 CODE={'transact-m1.py':'23b7227bdf76c22047784dc37776458a4fea7c8a5936a72eb857d3eeafbc3e3b','packet-c-old5.py':'02f4c7e0210e1f28f1d945323d1b2a8503aa6c33bb1c95950fe1097fc422fa14','rollback-hold-old6.py':'0a746b40d63a0d1d8b19b3b50613af764c8d2486f73035da9089b18ecd816fcb'}
 def need(v,msg):
  if not v:raise RuntimeError(msg)
@@ -67,6 +71,8 @@ for row in rows:
  name=row['name'];need(name in (IMMUTABLE if q['operation']=='reuse-assets' else INPUTS),'unsupported artifact leaf')
  need(type(row['bytes']) is int and 0<row['bytes']<=16777216 and re.fullmatch('[0-9a-f]{64}',row['sha256']),'bounded exact artifact pin')
  if name in CODE:need(row['sha256']==CODE[name],'unreviewed code source')
+ if name in PRODUCED and q['operation']=='stage-input':
+  ps=q['producer_scope'];need(ps['schema']=='maclab.m1-producer-stage-scope/1' and ps['packet']==str(P) and ps['expected_boot_id']==q['boot_id'] and ps['root_plan_sha256']==q['root_plan_sha256'] and re.fullmatch('[0-9a-f]{64}',ps['root_plan_sha256']) and re.fullmatch('[0-9a-f]{64}',ps['source_sha256']) and ps['file_name']==name and ps['file_sha256']==row['sha256'] and ps['file_bytes']==row['bytes'],'fresh selected producer proof binding')
  dest=P/name
  if os.path.lexists(dest):result[name]={**verify(dest,row),'reused':True};continue
  if q['operation']=='reuse-assets':
@@ -105,10 +111,13 @@ def run(binding,api=None):
   need(row['name'] in (IMMUTABLE if op=='reuse-assets' else INPUTS),'unsupported named artifact');q={k:row[k] for k in ('name','sha256','bytes')}
   if row['name'] in CODE:need(q['sha256']==CODE[row['name']],'unreviewed source code')
   if op=='stage-input':
-   raw=c.read_pin(row['source']);need(len(raw)==q['bytes'] and H(raw)==q['sha256'],'root input data/source drift');q['base64']=base64.b64encode(raw).decode()
+   raw=base64.b64decode(row['base64'],validate=True) if 'base64' in row else c.read_pin(row['source']);need(len(raw)==q['bytes'] and H(raw)==q['sha256'],'root input data/source drift');q['base64']=base64.b64encode(raw).decode()
+   if row['name'] in PRODUCED:
+    ps=binding['producer_scope'];need(ps['schema']=='maclab.m1-producer-stage-scope/1' and ps['packet']==p['packet'] and ps['expected_boot_id']==binding['expected_boot_id'] and ps['root_plan_sha256']==binding['root_plan_sha256'] and len(ps['root_plan_sha256'])==64 and all(x in '0123456789abcdef' for x in ps['root_plan_sha256']) and ps['file_name']==row['name'] and ps['file_sha256']==q['sha256'] and ps['file_bytes']==q['bytes'],'fresh selected producer proof binding');need(H(c.read_pin(binding['producer_source']))==ps['source_sha256'],'actual reviewed producer source pin')
   rows.append(q)
  need(op!='stage-input' or len(rows)==1,'changed files use individually bounded calls')
  payload={'operation':op,'packet':p['packet'],'source_packet':p['source_packet'],'boot_id':binding['expected_boot_id'],'profile_sha256':binding['packet_profile_sha256'],'expected_kernel':expected_kernel,'agent_parent':binding['agent_parent'],'assets':rows}
+ if op=='stage-input' and any(r['name'] in PRODUCED for r in rows):payload.update(root_plan_sha256=binding['root_plan_sha256'],producer_scope=binding['producer_scope'])
  command=shlex.join(['/usr/bin/python3','-E','-B','-c',REMOTE,json.dumps(payload,separators=(',',':'))]);need(len(command.encode())<=120000,'fixed transport ceiling; never broaden argument limit')
  r=client.request('/api/devices/m1/exec',{'command':command,'timeout_sec':240},330)
  if r['exit_code']!=0 or r.get('via')!='agent':return {'status':'M1_ASSET_STAGE_FAILED','actual_exec':r,'completion_claim':False}

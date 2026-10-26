@@ -25,5 +25,18 @@ class FiniteAssetTransport(unittest.TestCase):
  def test_normal7_cannot_stage_install_owner_or_assets(self):
   b=self.b();b['expected_kernel']='7.2.11-7-1-ARCH'
   with self.assertRaisesRegex(RuntimeError,'only PacketC clearance'):m.run(b,self.api())
+ def produced_binding(self):
+  import base64
+  b=self.b();p=HERE/'prepare.py';source=p.read_bytes();raw=b'{"fresh":"root-reviewed producer data"}';h=hashlib.sha256(raw).hexdigest();b.update(operation='stage-input',root_plan_sha256='d'*64,producer_source={'path':str(p),'sha256':hashlib.sha256(source).hexdigest(),'bytes':len(source)},producer_scope={'schema':'maclab.m1-producer-stage-scope/1','packet':b['profile']['packet'],'expected_boot_id':b['expected_boot_id'],'root_plan_sha256':'d'*64,'source_sha256':hashlib.sha256(source).hexdigest(),'file_name':'MIRROR-RECEIPT.json','file_sha256':h,'file_bytes':len(raw)},assets=[{'name':'MIRROR-RECEIPT.json','sha256':h,'bytes':len(raw),'base64':base64.b64encode(raw).decode()}]);return b
+ def test_finite_fresh_proof_descriptor_stages_without_repeating_full_producer(self):
+  b=self.produced_binding();out=m.run(b,self.api());self.assertEqual(out['status'],'M1_ASSETS_STAGED_ONLY');self.assertNotIn('files',b['producer_scope'])
+ def test_stale_selected_producer_packet_plan_or_source_refused(self):
+  for key in ('packet','root_plan_sha256','source_sha256','file_sha256'):
+   b=self.produced_binding();b['producer_scope'][key]='f'*64
+   with self.subTest(key=key),self.assertRaises(RuntimeError):m.run(b,self.api())
+ def test_perrun_decision_and_fallback_files_must_not_be_reused_as_immutable(self):
+  for name in ('OWNER-BACKUP-DECISIONS.json','FALLBACK-CONFIG-CLOSURE.json'):
+   b=self.b();b['assets'][0]['name']=name
+   with self.subTest(name=name),self.assertRaisesRegex(RuntimeError,'unsupported named artifact'):m.run(b,self.api())
  def test_serial_result_cannot_be_completed(self):
   out=m.run(self.b(),self.api('serial'));self.assertEqual(out['status'],'M1_ASSET_STAGE_FAILED');self.assertEqual(out['actual_exec']['via'],'serial')
