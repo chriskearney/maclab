@@ -374,7 +374,7 @@ const (
 type MesaSpec struct {
 	Mode     string        `json:"mode"`            // MesaStaged (MesaInstalled is refused for now)
 	Packages []MesaPackage `json:"packages"`        // the exact split packages, as uploaded artifacts
-	Build    string        `json:"build,omitempty"` // the package build that produced them, if any
+	Build    string        `json:"build,omitempty"` // the finished package build whose files they are (checked by sha256 at submission), if any
 }
 
 // MesaPackage is one pinned split package (for example mesa-aurora or

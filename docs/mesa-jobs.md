@@ -22,6 +22,20 @@ A Mesa job tests exact, pinned Mesa split packages (for example `mesa-aurora` an
   - the refusal on the current agent through `Submit`;
   - GC pinning while unfinished and release once done, plus a mutant check that reverting the GC change fails the test.
 
+### Hardening after independent review (second commit)
+- **GC:** every unfinished job is pinned however old, not just jobs in the latest-300 window. If any reference query (jobs, unfinished jobs, builds, recipes, configs) fails to query, scan or iterate, the pass stops and deletes nothing.
+- **Runner:** a stored Mesa job is refused at `runJob` entry, before any build, device wait, restore, cleanup or command.
+- **Build provenance:** a given `--mesa-build` must be a finished package build whose files contain each package by sha256 **and** exact package name. The name comes from `<name>-<pkgver>-<pkgrel>-<arch>.pkg.tar.zst`, so `mesa` never matches `mesa-aurora`.
+- **No waivers:** `--omt-allow` is refused on Mesa jobs.
+- **Controls:** each fix has its own test plus a mutant run proving the test fails without it.
+
+## Admission prerequisites for 1b/1c (from the independent review)
+None of these may be skipped before a provider PASS is reported.
+- **Split coherence from the archives themselves**, not from names. Every package's `.PKGINFO` must agree on `pkgbase`, `pkgver`, `pkgrel` and `arch`, and be consistent with the named build. There must be no path collisions between packages, and every archive must be regular: no absolute paths or `..`, only regular files and in-prefix links, no device nodes, FIFOs, setuid or setgid, and bounded sizes.
+- **API coverage:** each requested API must be provided by the staged set itself (GL by the staged `libEGL_mesa` + `libgallium`, Vulkan by the staged `libvulkan_asahi` ICD). A job never passes with mixed providers, such as staged GL with system Vulkan: the overall PASS needs every requested API `NATIVE_STAGED`.
+- **Faults:** reuse the reviewed per-phase fresh journal cursor and same-boot fault supervisor. Reject any new GPU, DART, timeout or reset event, **whatever the baseline holds**. The generic gates are not enough here: `detect.Classify` deliberately ignores apple-dart DART faults, and `detect.NewLines` normalizes repeats against the baseline. A native PASS is never inferred from ordinary baseline new-lines.
+- **OMT stays honest:** in a staged job OMT judges the installed desktop, is reported as such, and takes no allowlist.
+
 ## Increment 1b (next): agent 0.8.0 runs a staged job
 - **Agent command `mesa_stage`:**
   - fetch each package with the existing authenticated artifact fetch and verify its sha256;

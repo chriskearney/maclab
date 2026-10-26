@@ -92,6 +92,14 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		r.boot = time.Duration(j.Spec.BootTimeoutSec) * time.Second
 	}
 
+	// Submission refuses Mesa jobs until an agent implements them. A stored
+	// one (an older labd's, or a retry) is refused here, before any build,
+	// device wait, restore, cleanup or other command reaches the Mac.
+	if j.Spec.Mesa != nil {
+		r.finish(api.OutcomeInfra, "Mesa jobs are not dispatched by this labd yet (no agent command for the staged mode); nothing was sent to "+j.Spec.Device)
+		return
+	}
+
 	// A source is built (or an identical earlier build reused) before the Mac is needed.
 	if j.Spec.Source != "" && j.Spec.Kernel == "" {
 		if outcome, summary := r.build(ctx); outcome != "" {
@@ -240,12 +248,6 @@ func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 
 func (r *jobRun) execute(ctx context.Context) (string, string) {
 	v, j := r.v, r.j
-
-	// Submission refuses Mesa jobs until an agent implements them; a stored
-	// one (an older labd's, or a retry) must still never run without that.
-	if j.Spec.Mesa != nil {
-		return api.OutcomeInfra, "Mesa jobs are not dispatched by this labd yet (no agent command for the staged mode)"
-	}
 
 	if j.Spec.InstalledManifest != "" {
 		ir, err := r.newInstalled()
