@@ -1442,13 +1442,16 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 			if t.Builtin == omtTest {
 				has = true
 				spec.Tests[i].GUI = true
+				spec.Tests[i].SkipOnScreen = d.Enrollment.IsVolunteer()
 				if t.TimeoutSec == 0 {
 					spec.Tests[i].TimeoutSec = omtSpec().TimeoutSec
 				}
 			}
 		}
 		if !has && s.omtWanted(v.snapshot(), spec) {
-			spec.Tests = append(spec.Tests, omtSpec())
+			ts := omtSpec()
+			ts.SkipOnScreen = d.Enrollment.IsVolunteer()
+			spec.Tests = append(spec.Tests, ts)
 		}
 	}
 	if d.KnownGood == "" && !spec.Baseline {

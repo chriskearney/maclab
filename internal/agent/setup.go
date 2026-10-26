@@ -226,12 +226,19 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := os.WriteFile(labBootDeadlineUnitPath, []byte(labBootDeadlineUnit()), 0o644); err != nil {
 		return err
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "lab-agent.service", labBootDeadlineUnitName}, {"restart", "lab-agent.service"}} {
+	if err := os.WriteFile(labBootSessionUnitPath, []byte(labBootSessionUnit()), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(labBootLockUnitPath, []byte(labBootLockUnit()), 0o644); err != nil {
+		return err
+	}
+	for _, args := range [][]string{{"daemon-reload"}, {"enable", "lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName}, {"restart", "lab-agent.service"}} {
 		if out, err := exec.Command("systemctl", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(args, " "), err, out)
 		}
 	}
 	say("lab-agent.service enabled and running")
+	say("%s and %s enabled: a Lab boot of a Volunteer's Mac logs the GUI user in, locked at once", labBootSessionUnitName, labBootLockUnitName)
 	say("%s enabled: a Lab boot that misses its deadline reboots to the known-good kernel", labBootDeadlineUnitName)
 
 	if e := cfg.Enrollment; e.IsVolunteer() {
