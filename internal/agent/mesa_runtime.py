@@ -4,7 +4,7 @@
 The agent supplies a root-owned plan bound to the actual job boot and staged
 manifest. No arbitrary executable/command or provider bypass is accepted.
 """
-import argparse, glob, hashlib, json, os, pwd, re, selectors, signal, stat, subprocess, sys, time
+import argparse, errno, glob, hashlib, json, os, pwd, re, selectors, signal, stat, subprocess, sys, time
 from pathlib import Path
 
 MAX_FILE=512*1024*1024
@@ -103,7 +103,7 @@ def child_env(plan,m):
     run=Path(m['prefix'])/'run';env={'PATH':'/usr/bin:/bin','LC_ALL':'C','HOME':str(run/'home'),'TMPDIR':str(run/'tmp'),'XDG_CACHE_HOME':str(run/'cache'),'XDG_CONFIG_HOME':str(run/'config'),'XDG_DATA_HOME':str(run/'data'),'XDG_STATE_HOME':str(run/'state')}
     for k in ('XDG_RUNTIME_DIR','WAYLAND_DISPLAY','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XDG_SESSION_TYPE'):
         if k in plan['gui_env']:env[k]=plan['gui_env'][k]
-    lib=str(Path(m['root'])/'usr/lib');env.update({'LD_LIBRARY_PATH':lib+':/usr/lib','VK_DRIVER_FILES':m['vulkan_json'],'VK_ICD_FILENAMES':m['vulkan_json'],'__EGL_VENDOR_LIBRARY_FILENAMES':m['egl_json'],'LIBGL_DRIVERS_PATH':lib+'/dri','GBM_BACKENDS_PATH':lib+'/gbm'})
+    lib=str(Path(m['root'])/'usr/lib');env.update({'RENDER_CHECK_RENDERER':'Apple','RENDER_CHECK_DEVICE':'Apple','LD_LIBRARY_PATH':lib+':/usr/lib','VK_DRIVER_FILES':m['vulkan_json'],'VK_ICD_FILENAMES':m['vulkan_json'],'__EGL_VENDOR_LIBRARY_FILENAMES':m['egl_json'],'LIBGL_DRIVERS_PATH':lib+'/dri','GBM_BACKENDS_PATH':lib+'/gbm'})
     return env
 def health(plan):
     temps=[int(Path(p).read_text())/1000 for p in glob.glob('/sys/class/thermal/thermal_zone*/temp')]
@@ -149,23 +149,35 @@ def members(unit,v,plan,desc,inv):
         try:
             fields=Path('/proc',str(p),'stat').read_text().rsplit(')',1)[1].split()
             if fields[0]!='Z':live.append(p)
-        except FileNotFoundError:pass
+        except OSError as error:
+            if error.errno not in (errno.ENOENT,errno.ESRCH):raise
     return live,v
-class MappedGone(FileNotFoundError):
-    def __init__(self,mapping):self.mapping=dict(mapping);super().__init__('owned mapped process vanished')
-def proc_birth(pid):
-    raw=Path('/proc',str(pid),'stat').read_bytes();need(len(raw)<16384,'process stat budget');return int(raw.rsplit(b') ',1)[1].split()[19])
+class ProcUnavailable(OSError):
+    def __init__(self,pid,birth,phase,error,mapping=None):
+        self.pid,self.birth,self.phase,self.mapping=pid,birth,phase,mapping
+        super().__init__(error.errno,'owned process read unavailable: '+phase)
+class MapRetired(Stop):
+    def __init__(self,mapping):self.mapping=dict(mapping);super().__init__('previously sampled map retired/changed')
+def proc_read(pid,leaf,birth=None):
+    need(type(pid)is int and pid>0 and leaf in ('stat','status','maps','environ','cmdline'),'unknown owned process read')
+    try:
+        raw=Path('/proc',str(pid),leaf).read_bytes();need(len(raw)<=8*1024*1024,'owned proc read budget');return raw
+    except OSError as error:
+        if error.errno in (errno.ENOENT,errno.ESRCH):raise ProcUnavailable(pid,birth,leaf,error) from error
+        raise
+def proc_birth(pid):return int(proc_read(pid,'stat').rsplit(b') ',1)[1].split()[19])
 def map_signature(mapping):return tuple(mapping[x] for x in ('range','perms','offset','path','maps_device','inode','deleted'))
 def current_mapping(mapping):
-    pid=mapping['pid'];birth=mapping['birth']
+    pid,birth=mapping['pid'],mapping['birth']
     try:
-        need(proc_birth(pid)==birth,'mapped PID reused');text=Path('/proc',str(pid),'maps').read_text();need(len(text)<=8*1024*1024,'maps budget');rows=[]
+        need(proc_birth(pid)==birth,'mapped PID reused');text=proc_read(pid,'maps',birth).decode();rows=[]
         for line in text.splitlines():
             f=line.split(None,5)
             if f and f[0]==mapping['range']:
                 need(len(f)==6,'mapped row became anonymous');p=f[5];deleted=p.endswith(' (deleted)');p=p.removesuffix(' (deleted)');rows.append({'range':f[0],'perms':f[1],'offset':int(f[2],16),'path':p,'maps_device':f[3],'inode':int(f[4]),'deleted':deleted})
-        need(len(rows)==1 and map_signature(rows[0])==map_signature(mapping),'mapped range/perms/offset/path replaced');need(proc_birth(pid)==birth,'PID changed during map check')
-    except FileNotFoundError as e:raise MappedGone(mapping) from e
+        need(proc_birth(pid)==birth,'PID changed during map check')
+        if len(rows)!=1 or map_signature(rows[0])!=map_signature(mapping):raise MapRetired(mapping)
+    except ProcUnavailable as error:raise ProcUnavailable(pid,birth,error.phase,error,dict(mapping)) from error
 
 def hash_held(meta):
     before=os.fstat(meta);need(stat.S_ISREG(before.st_mode) and 0<before.st_size<=MAX_FILE,'mapped/live nonregular or oversize');ident=info(before);fd=os.open('/proc/self/fd/'+str(meta),os.O_RDONLY|os.O_NONBLOCK|os.O_CLOEXEC)
@@ -178,7 +190,7 @@ def hash_held(meta):
         need(n==before.st_size and info(os.fstat(fd))==ident and info(os.fstat(meta))==ident,'mapped content/metadata changed');return h.hexdigest()
     finally:os.close(fd)
 class MapWitnesses:
-    def __init__(self):self.hashes={};self.bindings={}
+    def __init__(self):self.hashes={};self.bindings={};self.live_keys={}
     def key(self,row):return (row['pid'],row['birth'],map_signature(row))
     def digest(self,meta,row):
         ident=info(os.fstat(meta));key=(row['pid'],row['birth'],ident)
@@ -186,10 +198,19 @@ class MapWitnesses:
             held,digest=self.hashes[key];need(info(os.fstat(held))==ident,'retained witness metadata changed');return digest
         need(len(self.hashes)<128,'provider witness descriptor budget');digest=hash_held(meta);self.hashes[key]=(os.dup(meta),digest);return digest
     def commit(self,row,mapped,live):
-        key=self.key(row);value=(mapped,live);need(key not in self.bindings or self.bindings[key]==value,'mapped/live descriptor changed');self.bindings[key]=value
+        key=self.key(row);value=(mapped,live);need(key not in self.bindings or self.bindings[key]==value,'mapped/live descriptor changed');need(len(self.bindings)<4096,'mapping witness budget');self.bindings[key]=value;self.keep_live(row['path'],live)
+    def keep_live(self,path,expected):
+        need(path not in self.live_keys or self.live_keys[path]==expected,'live provider full identity changed');self.live_keys[path]=expected
+    def verify_live(self):
+        need(self.live_keys,'no retained live provider witnesses')
+        for path,expected in self.live_keys.items():
+            fd=os.open(path,os.O_PATH|os.O_NOFOLLOW|os.O_CLOEXEC)
+            try:need(stat.S_ISREG(os.fstat(fd).st_mode) and info(os.fstat(fd))==info(os.lstat(path))==expected,'live provider metadata changed')
+            finally:os.close(fd)
+        for (_,_,expected),(fd,_) in self.hashes.items():need(info(os.fstat(fd))==expected,'retained descriptor changed')
     def close(self):
         for fd,_ in self.hashes.values():os.close(fd)
-        self.hashes.clear();self.bindings.clear()
+        self.hashes.clear();self.bindings.clear();self.live_keys.clear()
 
 def bind_mapping(row,expected_sha,witnesses,reference=None,check_current=True):
     mapped=live=None
@@ -199,80 +220,152 @@ def bind_mapping(row,expected_sha,witnesses,reference=None,check_current=True):
             # This is the ONLY followed magic link; it is a validated kernel
             # PID/VMA reference. O_PATH never invokes character-device open.
             mapped=os.open('/proc/'+str(row['pid'])+'/map_files/'+row['range'],os.O_PATH|os.O_CLOEXEC) if reference is None else reference(row['range'],row['path'])
-        except FileNotFoundError as error:
-            if check_current:current_mapping(row)
-            raise Stop('mapped range disappeared while PID remains') from error
+        except OSError as error:
+            if error.errno in (errno.ENOENT,errno.ESRCH):raise ProcUnavailable(row['pid'],row['birth'],'map_files',error,dict(row)) from error
+            raise
         live=os.open(row['path'],os.O_PATH|os.O_NOFOLLOW|os.O_CLOEXEC);a=os.fstat(mapped);b=os.fstat(live)
         need(stat.S_ISREG(a.st_mode) and stat.S_ISREG(b.st_mode) and info(a)==info(b) and a.st_ino==row['inode'],'mapped descriptor/live path full identity mismatch')
         key=witnesses.key(row)
         if key in witnesses.bindings:need(witnesses.bindings[key]==(info(a),info(b)),'committed descriptor identity drift')
         actual=witnesses.digest(mapped,row);current=witnesses.digest(live,row);need(actual==current==expected_sha,'mapped/live/pinned bytes mismatch')
         need(info(os.fstat(mapped))==info(a) and info(os.fstat(live))==info(b) and info(os.stat(row['path'],follow_symlinks=False))==info(b),'mapped/live path metadata drift')
+        witnesses.commit(row,info(a),info(b))
         if check_current:current_mapping(row)
-        witnesses.commit(row,info(a),info(b));return {'range':row['range'],'perms':row['perms'],'offset':row['offset'],'maps_device':row['maps_device'],'maps_inode':row['inode'],'actual_device':a.st_dev,'actual_inode':a.st_ino,'path':row['path'],'sha256':actual}
-    except FileNotFoundError as error:
-        if isinstance(error,MappedGone):raise
-        if check_current:current_mapping(row)
-        raise Stop('live regular provider pathname vanished') from error
+        return {'range':row['range'],'perms':row['perms'],'offset':row['offset'],'maps_device':row['maps_device'],'maps_inode':row['inode'],'actual_device':a.st_dev,'actual_inode':a.st_ino,'path':row['path'],'sha256':actual}
     finally:
         if mapped is not None:os.close(mapped)
         if live is not None:os.close(live)
 
-def graphics_maps(text,manifest,pins,pid=None,mapped_reference=None,evidence=None,witnesses=None,birth=None):
-    need(len(text)<=8*1024*1024,'maps budget');root=Path(manifest['root']);found=set();system=False;own=witnesses is None
+def graphics_rows(text,manifest,pins,pid=None,birth=None):
+    need(len(text)<=8*1024*1024,'maps budget');root=Path(manifest['root']);rows=[]
+    for line in text.splitlines():
+        f=line.split(None,5)
+        if len(f)<6 or not f[5].startswith('/'):continue
+        path=f[5];base=Path(path.removesuffix(' (deleted)')).name
+        if not GRAPHICS.match(base) and '/dri/' not in path and '/gbm/' not in path and not Path(path).is_relative_to(root/'usr/lib'):continue
+        need(not path.endswith(' (deleted)'),'deleted graphics map');st=os.stat(path,follow_symlinks=False);need(stat.S_ISREG(st.st_mode),'nonregular live graphics path')
+        need(re.fullmatch('[0-9a-f]+-[0-9a-f]+',f[0]) and re.fullmatch('[0-9a-f]+:[0-9a-f]+',f[3]) and f[4].isdecimal() and re.fullmatch('[r-][w-][x-][ps]',f[1]) and re.fullmatch('[0-9a-f]+',f[2]),'mapped range/device/inode schema')
+        lo,hi=(int(x,16) for x in f[0].split('-'));need(lo<hi,'empty map range')
+        row={'range':f[0],'perms':f[1],'offset':int(f[2],16),'path':path,'maps_device':f[3],'inode':int(f[4]),'deleted':False,'pid':pid if pid is not None else 1,'birth':birth if birth is not None else 1,'rel':None,'system':False}
+        if Path(path).is_relative_to(root):
+            rel=str(Path(path).relative_to(root));v=manifest['files'].get(rel);need(v and not v.get('link') and v.get('sha256'),'unfrozen staged map');row.update(expected_sha=v['sha256'],rel=rel)
+        else:
+            need(path in pins,'unfrozen external graphics map');row.update(expected_sha=pins[path]['sha256'],system=bool(re.match(r'libgallium|libEGL_mesa|libvulkan_asahi',base)))
+        rows.append(row);need(len(rows)<=4096,'graphics mapping budget')
+    return rows
+
+def graphics_maps(text,manifest,pins,pid=None,mapped_reference=None,evidence=None,witnesses=None,birth=None,completion=None):
+    found=set();system=False;own=witnesses is None
     if own:witnesses=MapWitnesses()
     try:
-        for line in text.splitlines():
-            f=line.split(None,5)
-            if len(f)<6 or not f[5].startswith('/'):continue
-            path=f[5];base=Path(path.removesuffix(' (deleted)')).name
-            if not GRAPHICS.match(base) and '/dri/' not in path and '/gbm/' not in path and not Path(path).is_relative_to(root/'usr/lib'):continue
-            need(not path.endswith(' (deleted)'),'deleted graphics map');st=os.stat(path,follow_symlinks=False)
-            if not stat.S_ISREG(st.st_mode):continue
-            need(re.fullmatch('[0-9a-f]+-[0-9a-f]+',f[0]) and re.fullmatch('[0-9a-f]+:[0-9a-f]+',f[3]) and f[4].isdecimal() and re.fullmatch('[r-][w-][x-][ps]',f[1]) and re.fullmatch('[0-9a-f]+',f[2]),'mapped range/device/inode schema')
-            lo,hi=(int(x,16) for x in f[0].split('-'));need(lo<hi,'empty map range');need(mapped_reference is not None or (type(pid)is int and pid>0 and type(birth)is int),'missing owned mapped-file reference')
-            row={'range':f[0],'perms':f[1],'offset':int(f[2],16),'path':path,'maps_device':f[3],'inode':int(f[4]),'deleted':False,'pid':pid if pid is not None else 1,'birth':birth if birth is not None else 1}
-            if Path(path).is_relative_to(root):
-                rel=str(Path(path).relative_to(root));v=manifest['files'].get(rel);need(v and not v.get('link') and v.get('sha256'),'unfrozen staged map');expected=v['sha256'];found.add(rel)
-            else:
-                need(path in pins,'unfrozen external graphics map');expected=pins[path]['sha256']
-                if re.match(r'libgallium|libEGL_mesa|libvulkan_asahi',base):system=True
-            proof=bind_mapping(row,expected,witnesses,mapped_reference,check_current=mapped_reference is None)
+        need(mapped_reference is not None or (type(pid)is int and pid>0 and type(birth)is int),'missing owned mapped-file reference')
+        rows=graphics_rows(text,manifest,pins,pid,birth)
+        if completion:completion.check_addresses(rows)
+        # Admit the complete current list before any binding; bind NEW rows
+        # first so retirement of an old range cannot hide a changed provider.
+        rows.sort(key=lambda row:witnesses.key(row) in witnesses.bindings)
+        for row in rows:
+            proof=bind_mapping(row,row['expected_sha'],witnesses,mapped_reference,check_current=mapped_reference is None)
+            if row['rel']:found.add(row['rel'])
+            system|=row['system']
             if evidence is not None:evidence.append(proof)
         return found,system
     finally:
         if own:witnesses.close()
 
-def allow_owned_exit(mapping,seen,witnesses):
-    key=(mapping['pid'],mapping['birth']);need(key in seen.get('complete',set()) and witnesses.key(mapping) in witnesses.bindings,'vanished child without prior complete exact-range witness')
-    try:proc_birth(mapping['pid'])
-    except FileNotFoundError:return {'pid':mapping['pid'],'birth':mapping['birth'],'range':mapping['range']}
-    raise Stop('mapped PID remains or was reused')
+COMPLETION_GRACE=5.0
+class CompletionState:
+    def __init__(self):self.deadline=None;self.events=[];self.retired={}
+    def check(self):
+        if self.deadline is not None:need(time.monotonic()<=self.deadline,'provider completion grace exceeded')
+    def begin(self,pid,birth,phase,seen,witnesses,mapping=None):
+        need((pid,birth) in seen.get('complete',set()) and (pid,birth) in seen.get('env_complete',set()),'retirement without prior complete same-birth provider/environment witness')
+        if mapping is not None:need(witnesses.key(mapping) in witnesses.bindings,'retirement of unverified new mapping')
+        if '_verify_image' in seen:
+            try:seen['_verify_image'](pid,birth)
+            except ProcUnavailable:need(terminal_process(pid,birth),'live process image unavailable at completion boundary')
+        witnesses.verify_live()
+        if mapping is not None:self.remember([mapping],pid,birth)
+        if self.deadline is None:self.deadline=time.monotonic()+COMPLETION_GRACE
+        self.check();event={'pid':pid,'birth':birth,'phase':phase,'range':mapping.get('range') if mapping else None}
+        if event not in self.events:need(len(self.events)<128,'completion event budget');self.events.append(event)
+        return event
+    def remember(self,rows,pid,birth):
+        # Only current fully descriptor-bound rows, not stale pre-first-proof
+        # loader VMAs. First path at a protected range cannot be overwritten.
+        for row in rows:self.retired.setdefault((pid,birth,row['range']),row['path'])
+    def check_addresses(self,rows):
+        for row in rows:
+            lo,hi=(int(x,16) for x in row['range'].split('-'))
+            for (pid,birth,oldrange),path in self.retired.items():
+                if (pid,birth)!=(row['pid'],row['birth']):continue
+                a,b=(int(x,16) for x in oldrange.split('-'));need(hi<=a or b<=lo or path==row['path'],'retired address reused by different graphics provider')
 
-def observe(pids,tool,m,pins,seen,expected_uid,required,witnesses):
+def work_banner(api,text):return (('gl' if api=='gl' else 'vk')+'-render-check: 64x64 clear + 48x48 triangle, 3 s') in text.splitlines()
+def probe_image(pid,birth,tool,witnesses):
+    actual=live=None
+    try:
+        try:actual=os.open('/proc/'+str(pid)+'/exe',os.O_PATH|os.O_CLOEXEC)
+        except OSError as error:
+            if error.errno in (errno.ENOENT,errno.ESRCH):raise ProcUnavailable(pid,birth,'exe',error) from error
+            raise
+        live=os.open(tool['path'],os.O_PATH|os.O_NOFOLLOW|os.O_CLOEXEC);a,b=os.fstat(actual),os.fstat(live)
+        need(stat.S_ISREG(a.st_mode) and stat.S_ISREG(b.st_mode) and info(a)==info(b),'actual helper image drift')
+        row={'pid':pid,'birth':birth};need(witnesses.digest(actual,row)==witnesses.digest(live,row)==tool['sha256'],'actual helper bytes drift');witnesses.keep_live(tool['path'],info(b));need(proc_read(pid,'cmdline',birth)==tool['path'].encode()+b'\0' + b'3\0','actual helper argv drift');need(proc_birth(pid)==birth,'helper PID reused')
+    finally:
+        if actual is not None:os.close(actual)
+        if live is not None:os.close(live)
+def probe_environment(pid,birth,env):
+    raw=proc_read(pid,'environ',birth);need(len(raw)<=1024*1024,'helper environment budget');items=raw.rstrip(b'\0').split(b'\0');need(len(items)==len(env) and len(set(items))==len(items) and set(items)=={(k+'='+v).encode() for k,v in env.items()},'actual helper environment drift')
+def probe_render_node(pid,birth):
+    render=False
+    try:
+        for fd in Path('/proc',str(pid),'fd').iterdir():
+            try:
+                st=fd.stat()
+                if stat.S_ISCHR(st.st_mode) and os.major(st.st_rdev)==226 and os.minor(st.st_rdev)==128:render=True
+            except OSError as error:
+                if error.errno not in (errno.ENOENT,errno.ESRCH):raise
+    except OSError as error:
+        if error.errno in (errno.ENOENT,errno.ESRCH):raise ProcUnavailable(pid,birth,'fd',error) from error
+        raise
+    return render
+def terminal_process(pid,birth):
+    try:
+        fields=proc_read(pid,'stat',birth).rsplit(b') ',1)[1].split();need(int(fields[19])==birth,'owned PID reused');return fields[0] in (b'Z',b'X',b'x')
+    except ProcUnavailable as error:need(error.phase=='stat' and error.pid==pid,'unrelated process disappearance');return True
+
+def observe(pids,tool,m,pins,seen,expected_uid,required,witnesses,env=None,api=None,text='',completion=None):
+    need(env is not None and api in ('gl','vulkan'),'trusted probe environment/API absent')
+    if completion is None:completion=CompletionState()
+    seen['_verify_image']=lambda pid,birth:(probe_image(pid,birth,tool,witnesses),probe_environment(pid,birth,env))
     for pid in pids:
-        try:
-            birth=proc_birth(pid);exe=os.readlink('/proc/'+str(pid)+'/exe')
-            if exe!=tool['path']:continue
-            need(sha(exe)==tool['sha256'],'actual probe executable drift');status=Path('/proc',str(pid),'status').read_text();uid=re.search(r'^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)$',status,re.M);need(uid and all(int(x)==expected_uid for x in uid.groups()),'probe UID drift');proof=[]
-            try:f,s=graphics_maps(Path('/proc',str(pid),'maps').read_text(),m,pins,pid=pid,birth=birth,evidence=proof,witnesses=witnesses)
-            except MappedGone as error:
-                seen.setdefault('pending_exits',[]).append(allow_owned_exit(error.mapping,seen,witnesses));continue
-            need(proc_birth(pid)==birth and os.readlink('/proc/'+str(pid)+'/exe')==tool['path'],'probe process identity drift');render=False
-            for fd in Path('/proc',str(pid),'fd').iterdir():
-                try:
-                    st=fd.stat()
-                    if stat.S_ISCHR(st.st_mode) and os.major(st.st_rdev)==226 and os.minor(st.st_rdev)==128:render=True
-                except FileNotFoundError:pass
-            need(proc_birth(pid)==birth,'probe birth changed after fd observation')
-            seen['files'].update(f);seen['system']|=s;seen['render_node']|=render;key=str(pid)+':'+str(birth);item=seen.setdefault('processes',{}).setdefault(key,{'pid':pid,'starttime':birth,'uid':expected_uid,'executable':exe,'sha256':tool['sha256'],'mapped_references':{}})
-            for witness in proof:item['mapped_references'][witness['range']]=witness
-            if required<=f and render and not s:seen.setdefault('complete',set()).add((pid,birth))
-        except MappedGone:raise
-        except FileNotFoundError as error:
-            # Only MappedGone with an exact previously committed range can be
-            # provisional. Other first/new-birth/metadata disappearances STOP.
-            raise Stop('owned process vanished outside an exact committed mapping') from error
+        need(pid==seen['leader'],'unexpected helper descendant')
+        for attempt in range(512):
+            completion.check();birth=None
+            try:
+                birth=proc_birth(pid);known=seen.setdefault('known',{});need(pid not in known or known[pid]==birth,'owned PID reused');known[pid]=birth
+                probe_image(pid,birth,tool,witnesses);probe_environment(pid,birth,env)
+                status=proc_read(pid,'status',birth).decode();uid=re.search(r'^Uid:\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)\s+([0-9]+)$',status,re.M);need(uid and all(int(x)==expected_uid for x in uid.groups()),'probe UID drift');proof=[]
+                f,system=graphics_maps(proc_read(pid,'maps',birth).decode(),m,pins,pid=pid,birth=birth,evidence=proof,witnesses=witnesses,completion=completion)
+                need(proc_birth(pid)==birth,'probe process identity drift');render=False
+                render=probe_render_node(pid,birth)
+                probe_image(pid,birth,tool,witnesses);probe_environment(pid,birth,env);need(proc_birth(pid)==birth,'probe birth changed after fd observation')
+                seen['files'].update(f);seen['system']|=system;seen['render_node']|=render;key=str(pid)+':'+str(birth);item=seen.setdefault('processes',{}).setdefault(key,{'pid':pid,'starttime':birth,'uid':expected_uid,'executable':tool['path'],'sha256':tool['sha256'],'mapped_references':{}})
+                for witness in proof:item['mapped_references'][witness['range']]=witness
+                if work_banner(api,text) and required<=f and render and not system:
+                    seen.setdefault('env_complete',set()).add((pid,birth));seen.setdefault('complete',set()).add((pid,birth))
+                elif (pid,birth) in seen.get('complete',set()):completion.begin(pid,birth,'provider-set-retired',seen,witnesses)
+                if (pid,birth) in seen.get('complete',set()):completion.remember(proof,pid,birth)
+                if completion.deadline is not None:witnesses.verify_live()
+                completion.check();break
+            except MapRetired as error:
+                row=error.mapping;need(row['pid']==pid,'unrelated mapping retirement');completion.begin(pid,row['birth'],'map-range-retired',seen,witnesses,row)
+            except ProcUnavailable as error:
+                prior=[x for x in seen.get('complete',set()) if x[0]==pid];need(len(prior)==1 and error.birth in (None,prior[0][1]),'process disappeared without complete same-birth witness');birth=prior[0][1];completion.begin(pid,birth,error.phase,seen,witnesses,error.mapping)
+                if terminal_process(pid,birth):break
+            time.sleep(.01)
+        else:raise Stop('bounded full graphics rescan exhausted')
 
 def admit_probe(api,text,seen,m):
     need(not SOFTWARE.search(text),'software/non-native renderer')
@@ -289,22 +382,22 @@ def stop_owned(unit,plan,desc,inv):
     need(not root.exists() or all(not p.read_text().split() for p in [root/'cgroup.procs',*root.glob('**/cgroup.procs')]),'cleanup left cgroup members')
 
 def probe(api,plan,m,pins,env,out):
-    tool=m['probes'][api];unit='maclab-mesa-'+plan['job']+'-'+api+'.service';desc='maclab-mesa:'+plan['job']+':'+tool['sha256'];stdout=out/(api+'.stdout');stderr=out/(api+'.stderr');save(stdout,b'');save(stderr,b'');start=cursor();inv=None;attempt=False;v=None;seen={'files':set(),'system':False,'render_node':False};before=health(plan);deadline=time.monotonic()+30;witnesses=MapWitnesses();required={m['providers'][role] for role in ({'egl','gallium'} if api=='gl' else {'vulkan'})}
+    tool=m['probes'][api];unit='maclab-mesa-'+plan['job']+'-'+api+'.service';desc='maclab-mesa:'+plan['job']+':'+tool['sha256'];stdout=out/(api+'.stdout');stderr=out/(api+'.stderr');save(stdout,b'');save(stderr,b'');start=cursor();inv=None;attempt=False;v=None;seen={'files':set(),'system':False,'render_node':False};completion=CompletionState();before=health(plan);deadline=time.monotonic()+30;witnesses=MapWitnesses();required={m['providers'][role] for role in ({'egl','gallium'} if api=='gl' else {'vulkan'})}
     need(unit_state(unit)['LoadState']=='not-found','unit preexists')
     cmd=['systemd-run','--quiet','--unit='+unit,'--property=Type=exec','--property=Description='+desc,'--property=User='+str(plan['gui_uid']),'--property=Group='+str(plan['gui_gid']),'--property=RemainAfterExit=yes','--property=KillMode=control-group','--property=SendSIGKILL=yes','--property=TimeoutStopSec=5s','--property=RuntimeMaxSec=20s','--property=LimitFSIZE=4194304','--property=UMask=0077','--property=NoNewPrivileges=yes','--property=ProtectHome=read-only','--property=ProtectSystem=strict','--property=ReadWritePaths='+str(Path(m['prefix'])/'run'),'--property=ProtectKernelTunables=yes','--property=ProtectKernelModules=yes','--property=ProtectControlGroups=yes','--property=StandardOutput=append:'+str(stdout),'--property=StandardError=append:'+str(stderr),'/usr/bin/env','-i',*[k+'='+v for k,v in env.items()],tool['path'],'3']
     try:
-        attempt=True;capture(cmd,timeout=10);v=unit_state(unit);inv=owner(v,plan,unit,desc);save(out/(api+'.unit-start.json'),v);next_health=0
+        attempt=True;capture(cmd,timeout=10);v=unit_state(unit);inv=owner(v,plan,unit,desc);need(v['MainPID'].isdigit() and int(v['MainPID'])>0,'helper leader absent');seen['leader']=int(v['MainPID']);save(out/(api+'.unit-start.json'),v);next_health=0
         while True:
             need(time.monotonic()<deadline,'probe timeout');identity(plan);v=unit_state(unit);owner(v,plan,unit,desc,inv);pids,v=members(unit,v,plan,desc,inv)
-            if not terminal(v):observe(pids,tool,m,pins,seen,plan['gui_uid'],required,witnesses)
+            if not terminal(v):observe(pids,tool,m,pins,seen,plan['gui_uid'],required,witnesses,env,api,stdout.read_text(),completion)
             scan_journal(start,plan['boot_id'])
             if time.monotonic()>=next_health:need(health(plan)==before,'display/network/CPU drift');next_health=time.monotonic()+1
             need(stdout.stat().st_size<=CAP and stderr.stat().st_size<=CAP,'probe log budget')
             if terminal(v):need(not pids,'terminal descendants');save(out/(api+'.unit-terminal.json'),v);break
             need(v['ActiveState']=='active' and v['SubState']=='running','probe not running');time.sleep(.03)
-        need(terminal(v),'pending disappearance without genuine successful workload exit')
+        completion.check();witnesses.verify_live();need(terminal(v),'pending disappearance without genuine successful workload exit')
         renderer_name=admit_probe(api,stdout.read_text()+stderr.read_text(),seen,m)
-        return {'verdict':'NATIVE_STAGED','renderer':renderer_name,'mapped_files':sorted(seen['files']),'processes':list(seen.get('processes',{}).values()),'render_node_observed':True,'invocation_id':inv,'unit':unit,'journal_cursor':start,'validated_normal_exits':seen.get('pending_exits',[]),'already_reaped_observation':bool(seen.get('pending_process_exit'))}
+        return {'verdict':'NATIVE_STAGED','renderer':renderer_name,'mapped_files':sorted(seen['files']),'processes':list(seen.get('processes',{}).values()),'render_node_observed':True,'invocation_id':inv,'unit':unit,'journal_cursor':start,'validated_completion_events':completion.events,'completion_grace_seconds':COMPLETION_GRACE}
     finally:
         try:
             if attempt:
