@@ -2,12 +2,10 @@ package agent
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"golang.org/x/sys/unix"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -383,43 +381,6 @@ func (l *limineLayout) persist() error {
 }
 
 // writeUKI builds a unified kernel image for krel from image, carrying cmdline.
-func writeUKI(ctx context.Context, krel, image, cmdline, out string) error {
-	ictx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	tmp := out + ".tmp"
-	os.Remove(tmp)
-	// A fresh, exclusively created file: root must not follow a link that a
-	// local user planted at a predictable /tmp path.
-	f, err := os.CreateTemp("", "maclab-cmdline-*")
-	if err != nil {
-		return err
-	}
-	cmdFile := f.Name()
-	defer os.Remove(cmdFile)
-	_, werr := f.WriteString(cmdline + "\n")
-	if cerr := f.Close(); werr == nil {
-		werr = cerr
-	}
-	if werr != nil {
-		return werr
-	}
-	var cmd *exec.Cmd
-	if _, err := exec.LookPath("mkinitcpio"); err == nil {
-		cmd = exec.CommandContext(ictx, "mkinitcpio", "-k", krel, "-U", tmp, "--kernelimage", image, "--cmdline", cmdFile)
-	} else {
-		cmd = exec.CommandContext(ictx, "dracut", "--force", "--uefi", "--kver", krel, "--kernel-image", image, "--kernel-cmdline", cmdline, tmp)
-	}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		os.Remove(tmp)
-		return fmt.Errorf("UKI: %v: %s", err, lastLines(string(out), 15))
-	}
-	if err := syncFile(tmp); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, out)
-}
-
 // writeSynced replaces path atomically and flushes it, for files on the FAT
 // ESP that the firmware or bootloader reads at the next boot.
 func writeSynced(path string, data []byte) error {
