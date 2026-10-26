@@ -45,7 +45,7 @@ def prepare_expectation(b):
 def freeze_preinstall(b):
  p,release=common(b);c=sdk();scope=b['root_scope'];need(scope['root_plan_sha256']==b['root_plan_sha256'] and re.fullmatch('[0-9a-f]{64}',b['root_plan_sha256']) and scope['packet']==p['packet'] and scope['operation']=='freeze-preinstall' and scope['authority_sha256']==AUTH and scope['reviewed_by'],'scope/standing authority required')
  base=Path(b['frozen_root']);need(base.is_absolute() and str(base)==str(base.resolve(strict=True)),'actual canonical frozen store required');checked_dir(base)
- source_release=b['source_release'];need(re.fullmatch('[a-zA-Z0-9_.-]+',source_release) and source_release!=release,'distinct original source namespace required');src=base/source_release;checked_dir(src)
+ source_release=b['source_release'];need(re.fullmatch('[a-zA-Z0-9_.-]+',source_release) and source_release not in ('.','..',release),'distinct original source namespace required');src=base/source_release;need(src.parent==base and str(src)==str(src.resolve(strict=True)),'canonical direct-child source namespace required');checked_dir(src)
  pins=b['preinstall_pins'];need(set(pins)==LEAVES and Path(b['source_pins']['path'])==src/'PINS.preinstall','exact original preinstall closure required');pinraw=c.read_pin(b['source_pins']);declared={}
  for line in pinraw.decode().splitlines():
   if not line or line.startswith('#'):continue
@@ -85,7 +85,7 @@ def observe_return(b,client=None):
  result=actual['result'];ir=result['installed'];need(result['booted'] is True and result['boot_kernel']==KERNEL and not result.get('fell_back') and not result.get('recovery') and ir['release']==release and ir['manifest_sha256']==b['installed_manifest_sha256'] and ir['installer_entry_sha256']==b['installer_entry_sha256'],'candidate job/installer mismatch')
  need(ir['verdicts']=={'before':'MATCH','booted':'MATCH','after':'MATCH'} and ir['omt']=='NO_REGRESSION' and ir['dmesg']=='NONE_NEW' and not ir.get('kernel_log_fatal'),'actual identity/regression verdicts required')
  d=api.request('/api/devices/m1');c.state_gate(d,p,{'expected_boot_id':d['boot_id'],'expected_kernel':'7.2.11-6-1-ARCH'},True,900);need(d['boot_id']!=b['prejob_boot_id'] and 'maclab.job=' not in d.get('cmdline',''),'genuine changed-UUID ordinary old6 return required')
- return {'status':'ACTUAL_INSTALLED_JOB_AND_NORMAL6_RETURN_OBSERVED','packet':p['packet'],'job':jobid,'boot_id':d['boot_id'],'kernel':d['kernel'],'cmdline':d['cmdline'],'ready_idle':True,'installed_manifest_sha256':b['installed_manifest_sha256'],'installer_entry_sha256':b['installer_entry_sha256'],'actual_device':d,'actual_job_result_sha256':H(raw(actual)),'reference_changes':False}
+ return {'status':'ACTUAL_INSTALLED_JOB_AND_NORMAL6_RETURN_OBSERVED','packet':p['packet'],'job':jobid,'boot_id':d['boot_id'],'kernel':d['kernel'],'cmdline':d['cmdline'],'ready_idle':True,'installed_manifest_sha256':b['installed_manifest_sha256'],'installer_entry_sha256':b['installer_entry_sha256'],'actual_device':{k:d.get(k) for k in ('name','state','alive','boot_id','kernel','cmdline','active_job','queued','tier')},'actual_job_result_sha256':H(raw(actual)),'reference_changes':False}
 def run(b,client=None):
  action=b['action']
  if action=='observe-job-return':return observe_return(b,client)

@@ -28,6 +28,14 @@ class InstalledNamespace(unittest.TestCase):
   with tempfile.TemporaryDirectory(dir="/run/user/"+str(os.geteuid())) as t:
    b,_=self.source(t);b['source_baseline_job']='fabricated-new-baseline'
    with self.assertRaisesRegex(RuntimeError,'actual original baseline job'):m.run(b)
+ def test_dot_or_symlink_namespace_cannot_alias_the_frozen_store(self):
+  for name in ('.','..'):
+   with tempfile.TemporaryDirectory(dir='/run/user/'+str(os.geteuid())) as t:
+    b,_=self.source(t);b['source_release']=name
+    with self.subTest(name=name),self.assertRaisesRegex(RuntimeError,'distinct original source namespace'):m.run(b)
+  with tempfile.TemporaryDirectory(dir='/run/user/'+str(os.geteuid())) as t:
+   b,_=self.source(t);base=Path(b['frozen_root']);(base/'source-alias').symlink_to(base/'old-source',target_is_directory=True);b['source_release']='source-alias'
+   with self.assertRaisesRegex(RuntimeError,'canonical direct-child'):m.run(b)
  def test_nonregular_original_no_open_or_namespace_adoption(self):
   with tempfile.TemporaryDirectory(dir="/run/user/"+str(os.geteuid())) as t:
    b,_=self.source(t);p=Path(b['preinstall_pins']['omt-report.json']['path']);p.unlink();os.mkfifo(p)
@@ -77,6 +85,8 @@ class GenuineReturn(unittest.TestCase):
   return API()
  def test_authentic_retained_success_binds_three_tests_and_fresh_normal_return(self):
   b=self.fixture();v=m.run(b,self.api(b));self.assertEqual(v['status'],'ACTUAL_INSTALLED_JOB_AND_NORMAL6_RETURN_OBSERVED');self.assertTrue(v['ready_idle']);self.assertFalse(v['reference_changes'])
+ def test_device_credentials_never_enter_checkpoint_output(self):
+  b=self.fixture();secret='SENTINEL-OOB-CREDENTIAL-DO-NOT-EXPORT';out=m.run(b,self.api(b,change_device=lambda d:d.update(oob={'token':secret,'password':secret},token=secret,credentials={'secret':secret})));self.assertNotIn(secret,json.dumps(out));self.assertEqual(set(out['actual_device']),{'name','state','alive','boot_id','kernel','cmdline','active_job','queued','tier'})
  def test_actual_failed_or_drifted_report_never_salvaged(self):
   for change in (lambda j:j.update(canceled=True),lambda j:j['result']['installed'].update(omt='REGRESSION'),lambda j:j['spec'].update(publish=True)):
    b=self.fixture()
