@@ -130,6 +130,9 @@ func Decode(b []byte, v any) error {
 	if len(b) > MaxJSON {
 		return errors.New("JSON exceeds 4MiB ceiling")
 	}
+	if err := uniqueJSON(b); err != nil {
+		return err
+	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if err := d.Decode(v); err != nil {
@@ -740,6 +743,9 @@ func randomID() string {
 }
 
 func canonical(b []byte) ([]byte, error) {
+	if err := uniqueJSON(b); err != nil {
+		return nil, err
+	}
 	if len(b) > MaxJSON {
 		return nil, errors.New("JSON exceeds ceiling")
 	}
@@ -757,6 +763,9 @@ func canonical(b []byte) ([]byte, error) {
 }
 
 func decodeValue(b []byte, v *any) error {
+	if err := uniqueJSON(b); err != nil {
+		return err
+	}
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.UseNumber()
 	return d.Decode(v)
@@ -816,4 +825,60 @@ func (r *Runner) checkSubmissionBinding(s *State, phaseID string, spec api.JobSp
 		}
 	}
 	return errors.New("wait/reconciliation lacks actual submission phase")
+}
+
+// Ambiguous duplicate keys cannot be admitted as one authorization or identity
+// by this decoder and interpreted differently by a downstream helper.
+func uniqueJSON(b []byte) error {
+	if len(b) > MaxJSON {
+		return errors.New("JSON exceeds ceiling")
+	}
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	var walk func(int) error
+	walk = func(depth int) error {
+		if depth > 64 {
+			return errors.New("JSON nesting exceeds bound")
+		}
+		t, e := d.Token()
+		if e != nil {
+			return e
+		}
+		switch t {
+		case json.Delim('{'):
+			seen := map[string]bool{}
+			for d.More() {
+				token, e := d.Token()
+				if e != nil {
+					return e
+				}
+				key, ok := token.(string)
+				if !ok || seen[key] {
+					return errors.New("duplicate or invalid JSON object key")
+				}
+				seen[key] = true
+				if e = walk(depth + 1); e != nil {
+					return e
+				}
+			}
+			_, e = d.Token()
+			return e
+		case json.Delim('['):
+			for d.More() {
+				if e = walk(depth + 1); e != nil {
+					return e
+				}
+			}
+			_, e = d.Token()
+			return e
+		}
+		return nil
+	}
+	if e := walk(0); e != nil {
+		return e
+	}
+	if _, e := d.Token(); e != io.EOF {
+		return errors.New("trailing JSON")
+	}
+	return nil
 }

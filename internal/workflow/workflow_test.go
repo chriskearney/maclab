@@ -547,3 +547,19 @@ func TestOMTMustActuallyRunInGUIWithExactServerDefault(t *testing.T) {
 		t.Fatal("OMT deadline changed")
 	}
 }
+
+func TestAmbiguousJSONKeysRefusedEveryIdentityPath(t *testing.T) {
+	for _, b := range [][]byte{[]byte(`{"authorized":false,"authorized":true}`), []byte(`{"nest":{"boot":"actual","boot":"forged"}}`)} {
+		var x any
+		if e := decodeValue(b, &x); e == nil {
+			t.Fatal("ambiguous value admitted")
+		}
+		if _, e := canonical(b); e == nil {
+			t.Fatal("ambiguous evidence canonicalized")
+		}
+		var a Authorization
+		if e := Decode(b, &a); e == nil {
+			t.Fatal("ambiguous typed receipt admitted")
+		}
+	}
+}
