@@ -27,6 +27,7 @@ import (
 
 const usage = `lab: run kernels and tests on Omarchy Macs
 
+  lab boot-test --catalog-descriptor PIN --profile ID --request FILE --review-descriptor PIN --out DIR [--compile | --execute --authorization FILE]
   lab login <labd-url> <admin-token>
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
@@ -76,6 +77,8 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
+	case "boot-test":
+		err = bootTest(args)
 	case "login":
 		err = login(args)
 	case "pack":
