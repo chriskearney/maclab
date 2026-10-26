@@ -79,6 +79,11 @@ type Sim struct {
 	CollectHook func(boot, outDir string) error
 	// PackagedKernels are releases installed as packages (installed-mode jobs).
 	PackagedKernels []string
+	// installHook, when set, is called with the Release before the simulated
+	// installer installs it; see SetInstallHook. installs are the Releases it
+	// installed, in order.
+	installHook func(release string) error
+	installs    []string
 
 	stageFail  func(attempt int) error
 	stageTries int
@@ -123,7 +128,8 @@ type simEntry struct {
 }
 
 // InstalledObs, when set, answers installed-mode identity tests: it returns
-// the collector's observation for a phase on the given running boot.
+// the collector's observation for a phase on the given running boot. Set it
+// with SetInstalledObs once the agent runs.
 
 const SimKnownGood = "7.1.12-good"
 
@@ -297,6 +303,51 @@ func (s *Sim) BootOnce(entry string) error {
 	}
 	s.armed = entry
 	return nil
+}
+
+// Install is the Release's installer: its kernel becomes a package and the
+// default a plain reboot boots, as on a Mac the Omarchy installer ran on.
+func (s *Sim) Install(ctx context.Context, job string, a api.InstallArgs, fetch Fetcher) error {
+	s.mu.Lock()
+	hook := s.installHook
+	s.mu.Unlock()
+	if hook != nil {
+		if err := hook(a.Release); err != nil {
+			return fmt.Errorf("installing %s: %w", a.Release, err)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !slices.Contains(s.PackagedKernels, a.Kernel) {
+		s.PackagedKernels = append(s.PackagedKernels, a.Kernel)
+	}
+	s.DefaultKernel = a.Kernel
+	s.installs = append(s.installs, a.Release)
+	return nil
+}
+
+// SetInstallHook makes the simulated installer call f with the Release
+// before it installs it, while the agent runs; an error from f fails the
+// install and leaves the Mac as it was.
+func (s *Sim) SetInstallHook(f func(release string) error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.installHook = f
+}
+
+// Installs lists the Releases the named install operation installed on the
+// simulated Mac, in order.
+func (s *Sim) Installs() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.installs)
+}
+
+// SetInstalledObs sets InstalledObs while the agent runs.
+func (s *Sim) SetInstalledObs(f func(phase, job, bootID, kernel, cmdline string) []byte) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.InstalledObs = f
 }
 
 func (s *Sim) Reboot() error { s.boot("reboot: Restarting system"); return nil }
@@ -556,11 +607,14 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 	if t.Builtin == "omarchy-m-test" {
 		return s.omtReport(t, outDir, b)
 	}
-	if strings.HasPrefix(t.Name, "identity-") && s.InstalledObs != nil {
+	s.mu.Lock()
+	obsFn := s.InstalledObs
+	s.mu.Unlock()
+	if t.Identity != nil && obsFn != nil {
 		s.mu.Lock()
 		boot, k, cmd := s.bootID, s.kernel, s.cmdline
 		s.mu.Unlock()
-		obs := s.InstalledObs(strings.TrimPrefix(t.Name, "identity-"), job, boot, k, cmd)
+		obs := obsFn(t.Identity.Phase, job, boot, k, cmd)
 		os.WriteFile(filepath.Join(outDir, "observed.json"), obs, 0o644)
 		return api.TestResult{Name: t.Name, Passed: true, Seconds: 0.01, Tail: "sim identity " + t.Name}
 	}
@@ -718,10 +772,10 @@ func (s *Sim) Exec(ctx context.Context, a api.ExecArgs) api.ExecResult {
 // omtReport writes a small omarchy-m-test report like the real tool's.
 func (s *Sim) omtReport(t api.TestSpec, outDir, behavior string) api.TestResult {
 	s.mu.Lock()
-	kernel := s.kernel
+	kernel, packaged := s.kernel, slices.Contains(s.PackagedKernels, s.kernel)
 	s.mu.Unlock()
 	wifi, pkg := "pass", "pass"
-	if kernel != SimKnownGood && !slices.Contains(s.PackagedKernels, kernel) {
+	if kernel != SimKnownGood && !packaged {
 		pkg = "fail" // a lab kernel is never an installed package
 	}
 	unclaimed, drivers := "[]", "pass"

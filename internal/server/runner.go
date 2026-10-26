@@ -313,11 +313,28 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 			return api.OutcomeInfra, "installed job: " + err.Error()
 		}
 		r.ir = ir
-		r.ev("installed %s: manifest %s, installer entry %s", ir.c.release, short(ir.c.manSHA), short(ir.c.entrySHA))
+		if v.snapshot().IsVolunteer() {
+			r.ev("installed %s: manifest %s", ir.c.release, short(ir.c.manSHA))
+			if o, sum := ir.volunteerInstall(ctx); o != "" {
+				return o, sum
+			}
+		} else {
+			r.ev("installed %s: manifest %s, installer entry %s", ir.c.release, short(ir.c.manSHA), short(ir.c.entrySHA))
+		}
 		// identity-before runs on whatever boot is current; it is not one of the job's tests
 		r.state(api.JobTesting)
 		tr := r.runTest(ctx, ir.test(installed.PhaseBefore))
-		reason := ir.identity(installed.PhaseBefore, &tr)
+		reason := ""
+		if ir.c.entry == nil && !tr.Passed {
+			reason = "identity-before did not observe the installer's entry: " + testVerdict(tr) + " " + tr.Error
+		} else if ir.c.entry == nil {
+			if err := ir.freezeObservedEntry(); err != nil {
+				reason = "the installer's entry on the Mac can't be frozen: " + err.Error()
+			}
+		}
+		if reason == "" {
+			reason = ir.identity(installed.PhaseBefore, &tr)
+		}
 		ir.res.Before = &tr
 		r.s.updateJob(j, func(j *api.Job) { j.Result.Installed = &ir.res })
 		if reason != "" {
@@ -488,7 +505,7 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	var logsErr error
 	if r.ir != nil {
 		// an installed job is judged on its kernel log: without it, it can't pass
-		if kern, warn, err := kernelLogs(r.s.jobDir(j.ID), files, collectErr); err != nil {
+		if kern, warn, err := kernelLogs(r.s.jobDir(j.ID), "boot0", files, collectErr); err != nil {
 			logsErr = err
 			r.ir.fail("kernel log: %v", err)
 		} else {
@@ -664,6 +681,10 @@ func (r *jobRun) expectedLength() time.Duration {
 	if r.j.Spec.InstalledManifest != "" && r.ir == nil {
 		const identityChecks = 3
 		d += identityChecks * r.testTimeout(api.TestSpec{})
+		if r.v.snapshot().IsVolunteer() {
+			// the preinstall references and the install itself
+			d += r.testTimeout(omtSpec()) + collectTimeout + api.InstallTimeout
+		}
 	}
 	return d
 }
@@ -897,8 +918,17 @@ func (r *jobRun) collectLost(ctx context.Context) api.LostBoot {
 }
 
 func (r *jobRun) collectE(ctx context.Context, boot string) ([]string, error) {
+	return r.collectInto(ctx, boot, "")
+}
+
+// collectTimeout is how long labd gives a Mac to collect a boot's logs.
+const collectTimeout = 5 * time.Minute
+
+// collectInto collects a boot's logs into the job's dir: "" is lab-agent's
+// own choice (boot0, or prevboot for "-1").
+func (r *jobRun) collectInto(ctx context.Context, boot, dir string) ([]string, error) {
 	var files []string
-	if err := r.v.call(ctx, api.CmdCollect, r.j.ID, api.CollectArgs{Boot: boot}, 5*time.Minute, &files); err != nil {
+	if err := r.v.call(ctx, api.CmdCollect, r.j.ID, api.CollectArgs{Boot: boot, Dir: dir}, collectTimeout, &files); err != nil {
 		r.ev("collect logs (boot %s): %v", boot, err)
 		return nil, err
 	}

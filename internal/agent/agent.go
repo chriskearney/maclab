@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ import (
 	"github.com/iconidentify/maclab/internal/detect"
 )
 
-const Version = "0.7.5"
+const Version = "0.8.0"
 
 type Config struct {
 	Server   string `json:"server"`
@@ -803,10 +804,33 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		a.endTest(tr)
 		res.Files = a.uploadDir(ctx, c.JobID, "test-"+t.Name, dir)
 		return res, nil, nil
+	case api.CmdInstall:
+		var args api.InstallArgs
+		if err := json.Unmarshal(c.Args, &args); err != nil {
+			return nil, nil, err
+		}
+		if err := checkInstall(args); err != nil {
+			return nil, nil, err
+		}
+		err := a.sys.Install(ctx, c.JobID, args, fetch)
+		a.mu.Lock()
+		a.factsRevision++ // preflight reads the installed kernels
+		a.mu.Unlock()
+		return nil, nil, err
 	case api.CmdCollect:
 		var args api.CollectArgs
 		if err := json.Unmarshal(c.Args, &args); err != nil {
 			return nil, nil, err
+		}
+		prefix := "boot0"
+		if args.Boot == "-1" {
+			prefix = "prevboot"
+		}
+		if args.Dir != "" {
+			if !reCollectDir.MatchString(args.Dir) {
+				return nil, nil, fmt.Errorf("bad collect dir %q", args.Dir)
+			}
+			prefix = args.Dir
 		}
 		dir, err := a.outDir(c)
 		if err != nil {
@@ -814,10 +838,6 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		}
 		if err := a.sys.Collect(ctx, args.Boot, dir); err != nil {
 			return nil, nil, err
-		}
-		prefix := "boot0"
-		if args.Boot == "-1" {
-			prefix = "prevboot"
 		}
 		return a.uploadDir(ctx, c.JobID, prefix, dir), nil, nil
 	case api.CmdCollectLost:
@@ -864,6 +884,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 	}
 	return nil, nil, fmt.Errorf("unknown command %q", c.Kind)
 }
+
+// reCollectDir is a job directory labd may collect logs into.
+var reCollectDir = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenArgs) (any, func(), error) {
 	dir, err := a.outDir(c)

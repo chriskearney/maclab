@@ -331,7 +331,9 @@ func (a *Agent) watchWindow(ctx context.Context) {
 		a.mu.Lock()
 		var gated []runningCmd
 		for _, r := range a.running {
-			if windowGated(r.c.Kind) {
+			// a started install finishes: pacman stopped mid-transaction
+			// would leave the Volunteer's own system half-installed
+			if windowGated(r.c.Kind) && r.c.Kind != api.CmdInstall {
 				gated = append(gated, r)
 			}
 		}

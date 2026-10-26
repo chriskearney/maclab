@@ -94,6 +94,14 @@ _Avoid_: Certification, sign-off
 **Installed run**:
 A run of a Release as the Omarchy installer installs it on a Mac. On a Volunteer's Mac it fits inside one Availability window and ends in a Rollback; it can end incomplete (the window closed first) or aborted by the Volunteer, neither of which is a failure.
 
+**Install operation**:
+The named lab operation that installs a Release on a Mac in an Installed run: lab-agent installs exactly the Release's packages, as its installer does. A Volunteer's Mac takes it at Qualification, inside its Availability window, and records it in its Audit log with the Maintainer and the Release before it runs.
+_Avoid_: Install command, install script
+
+**Preinstall references**:
+What an Installed run's Release is compared with: an omarchy-m-test report and the kernel's error lines from the Mac's own system just before the install, frozen and pinned per Release and Mac. On a Volunteer's Mac the run takes them itself.
+_Avoid_: Baseline (a Lab-owned Mac's live reference on its Known-good kernel)
+
 **Eligible**:
 A Mac is eligible for Installed runs when its own system (`@`) can be snapshotted, so that a Rollback can return it exactly as it was.
 

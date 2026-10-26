@@ -55,6 +55,15 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	script := filepath.Join(l.jobDir(job), "test-"+t.Name+".sh")
 	os.MkdirAll(filepath.Dir(script), 0o755)
 	switch {
+	case t.Identity != nil && (t.Builtin != "" || t.Script != ""):
+		return fail(errors.New("an identity check runs lab-agent's own collector, not a builtin or a script"))
+	case t.Identity != nil:
+		if err := checkIdentity(*t.Identity); err != nil {
+			return fail(err)
+		}
+		if err := os.WriteFile(script, []byte(IdentityScript(*t.Identity, true)), 0o755); err != nil {
+			return fail(err)
+		}
 	case t.Builtin != "":
 		b, err := builtinTests.ReadFile("tests/" + t.Builtin + ".sh")
 		if err != nil {

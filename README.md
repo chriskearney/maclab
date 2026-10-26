@@ -443,6 +443,24 @@ Reports carry new entries to labd, whose copy Maintainers read with `lab audit
 <mac>` (`GET /api/devices/{n}/audit`). `status` shows the Access level and the
 latest entries.
 
+An Installed run (`lab run <mac> --installed <manifest>`) is Qualification
+work: on a Volunteer's Mac only the Release's expected manifest is frozen
+beforehand (`lab installed freeze-manifest`), and its package files are
+uploaded (`lab upload`) so lab-agent can fetch them by sha256. The run takes
+the preinstall references from the Volunteer's own system (an omarchy-m-test
+run and the boot's kernel error lines, frozen and pinned in
+`PINS.preinstall`), then installs the Release through one named install
+operation: lab-agent fetches exactly the manifest's packages and installs
+them with `pacman -U`, as the Omarchy installer does. The Audit log records
+the install, with the Maintainer, the Release and the job, before it runs. A
+failed install ends the run before any Lab boot. The identity checks before,
+booted and after are lab-agent's own read-only collector, not a script, and
+identity-before freezes the installer's entry the Mac shows. A Mac at
+Qualification still refuses any script, even one named `identity-*`, and
+`lab exec`. Lab-owned Macs keep the hand-run flow: a Maintainer installs the
+Release, freezes the preinstall references and runs `lab installed
+freeze-entry`.
+
 ### Leaving
 
 A Volunteer can leave at any time, and the Maintainers can end an enrollment.
@@ -796,6 +814,11 @@ emergency mode.
 - The serial console from an M3 host. A USB 2.0 cable (no SBU wires) carried no serial data either
   way, so it is still open whether serial mode works from an M3 host with a SuperSpeed cable. Reset
   needs only CC.
+- The named install operation (`pacman -U` of the Release's packages) and
+  omarchy-m-test's preinstall run on a Volunteer's own, possibly locked,
+  session.
+- Whether `apple_wdt` can be armed before the kernel starts (m1n1/U-Boot).
+  If it can, tier 1 would also cover early-boot hangs.
 
 ## Development
 

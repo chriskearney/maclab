@@ -142,6 +142,8 @@ func describe(c api.Command) string {
 			return fmt.Sprintf("test %s: a Maintainer's script as root (--script %s)", t.Name, short(t.Script))
 		case t.Builtin != "":
 			return fmt.Sprintf("test %s (built-in %s)", t.Name, t.Builtin)
+		case t.Identity != nil:
+			return fmt.Sprintf("test %s (the lab's read-only identity check of Release kernel %s)", t.Name, t.Identity.Kernel)
 		}
 		return "test " + t.Name
 	case api.CmdStage:
@@ -184,6 +186,10 @@ func describe(c api.Command) string {
 		return "remove staged lab kernels"
 	case api.CmdConfig:
 		return "read the running kernel's config"
+	case api.CmdInstall:
+		var i api.InstallArgs
+		_ = json.Unmarshal(c.Args, &i)
+		return describeInstall(i)
 	case api.CmdRecordKnownGood:
 		var r api.RecordKnownGoodArgs
 		_ = json.Unmarshal(c.Args, &r)

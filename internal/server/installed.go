@@ -4,11 +4,18 @@ package server
 // installed it. The expectation lives in a frozen, pinned store
 // (frozen/<release>/), never in anything a later run can replace:
 //
-//	PINS.preinstall                 pins preinstall/<mac>/*  (written by hand, before any install)
+//	PINS.preinstall                 pins preinstall/<mac>/*  (before any install)
 //	expected/manifest.json          maclab.installed-manifest/2  } pinned by PINS.expected
 //	expected/payload/*.sha256       payload file list            }
 //	installer-entry/<mac>.json      maclab.installer-entry/1, pinned by PINS.installer-entry.<mac>
 //	preinstall/<mac>/omt-report.json, omt-status.json, dmesg-errors.txt, ...
+//
+// On a Lab-owned Mac a Maintainer installs the Release and freezes its
+// preinstall references and installer entry by hand. On a Volunteer's Mac
+// only the expected manifest is frozen beforehand: the Installed run takes
+// the preinstall references from the Volunteer's own system, installs the
+// Release through the named install operation, and freezes the installer
+// entry from its identity-before check.
 //	installed/<mac>/<job>/          append-only evidence copies
 //	promotions.log                  append-only
 //
@@ -36,7 +43,7 @@ import (
 	"github.com/iconidentify/maclab/internal/installed"
 )
 
-const installedMinAgent = "0.7.2" // collect-status.txt; both ESP locks
+const installedMinAgent = "0.8.0" // the lab's own identity checks, the install operation
 
 // promoteMinAgent records the promoted kernel as the agent's own known-good.
 const promoteMinAgent = "0.7.3"
@@ -67,6 +74,9 @@ type installedCtx struct {
 	dmesgPath string
 	dmesgSHA  string
 	dmesg     string
+	// noPreinstall is why the device has no preinstall references yet: a
+	// Volunteer's Installed run takes them, a Lab-owned Mac's can't run.
+	noPreinstall error
 }
 
 // pins reads a sha256sum-format pins file into path -> sha.
@@ -160,7 +170,12 @@ func (s *Server) loadInstalled(manifestSHA, device string) (*installedCtx, error
 	}
 	pre, err := readPins(filepath.Join(c.dir, "PINS.preinstall"))
 	if err != nil {
-		return nil, fmt.Errorf("release %s: no PINS.preinstall: %w", release, err)
+		c.noPreinstall = fmt.Errorf("release %s: no PINS.preinstall: %w", release, err)
+		return c, nil
+	}
+	if _, ok := pre["preinstall/"+device+"/omt-report.json"]; !ok {
+		c.noPreinstall = fmt.Errorf("release %s: PINS.preinstall has no preinstall references for %s", release, device)
+		return c, nil
 	}
 	rep, rsha, err := pinned(c.dir, "preinstall/"+device+"/omt-report.json", pre)
 	if err != nil {
@@ -228,6 +243,13 @@ func (s *Server) validateInstalled(spec api.JobSpec, d api.Device) (int, error) 
 	if err != nil {
 		return 409, err
 	}
+	if d.IsVolunteer() {
+		// the run takes the rest from the Mac itself
+		return 0, nil
+	}
+	if c.noPreinstall != nil {
+		return 409, c.noPreinstall
+	}
 	if c.entry == nil {
 		return 409, fmt.Errorf("no frozen installer entry for %s yet: run `lab installed freeze-entry %s --release %s` after the install", d.Name, d.Name, c.release)
 	}
@@ -248,13 +270,12 @@ func installedPreflight(problems []string) []string {
 
 // installedRun is one installed job's frozen context and the evidence so far.
 type installedRun struct {
-	r       *jobRun
-	c       *installedCtx
-	serial  bool
-	booted  *installed.Identity
-	res     api.InstalledResult
-	scripts map[string]string // phase -> script artifact sha
-	errs    []string          // evidence that could not be collected or written: the job can't pass
+	r      *jobRun
+	c      *installedCtx
+	serial bool
+	booted *installed.Identity
+	res    api.InstalledResult
+	errs   []string // evidence that could not be collected or written: the job can't pass
 }
 
 // fail records evidence the job is missing. An installed job with any of these
@@ -270,28 +291,30 @@ func (r *jobRun) newInstalled() (*installedRun, error) {
 	if err != nil {
 		return nil, err
 	}
-	if c.entry == nil {
-		return nil, errors.New("no frozen installer entry")
-	}
-	ir := &installedRun{r: r, c: c, serial: r.v.snapshot().OOB != nil, scripts: map[string]string{},
-		res: api.InstalledResult{Release: c.release, ManifestSHA256: c.manSHA, EntrySHA256: c.entrySHA, Verdicts: map[string]string{}}}
-	var pkgs []string
-	for _, a := range c.man.Artifacts {
-		pkgs = append(pkgs, a.Name)
-	}
-	for _, ph := range []string{installed.PhaseBefore, installed.PhaseBooted, installed.PhaseAfter} {
-		script := installed.Script(ph, r.j.Spec.Device, c.man.Kernel.Release, c.entry.Path, pkgs, true)
-		sha, _, err := r.s.storeArtifact(strings.NewReader(script))
-		if err != nil {
-			return nil, err
+	if !r.v.snapshot().IsVolunteer() {
+		if c.noPreinstall != nil {
+			return nil, c.noPreinstall
 		}
-		ir.scripts[ph] = sha
+		if c.entry == nil {
+			return nil, errors.New("no frozen installer entry")
+		}
 	}
-	return ir, nil
+	return &installedRun{r: r, c: c, serial: r.v.snapshot().OOB != nil,
+		res: api.InstalledResult{Release: c.release, ManifestSHA256: c.manSHA, EntrySHA256: c.entrySHA, Verdicts: map[string]string{}}}, nil
 }
 
+// test is the lab's own identity check of a phase, which lab-agent runs
+// with its read-only collector at any Access level. Before the installer
+// entry is frozen, the check finds the installer's entry itself.
 func (ir *installedRun) test(phase string) api.TestSpec {
-	return api.TestSpec{Name: installed.TestName(phase), Script: ir.scripts[phase], TimeoutSec: 600}
+	ic := &api.IdentityCheck{Phase: phase, Device: ir.r.j.Spec.Device, Kernel: ir.c.man.Kernel.Release}
+	for _, a := range ir.c.man.Artifacts {
+		ic.Packages = append(ic.Packages, a.Name)
+	}
+	if ir.c.entry != nil {
+		ic.EntryPath = ir.c.entry.Path
+	}
+	return api.TestSpec{Name: installed.TestName(phase), Identity: ic, TimeoutSec: 600}
 }
 
 func (ir *installedRun) stageArgs() *api.InstalledStage {
@@ -404,23 +427,25 @@ func (ir *installedRun) omt(tr *api.TestResult, res *api.OMTResult, report []byt
 	}
 }
 
-// kernelLogs returns the test boot's full kernel log and its warning lines, or why the job can't
-// be judged without them: a collection that failed, a file that didn't arrive
-// or can't be read, an empty kernel log, or journalctl reporting an error.
-func kernelLogs(jobDir string, files []string, collectErr error) (kernel, warnings []byte, err error) {
+// kernelLogs returns a boot's full kernel log and its warning lines, as
+// collected into the job's dir (boot0 for the test boot), or why the job
+// can't be judged without them: a collection that failed, a file that didn't
+// arrive or can't be read, an empty kernel log, or journalctl reporting an
+// error.
+func kernelLogs(jobDir, dir string, files []string, collectErr error) (kernel, warnings []byte, err error) {
 	if collectErr != nil {
 		return nil, nil, fmt.Errorf("collecting logs failed: %v", collectErr)
 	}
 	read := func(name string) ([]byte, error) {
-		if !slices.Contains(files, "boot0/"+name) {
-			return nil, fmt.Errorf("boot0/%s was not collected", name)
+		if !slices.Contains(files, dir+"/"+name) {
+			return nil, fmt.Errorf("%s/%s was not collected", dir, name)
 		}
-		b, err := os.ReadFile(filepath.Join(jobDir, "boot0", name))
+		b, err := os.ReadFile(filepath.Join(jobDir, dir, name))
 		if err != nil {
 			return nil, err
 		}
 		if bytes.Contains(b, []byte("\n[journalctl: ")) {
-			return nil, fmt.Errorf("boot0/%s: journalctl failed: %s", name, lastLine(string(b)))
+			return nil, fmt.Errorf("%s/%s: journalctl failed: %s", dir, name, lastLine(string(b)))
 		}
 		return b, nil
 	}
@@ -438,11 +463,11 @@ func kernelLogs(jobDir string, files []string, collectErr error) (kernel, warnin
 		}
 		switch {
 		case len(lines) == 0:
-			return nil, nil, fmt.Errorf("boot0/%s is not valid evidence: collect-status.txt doesn't report it", name)
+			return nil, nil, fmt.Errorf("%s/%s is not valid evidence: collect-status.txt doesn't report it", dir, name)
 		case len(lines) > 1:
-			return nil, nil, fmt.Errorf("boot0/%s is not valid evidence: collect-status.txt reports it %d times", name, len(lines))
+			return nil, nil, fmt.Errorf("%s/%s is not valid evidence: collect-status.txt reports it %d times", dir, name, len(lines))
 		case lines[0] != "ok":
-			return nil, nil, fmt.Errorf("boot0/%s is not valid evidence: %s", name, lines[0])
+			return nil, nil, fmt.Errorf("%s/%s is not valid evidence: %s", dir, name, lines[0])
 		}
 	}
 	kern, err := read("kernel.txt")
@@ -450,7 +475,7 @@ func kernelLogs(jobDir string, files []string, collectErr error) (kernel, warnin
 		return nil, nil, err
 	}
 	if len(bytes.TrimSpace(kern)) == 0 {
-		return nil, nil, errors.New("boot0/kernel.txt is empty: the journal has no kernel log for the test boot")
+		return nil, nil, fmt.Errorf("%s/kernel.txt is empty: the journal has no kernel log for the boot", dir)
 	}
 	warn, err := read("dmesg-errors.txt")
 	if err != nil {
@@ -773,19 +798,28 @@ func (s *Server) hFreezeEntry(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "%v", err)
 		return
 	}
+	esha, pins, err := s.freezeEntry(dir, device, msha, e)
+	if err != nil {
+		httpErr(w, 409, "%v", err)
+		return
+	}
+	writeJSON(w, map[string]any{"device": device, "release": release, "entry": e, "entry_sha256": esha, "pins": pins})
+}
+
+// freezeEntry writes a device's installer entry into the frozen store, once,
+// with its pins.
+func (s *Server) freezeEntry(dir, device, manifestSHA string, e *installed.InstallerEntry) (entrySHA, pins string, err error) {
 	eb, _ := json.MarshalIndent(e, "", "  ")
 	eb = append(eb, '\n')
 	if err := writeOnce(filepath.Join(dir, "installer-entry", device+".json"), eb); err != nil {
-		httpErr(w, 409, "%v", err)
-		return
+		return "", "", err
 	}
-	pins := fmt.Sprintf("# PINS.installer-entry.%s %s by maclab, manifest %s: do not rewrite\n%s  installer-entry/%s.json\n",
-		device, s.now().Format(time.RFC3339), msha, installed.SHA256(eb), device)
+	pins = fmt.Sprintf("# PINS.installer-entry.%s %s by maclab, manifest %s: do not rewrite\n%s  installer-entry/%s.json\n",
+		device, s.now().Format(time.RFC3339), manifestSHA, installed.SHA256(eb), device)
 	if err := writeOnce(filepath.Join(dir, "PINS.installer-entry."+device), []byte(pins)); err != nil {
-		httpErr(w, 409, "%v", err)
-		return
+		return "", "", err
 	}
-	writeJSON(w, map[string]any{"device": device, "release": release, "entry": e, "entry_sha256": installed.SHA256(eb), "pins": pins})
+	return installed.SHA256(eb), pins, nil
 }
 
 type promoteReq struct {
@@ -922,6 +956,9 @@ func (s *Server) promotionInputs(j *api.Job, report []byte, status map[string]st
 		return fmt.Errorf("its omarchy-m-test report is now %s, not the %s its frozen comparison judged", got, oc.Current.ReportSHA256)
 	}
 	c, err := s.loadInstalled(j.Spec.InstalledManifest, j.Spec.Device)
+	if err == nil {
+		err = c.noPreinstall
+	}
 	if err != nil {
 		return err
 	}

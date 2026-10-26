@@ -288,7 +288,31 @@ const (
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
 	// outside a lab boot. Promotion sends it.
 	CmdRecordKnownGood = "record_known_good"
+	// CmdInstall installs a Release on the Mac as a named lab operation: the
+	// install step of an Installed run, which a Volunteer's Mac allows at
+	// Qualification and records in its Audit log with the Maintainer and the
+	// Release.
+	CmdInstall = "install"
 )
+
+// InstallTimeout is how long labd gives a Mac to install a Release: fetching
+// its packages and running the installer's hooks.
+const InstallTimeout = 10 * time.Minute
+
+// InstallArgs is the Release CmdInstall installs: its packages, which
+// lab-agent fetches from labd by sha256, and the kernel they carry.
+type InstallArgs struct {
+	Release  string           `json:"release"`
+	Kernel   string           `json:"kernel"` // the kernel release the Release's package installs
+	Packages []InstallPackage `json:"packages"`
+}
+
+// InstallPackage is one package file of a Release.
+type InstallPackage struct {
+	Name   string `json:"name"`
+	File   string `json:"file"`   // the package's file name, as pacman wants it
+	SHA256 string `json:"sha256"` // the package file, uploaded to labd
+}
 
 type Command struct {
 	ID    string `json:"id"`
@@ -378,6 +402,9 @@ type BootOnceArgs struct {
 
 type CollectArgs struct {
 	Boot string `json:"boot"` // journalctl -b value: "0", "-1" or a boot ID
+	// Dir is where the logs go in the job, instead of boot0 (or prevboot for
+	// "-1"): an Installed run collects the Volunteer's own boot as preinstall.
+	Dir string `json:"dir,omitempty"`
 }
 
 // LostBoot is what lab-agent collected of a Lab boot it came back from.
@@ -457,6 +484,19 @@ type TestSpec struct {
 	// SkipOnScreen leaves out the checks that need the screen visible: a
 	// Volunteer's Mac is locked while a test runs.
 	SkipOnScreen bool `json:"skip_on_screen,omitempty"`
+	// Identity makes the test the lab's own identity check of an Installed
+	// run: lab-agent runs its own read-only collector, not a script.
+	Identity *IdentityCheck `json:"identity,omitempty"`
+}
+
+// IdentityCheck is what an Installed run's identity check observes: the
+// installed Release's kernel and packages, and its installer entry.
+type IdentityCheck struct {
+	Phase     string   `json:"phase"` // before, booted or after
+	Device    string   `json:"device"`
+	Kernel    string   `json:"kernel"`
+	EntryPath string   `json:"entry_path,omitempty"` // the frozen installer entry's path; "" finds the installer's entry
+	Packages  []string `json:"packages,omitempty"`
 }
 
 // MaintainerScript is whether the test runs a Maintainer's script (--script,
