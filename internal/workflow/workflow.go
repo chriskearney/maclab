@@ -339,6 +339,9 @@ func (r *Runner) save(s *State) error {
 	if err != nil {
 		return err
 	}
+	if len(b)+1 > MaxJSON {
+		return errors.New("aggregate workflow checkpoint exceeds 4MiB; previous durable intent retained, reconcile actual operation")
+	}
 	return atomicWrite(filepath.Join(r.Dir, "state.json"), append(b, '\n'))
 }
 func (r *Runner) authorized(path string, p Phase) (string, error) {

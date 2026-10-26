@@ -563,3 +563,18 @@ func TestAmbiguousJSONKeysRefusedEveryIdentityPath(t *testing.T) {
 		}
 	}
 }
+
+func TestAggregateCheckpointCannotBecomeUnreadable(t *testing.T) {
+	large := strings.Repeat("x", 2200000)
+	r := fixture(t, Phase{ID: "one", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": large})}, Phase{ID: "two", Kind: "bind", TimeoutSec: 3, Template: raw(map[string]string{"data": large})})
+	if e := r.Run(context.Background(), "", false); e == nil {
+		t.Fatal("oversized aggregate checkpoint accepted")
+	}
+	s := readState(t, r)
+	if s.Records["one"].State != "done" || s.Records["two"].State != "running" {
+		t.Fatal("previous durable intent lost")
+	}
+	if _, e := r.Status(); e != nil {
+		t.Fatal("status irrecoverable", e)
+	}
+}
