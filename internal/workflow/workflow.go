@@ -778,9 +778,9 @@ func matchSubmitted(want, got api.JobSpec) error {
 	for i, t := range want.Tests {
 		actual := got.Tests[i]
 		if t.Builtin == "omarchy-m-test" {
-			actual.GUI = t.GUI
+			t.GUI = true
 			if t.TimeoutSec == 0 {
-				actual.TimeoutSec = 0
+				t.TimeoutSec = 900
 			}
 		}
 		if !reflect.DeepEqual(t, actual) {
@@ -789,7 +789,7 @@ func matchSubmitted(want, got api.JobSpec) error {
 	}
 	if len(got.Tests) > len(want.Tests) {
 		extra := got.Tests[len(want.Tests)]
-		if extra.Builtin != "omarchy-m-test" || !extra.GUI || extra.Script != "" {
+		if !reflect.DeepEqual(extra, api.TestSpec{Name: "omarchy-m-test", Builtin: "omarchy-m-test", GUI: true, TimeoutSec: 900}) {
 			return errors.New("unexpected server-added test")
 		}
 		for _, t := range want.Tests {

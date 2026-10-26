@@ -159,7 +159,7 @@ func RunHelper(ctx context.Context, h Helper, binding []byte, dir string) (out [
 	if err := atomicWrite(request, binding); err != nil {
 		return nil, err
 	}
-	python, _, err := openRegular(h.Python.Path)
+	python, pythonIdentity, err := openRegular(h.Python.Path)
 	if err != nil {
 		return nil, err
 	}
@@ -171,6 +171,12 @@ func RunHelper(ctx context.Context, h Helper, binding []byte, dir string) (out [
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	cmd.WaitDelay = 2 * time.Second
+	if err = verifyPin(h.Python); err != nil {
+		return nil, err
+	}
+	if err = finalSame(h.Python.Path, pythonIdentity); err != nil {
+		return nil, err
+	}
 	if err = cmd.Start(); err != nil {
 		return nil, err
 	}

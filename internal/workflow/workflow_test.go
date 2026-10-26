@@ -527,3 +527,23 @@ func TestHelperSuccessDrainsRedirectedDescendant(t *testing.T) {
 		}
 	}
 }
+
+func TestOMTMustActuallyRunInGUIWithExactServerDefault(t *testing.T) {
+	want := api.JobSpec{Device: "testmac", Kernel: strings.Repeat("a", 64), Tests: []api.TestSpec{{Name: "omarchy-m-test", Builtin: "omarchy-m-test", GUI: true}}}
+	good := want
+	good.Tests = []api.TestSpec{{Name: "omarchy-m-test", Builtin: "omarchy-m-test", GUI: true, TimeoutSec: 900}}
+	if e := matchSubmitted(want, good); e != nil {
+		t.Fatal(e)
+	}
+	bad := good
+	bad.Tests = append([]api.TestSpec{}, good.Tests...)
+	bad.Tests[0].GUI = false
+	if e := matchSubmitted(want, bad); e == nil {
+		t.Fatal("OMT GUI gate masked")
+	}
+	bad.Tests[0].GUI = true
+	bad.Tests[0].TimeoutSec = 1
+	if e := matchSubmitted(want, bad); e == nil {
+		t.Fatal("OMT deadline changed")
+	}
+}
