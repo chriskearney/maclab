@@ -105,23 +105,39 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	}
 
 	// Queued jobs wait for the Mac, including for a human to power cycle it,
-	// but not for one that left the lab.
-	v.mu.Lock()
-	ready := v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
-	v.mu.Unlock()
-	if !ready {
-		r.ev("waiting for %s to be ready (%s)", j.Spec.Device, v.snapshot().State)
-		err := v.waitFor(ctx, 0, func() bool {
-			return v.d.State == api.StateLeft || v.aliveLocked() && (v.d.State == api.StateReady || v.d.State == api.StateNew)
-		})
-		if why := v.leaving(); why != "" {
-			r.finish(api.OutcomeCanceled, "canceled: "+why)
-			return
+	// and on a Volunteer's Mac for its Availability window, but not for one
+	// that left the lab.
+	length := r.expectedLength()
+	holdLocked := func() string {
+		if v.d.State == api.StateLeft {
+			return ""
+		}
+		if !v.aliveLocked() || (v.d.State != api.StateReady && v.d.State != api.StateNew) {
+			return fmt.Sprintf("waiting for %s to be ready (%s)", j.Spec.Device, v.d.State)
+		}
+		return v.windowHoldLocked(length)
+	}
+	for {
+		v.mu.Lock()
+		why := holdLocked()
+		v.mu.Unlock()
+		if why == "" {
+			break
+		}
+		r.state(api.JobQueued) // a job built from source waits as queued, too
+		r.ev("%s", why)
+		err := v.waitFor(ctx, 0, func() bool { return holdLocked() != why })
+		if v.leaving() != "" {
+			break
 		}
 		if err != nil {
 			r.finish(api.OutcomeCanceled, "canceled while waiting for the device")
 			return
 		}
+	}
+	if why := v.leaving(); why != "" {
+		r.finish(api.OutcomeCanceled, "canceled: "+why)
+		return
 	}
 
 	v.mu.Lock()
@@ -561,6 +577,19 @@ func (r *jobRun) labBootJob() time.Duration {
 	d := r.boot + r.selfRecovery() + 5*time.Minute
 	for _, t := range r.tests() {
 		d += r.testTimeout(t)
+	}
+	return d
+}
+
+// expectedLength is how long the job is expected to hold the Mac, which on a
+// Volunteer's Mac must fit in what's left of the Availability window: its
+// staging, its Lab boot and, before an Installed run has its tests, its
+// identity checks before, booted and after.
+func (r *jobRun) expectedLength() time.Duration {
+	d := r.s.cfg.StageTimeout + r.labBootJob()
+	if r.j.Spec.InstalledManifest != "" && r.ir == nil {
+		const identityChecks = 3
+		d += identityChecks * r.testTimeout(api.TestSpec{})
 	}
 	return d
 }

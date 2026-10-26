@@ -46,6 +46,20 @@ type Config struct {
 	Clock Clock `json:"-"`
 }
 
+func (c *Config) workDir() string {
+	if c.WorkDir != "" {
+		return c.WorkDir
+	}
+	return "/var/lib/maclab"
+}
+
+func (c *Config) clock() Clock {
+	if c.Clock == nil {
+		return WallClock
+	}
+	return c.Clock
+}
+
 func (c *Config) httpTimeout() time.Duration {
 	if c.HTTPTimeoutSec > 0 {
 		return time.Duration(c.HTTPTimeoutSec) * time.Second
@@ -97,6 +111,7 @@ type Agent struct {
 	lastFacts         time.Time
 	after             []func() // actions to run once pending results reach labd
 	contacted         string   // the Lab boot whose contact with labd is on record
+	kind              string   // the Mac's kind, as labd's check-ins say
 	wake              chan struct{}
 	life              context.Context // commands outlive the poll that delivered them
 	// wd is the watchdog, held on a test boot; nil otherwise, and until the
@@ -132,12 +147,7 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 	}
 }
 
-func (a *Agent) clock() Clock {
-	if a.cfg.Clock == nil {
-		return WallClock
-	}
-	return a.cfg.Clock
-}
+func (a *Agent) clock() Clock { return a.cfg.clock() }
 
 // Enroll trades a one-time token for a device identity.
 func Enroll(ctx context.Context, server, token string, facts api.Facts) (*api.EnrollResponse, error) {
@@ -370,6 +380,14 @@ func (a *Agent) poll(ctx context.Context) error {
 		ci.Running = append(ci.Running, id)
 	}
 	a.mu.Unlock()
+	// A Volunteer's Mac with no settings sends empty ones, so labd's copy
+	// never outlives a deleted file. One that can't be read sends none: the
+	// agent refuses lab commands while it can't read them anyway.
+	if s, set, err := loadWindow(a.cfg); err != nil {
+		a.log.Printf("Availability window: %v", err)
+	} else if set || a.volunteer() {
+		ci.Window = &s
+	}
 	if refreshFacts {
 		f := a.sys.Facts()
 		f.AgentVersion = Version
@@ -394,6 +412,7 @@ func (a *Agent) poll(ctx context.Context) error {
 	a.wd.Load().idle() // labd is in touch
 	a.reachedLabd(bootID, cmdline)
 	a.mu.Lock()
+	a.kind = resp.Kind
 	if ci.Facts != nil {
 		// Cleanup can finish while this request is in flight. Acknowledge
 		// only the revision sent, so that refresh is not lost.
@@ -643,6 +662,9 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 // exec runs one command. The returned func runs only after the result reaches labd,
 // so a reboot never swallows its own acknowledgement.
 func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
+	if err := a.refuseOutsideWindow(c); err != nil {
+		return nil, nil, err
+	}
 	fetch := a.fetch
 	switch c.Kind {
 	case api.CmdStage:
@@ -820,9 +842,9 @@ func (a *Agent) armLabBoot(args api.BootOnceArgs) error {
 		return errors.New("a Lab boot needs its deadlines: boot_timeout_sec and job_sec")
 	}
 	now := a.clock().Now()
-	// The ceiling is the job's end. On a Volunteer's Mac the Availability
-	// window's end caps it too, once windows exist: take the earlier here.
-	jobEnd := now.Add(time.Duration(args.JobSec) * time.Second)
+	// The ceiling is the job's end, or on a Volunteer's Mac the Availability
+	// window's end if that comes first.
+	jobEnd := a.capAtWindowEnd(now.Add(time.Duration(args.JobSec) * time.Second))
 	d := newLabBootDeadlines(now, time.Duration(args.BootTimeoutSec)*time.Second, jobEnd)
 	dir := a.labBootDir()
 	for _, f := range []string{labBootContactFile, labBootSeenFile} {
@@ -897,12 +919,7 @@ func (a *Agent) rebootLater() {
 	}
 }
 
-func (a *Agent) workDir() string {
-	if a.cfg.WorkDir != "" {
-		return a.cfg.WorkDir
-	}
-	return "/var/lib/maclab"
-}
+func (a *Agent) workDir() string { return a.cfg.workDir() }
 
 func (a *Agent) outDir(c api.Command) (string, error) {
 	dir := filepath.Join(a.workDir(), "out", c.ID)

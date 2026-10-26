@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/iconidentify/maclab/internal/window"
 )
 
 // DeviceState is where a device sits in the lab's lifecycle.
@@ -80,6 +82,9 @@ type Device struct {
 	// SnapshotEligible is whether the Mac's @ can be snapshotted, as its
 	// latest check-in said: a Mac that can't is not eligible for Installed runs.
 	SnapshotEligible bool `json:"snapshot_eligible"`
+	// Window is a Volunteer Mac's Availability window settings as its latest
+	// check-in carried them. Only the Volunteer changes them, on the Mac.
+	Window *window.Settings `json:"window,omitempty"`
 }
 
 // Kinds of Mac. A Mac keeps its kind for as long as it is enrolled.
@@ -137,7 +142,8 @@ type Health struct {
 	Uptime      float64 `json:"uptime"`
 	SystemState string  `json:"system_state"` // systemctl is-system-running
 	Tainted     int64   `json:"tainted"`
-	JobTag      string  `json:"job_tag,omitempty"` // maclab.job= from the running cmdline
+	JobTag      string  `json:"job_tag,omitempty"`    // maclab.job= from the running cmdline
+	OnBattery   bool    `json:"on_battery,omitempty"` // unplugged from AC power
 }
 
 // KernelEvent is a classified kernel log line, from the agent's /dev/kmsg or from serial.
@@ -161,6 +167,9 @@ type Checkin struct {
 	Running []string        `json:"running,omitempty"` // command IDs still executing
 	// SnapshotEligible is whether @ can be snapshotted right now.
 	SnapshotEligible bool `json:"snapshot_eligible"`
+	// Window is the Mac's Availability window settings, once its Volunteer
+	// has set any: check-ins are how they reach labd.
+	Window *window.Settings `json:"window,omitempty"`
 }
 
 // Report carries command results and kernel events as soon as they exist.
@@ -183,6 +192,9 @@ type Quiet struct {
 type CheckinResponse struct {
 	Commands   []Command `json:"commands,omitempty"`
 	IntervalMS int       `json:"interval_ms"`
+	// Kind is the Mac's kind as labd enrolled it, for a lab-agent set up
+	// without it.
+	Kind string `json:"kind,omitempty"`
 }
 
 // Command kinds sent to the agent.

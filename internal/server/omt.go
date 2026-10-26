@@ -476,13 +476,21 @@ func (s *Server) omtScheduler() {
 			if l := d.Lease; l != nil && s.now().Before(l.Expires) {
 				continue
 			}
+			spec := api.JobSpec{Device: d.Name, Holder: "maclab-omt", Publish: s.cfg.OMTPublish}
+			length := (&jobRun{s: s, v: v, j: &api.Job{Spec: spec}, boot: s.cfg.BootTimeout}).expectedLength()
+			v.mu.Lock()
+			held := v.windowHoldLocked(length) != ""
+			v.mu.Unlock()
+			if held {
+				continue // a Volunteer's Mac is refreshed only when it fits in a window
+			}
 			if base := s.omtBaseline(d.Name); base != nil && s.since(base.Time) < s.cfg.OMTEvery {
 				continue
 			}
 			if open, _ := s.store.jobs(d.Name, 1, true); len(open) > 0 {
 				continue
 			}
-			j, _, err := s.Submit(api.JobSpec{Device: d.Name, Holder: "maclab-omt", Publish: s.cfg.OMTPublish})
+			j, _, err := s.Submit(spec)
 			if err != nil {
 				s.log.Printf("%s: scheduled omarchy-m-test: %v", d.Name, err)
 				continue

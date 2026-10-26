@@ -186,6 +186,14 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		logger.Printf("without a token, labd answers only to its own names: IP addresses, localhost, %s%s; --allow-host adds one",
 			strings.Join(hosts, ", "), map[bool]string{true: " and its MagicDNS names"}[cfg.Tailscale])
 	}
+	// The LAN defaults are read once, here: labd's goroutines can outlive a
+	// Server, and must not read them while a test sets them for the next one.
+	if cfg.AliveWindow == 0 {
+		cfg.AliveWindow = aliveWindow
+	}
+	if cfg.QuietGrace == 0 {
+		cfg.QuietGrace = quietGrace
+	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
 	}

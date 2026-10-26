@@ -56,6 +56,9 @@ _Avoid_: Supervised window
 **Pause**:
 A Volunteer closing their Mac's Availability window early: by default only the current window, or until a date they choose. Work in progress stops as it would at the window's end.
 
+**Open now**:
+A Volunteer opening their Mac's Availability window by hand, from now until a time they choose, whatever its weekly schedule or a Pause says. It merges with a scheduled window it runs into.
+
 **Access level**:
 What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs) or Full (everything a lab-owned Mac allows).
 _Avoid_: Permissions, trust level

@@ -96,6 +96,9 @@ func lostContactLab(t *testing.T, c labConfig) (*lab, *agent.FakeClock) {
 	c.clock = clock
 	l := newLabWith(t, c)
 	t.Cleanup(pumpClock(clock))
+	if c.volunteer {
+		l.openForTheLab(clock.Now())
+	}
 	l.baseline()
 	return l, clock
 }
@@ -161,6 +164,7 @@ func TestLabOwnedMacComesBackThroughItsDeadlineBeforeAnOOBHardReset(t *testing.T
 
 func TestPanickedLabBootsJournalComesBackByBootID(t *testing.T) {
 	l := newLabWith(t, labConfig{volunteer: true})
+	l.openForTheLab(time.Now())
 	l.baseline()
 	ids := l.bootIDs()
 	id := l.submitJob(api.JobSpec{Kernel: l.artifact("krel=7.2-bad behavior=panic")})
@@ -180,6 +184,7 @@ func TestPanickedLabBootsJournalComesBackByBootID(t *testing.T) {
 
 func TestLabBootCmdlineCarriesPanicAndWatchdogTimeouts(t *testing.T) {
 	l := newLabWith(t, labConfig{volunteer: true})
+	l.openForTheLab(time.Now())
 	l.baseline()
 	j := l.jobAPI(l.submitJob(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok")}), 60*time.Second)
 	l.expect(j, api.OutcomePass)
@@ -197,6 +202,7 @@ func TestLabBootCmdlineCarriesPanicAndWatchdogTimeouts(t *testing.T) {
 // A Sim kernel artifact marked apple_wdt=n was built without apple_wdt.
 func TestJobFlagsATestKernelBuiltWithoutAppleWDT(t *testing.T) {
 	l := newLabWith(t, labConfig{volunteer: true})
+	l.openForTheLab(time.Now())
 	l.baseline()
 	flagged := func(j *api.Job) bool {
 		if strings.Contains(j.Summary, "apple_wdt") {

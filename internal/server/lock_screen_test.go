@@ -30,6 +30,9 @@ func skipsOnScreenChecks(t *testing.T, j *api.Job) bool {
 
 func omtLab(t *testing.T, volunteer bool) *lab {
 	l := newLabWith(t, labConfig{volunteer: volunteer, config: func(c *Config) { c.OMT = true }})
+	if volunteer {
+		l.openForTheLab(l.s.now())
+	}
 	return l
 }
 

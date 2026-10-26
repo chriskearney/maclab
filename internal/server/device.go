@@ -190,6 +190,9 @@ func (v *dev) heartbeat(ci api.Checkin) {
 	}
 	v.d.BootID, v.d.Kernel, v.d.Cmdline, v.d.Health = ci.BootID, ci.Kernel, ci.Cmdline, ci.Health
 	v.d.SnapshotEligible = ci.SnapshotEligible
+	if v.syncWindowLocked(ci.Window) {
+		persist = true
+	}
 	if ci.Facts != nil {
 		v.d.Facts = *ci.Facts
 	}
@@ -253,7 +256,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 func (v *dev) deliver(bootID string) api.CheckinResponse {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	resp := api.CheckinResponse{IntervalMS: int(v.s.cfg.Interval / time.Millisecond)}
+	resp := api.CheckinResponse{IntervalMS: int(v.s.cfg.Interval / time.Millisecond), Kind: v.d.Kind}
 	if bootID != v.d.BootID {
 		return resp
 	}
@@ -441,20 +444,11 @@ func (v *dev) call(ctx context.Context, kind, job string, args any, timeout time
 // reconnecting after a resume takes tens of seconds.
 var quietGrace = 60 * time.Second
 
-// aliveWindow and quietGrace are the package defaults unless Config sets them.
-func (s *Server) aliveWindow() time.Duration {
-	if s.cfg.AliveWindow > 0 {
-		return s.cfg.AliveWindow
-	}
-	return aliveWindow
-}
+// aliveWindow and quietGrace are Config's, or the package defaults New
+// put there.
+func (s *Server) aliveWindow() time.Duration { return s.cfg.AliveWindow }
 
-func (s *Server) quietGrace() time.Duration {
-	if s.cfg.QuietGrace > 0 {
-		return s.cfg.QuietGrace
-	}
-	return quietGrace
-}
+func (s *Server) quietGrace() time.Duration { return s.cfg.QuietGrace }
 
 // maxSleep is how long a command waits for a Mac that went to sleep.
 var maxSleep = time.Hour

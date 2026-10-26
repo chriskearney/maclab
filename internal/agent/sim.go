@@ -88,8 +88,8 @@ type Sim struct {
 	Encrypted bool
 	// KexecPass is whether the Mac can kexec a Lab boot with its volume key in memory.
 	KexecPass bool
-	// OnBattery is a Mac unplugged from AC power.
-	OnBattery bool
+	// onBattery is a Mac unplugged from AC power; see SetOnBattery.
+	onBattery bool
 	// noSnapshot is a Mac whose @ can't be snapshotted; see SetSnapshotable.
 	noSnapshot bool
 
@@ -186,7 +186,16 @@ func (s *Sim) SnapshotEligible() error {
 
 func (s *Sim) Health() api.Health {
 	_, _, c := s.Identity()
-	return api.Health{Uptime: 1, SystemState: "running", JobTag: jobTag(c)}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return api.Health{Uptime: 1, SystemState: "running", JobTag: jobTag(c), OnBattery: s.onBattery}
+}
+
+// SetOnBattery unplugs the Mac from AC power, or plugs it back in.
+func (s *Sim) SetOnBattery(on bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onBattery = on
 }
 
 func (s *Sim) WatchKernel(ctx context.Context, fn func(string)) {

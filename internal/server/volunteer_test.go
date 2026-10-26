@@ -440,6 +440,7 @@ func TestRollbackReturnsTheMacToItsSnapshot(t *testing.T) {
 
 func TestLabBootThatLosesTheNetworkNeverChecksIn(t *testing.T) {
 	l := newLabWith(t, labConfig{volunteer: true, oob: true})
+	l.openForTheLab(time.Now())
 	l.baseline()
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-offline behavior=no-network")})
 	if j.Result.Booted || j.Outcome == api.OutcomePass {

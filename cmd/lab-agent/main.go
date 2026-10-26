@@ -24,7 +24,14 @@ const usage = `lab-agent: the Mac side of the test lab
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin|--stay-awake] [--volatile-journal]
         [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
                                   (a Volunteer's Mac refuses --autologin and --stay-awake)
-  sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, and Installed-run eligibility
+  sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, its Availability window
+                                  and Installed-run eligibility
+  sudo lab-agent window show|add|remove [<days> <HH:MM-HH:MM>]
+                                  when the lab may use a Volunteer's Mac, e.g. window add mon-fri 19:00-07:00
+  sudo lab-agent pause [--until YYYY-MM-DD]
+                                  end the current window now, or stay closed until that date
+  sudo lab-agent open --until HH:MM
+                                  open the Mac to the lab now, until HH:MM
   sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)

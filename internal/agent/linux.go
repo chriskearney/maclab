@@ -85,7 +85,24 @@ func (l *Linux) Health() api.Health {
 	h.Tainted, _ = strconv.ParseInt(readTrim("/proc/sys/kernel/tainted"), 10, 64)
 	_, _, cmd := l.Identity()
 	h.JobTag = jobTag(cmd)
+	h.OnBattery = onBattery("/sys/class/power_supply")
 	return h
+}
+
+// onBattery is whether the Mac has an AC adapter (a Mains power supply) and
+// it is unplugged. A Mac with none, a desktop, is never on battery.
+func onBattery(dir string) bool {
+	supplies, _ := os.ReadDir(dir)
+	mains, online := false, false
+	for _, e := range supplies {
+		p := filepath.Join(dir, e.Name())
+		if readTrim(filepath.Join(p, "type")) != "Mains" {
+			continue
+		}
+		mains = true
+		online = online || readTrim(filepath.Join(p, "online")) == "1"
+	}
+	return mains && !online
 }
 
 func (l *Linux) Facts() api.Facts {

@@ -21,6 +21,9 @@ type volunteerCommand func(ctx context.Context, cfg *Config, sys System, args []
 // rest, by name. The Volunteer tickets add them here.
 var volunteerCommands = map[string]volunteerCommand{
 	"status": showStatus,
+	"window": windowCmd,
+	"pause":  pause,
+	"open":   open,
 }
 
 // IsVolunteerCommand is whether lab-agent's command line routes name here.
@@ -41,9 +44,10 @@ func Volunteer(ctx context.Context, cfg *Config, sys System, args []string, out 
 	return cmd(ctx, cfg, sys, args[1:], out)
 }
 
-// showStatus shows what the Mac is enrolled as, its ntfy topic and whether it is
-// eligible for Installed runs. Eligibility is read from the Mac now; the
-// enrollment from labd, or as setup recorded it when labd can't be reached.
+// showStatus shows what the Mac is enrolled as, its ntfy topic, its Availability
+// window and whether it is eligible for Installed runs. The window and
+// eligibility are read from the Mac now; the enrollment from labd, or as
+// setup recorded it when labd can't be reached.
 func showStatus(ctx context.Context, cfg *Config, sys System, args []string, out io.Writer) error {
 	e, from := cfg.Enrollment, ""
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -59,6 +63,14 @@ func showStatus(ctx context.Context, cfg *Config, sys System, args []string, out
 		fmt.Fprintf(out, "  ntfy topic:     %s\n", e.NtfyTopic)
 		if e.NtfyURL != "" {
 			fmt.Fprintf(out, "  subscribe to:   %s\n", e.NtfyURL)
+		}
+	}
+	if e.Kind != api.KindLabOwned {
+		w, _, err := loadWindow(cfg)
+		if err != nil {
+			fmt.Fprintf(out, "  Window:         can't be read: %v\n", err)
+		} else {
+			fmt.Fprintf(out, "  Window:         %s\n", describeWindow(w, cfg.clock().Now()))
 		}
 	}
 	if err := sys.SnapshotEligible(); err != nil {

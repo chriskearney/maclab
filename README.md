@@ -369,7 +369,29 @@ Mac `setup` refuses `--autologin` and `--stay-awake`. Setup and every
 check-in report whether `@` can be snapshotted (`/` is the btrfs subvolume
 `@` and snapper has a root config for it); a Mac whose `@` can't is shown as
 not eligible for Installed runs. On the Mac, `sudo lab-agent status` shows
-what it is enrolled as, its topic and its eligibility.
+what it is enrolled as, its topic, its Availability window and its
+eligibility.
+
+Nothing from the lab starts on a Volunteer's Mac outside its Availability
+window, the baseline included, and a Mac with no window is closed. Only the
+Volunteer sets it, on the Mac, in the Mac's local time:
+
+```sh
+sudo lab-agent window add mon-fri 19:00-07:00   # a window crossing midnight belongs to the day it starts
+sudo lab-agent window remove mon-fri 19:00-07:00
+sudo lab-agent window show
+sudo lab-agent pause                     # end the current window now
+sudo lab-agent pause --until 2026-11-03  # closed until that date begins
+sudo lab-agent open --until 22:00        # open now until 22:00, whatever the schedule says
+```
+
+These take effect at once and work with labd or the tailnet down; check-ins
+carry them to labd, which has no API to change them. lab-agent refuses any lab
+command outside the window, and the job records the refusal. labd starts a job
+on a Volunteer's Mac only inside its window, on AC power, and when the job's
+expected length fits in what is left of the window; until then the job stays
+`queued`. `--omt-every` refreshes wait for a window the same way. A Lab boot's
+hard ceiling is the window's end if that comes before the job's end.
 
 A Mac enrolled with `./volunteer` (see [Volunteer a Mac](#volunteer-a-mac)) is a
 Volunteer's too, named and reached by the tailnet login that ran it.
