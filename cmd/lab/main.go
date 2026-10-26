@@ -65,6 +65,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
                                       (lab-agent uninstall) goes back in the lab first
   lab shell <device>                  shell over the serial link: works with the Mac's network down (Ctrl-] exits)
   lab serial <device> [-n 100] | lab oob <device>
+  lab audit <device>                  labd's copy of a Volunteer's Mac's Audit log: every Maintainer action on it
   lab upload <file>
   lab mcp                             MCP server on stdio, for AI agents
 `
@@ -643,6 +644,20 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		out, err := c.Serial(ctx, pos[0], *n)
 		fmt.Print(out)
 		return err
+
+	case "audit":
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab audit <device>"); err != nil {
+			return err
+		}
+		es, err := c.Audit(ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		for _, e := range es {
+			fmt.Println(e.Line(time.Local))
+		}
+		return nil
 
 	case "oob":
 		pos := parse(fs, args)

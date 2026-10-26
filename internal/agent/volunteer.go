@@ -20,11 +20,15 @@ type volunteerCommand func(ctx context.Context, cfg *Config, sys System, args []
 // volunteerCommands are `sudo lab-agent status`, `window`, `pause` and the
 // rest, by name. The Volunteer tickets add them here.
 var volunteerCommands = map[string]volunteerCommand{
-	"status": showStatus,
-	"window": windowCmd,
-	"pause":  pause,
-	"open":   open,
-	"notify": notifyCmd,
+	"status":  showStatus,
+	"window":  windowCmd,
+	"pause":   pause,
+	"open":    open,
+	"notify":  notifyCmd,
+	"access":  accessCmd,
+	"publish": publishCmd,
+	"log":     logCmd,
+	"jobs":    jobsCmd,
 }
 
 // IsVolunteerCommand is whether lab-agent's command line routes name here.
@@ -73,11 +77,35 @@ func showStatus(ctx context.Context, cfg *Config, sys System, args []string, out
 		} else {
 			fmt.Fprintf(out, "  Window:         %s\n", describeWindow(w, cfg.clock().Now()))
 		}
+		if ac, err := loadAccess(cfg.workDir()); err != nil {
+			fmt.Fprintf(out, "  Access level:   can't be read (lab-agent refuses exec and scripts): %v\n", err)
+		} else {
+			fmt.Fprintf(out, "  Access level:   %s\n", levelName(ac.Level))
+			pub := "off"
+			if ac.Publish {
+				pub = "on (publish on lists the deletion links)"
+			}
+			fmt.Fprintf(out, "  Publishing:     %s\n", pub)
+		}
 	}
 	if err := sys.SnapshotEligible(); err != nil {
 		fmt.Fprintf(out, "  Installed runs: not eligible: %v\n", err)
 	} else {
 		fmt.Fprintf(out, "  Installed runs: eligible (@ can be snapshotted)\n")
+	}
+	if e.Kind != api.KindLabOwned {
+		latest, err := latestAudit(cfg.workDir(), 5)
+		switch {
+		case err != nil:
+			fmt.Fprintf(out, "  Audit log:      can't be read: %v\n", err)
+		case len(latest) == 0:
+			fmt.Fprintf(out, "  Audit log:      no Maintainer has done anything on this Mac yet\n")
+		default:
+			fmt.Fprintf(out, "  Audit log, latest (all of it: log):\n")
+			for _, l := range latest {
+				fmt.Fprintf(out, "    %s\n", l)
+			}
+		}
 	}
 	return nil
 }

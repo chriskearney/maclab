@@ -171,6 +171,12 @@ func (c *Client) Serial(ctx context.Context, name string, lines int) (string, er
 	return out, c.do(ctx, "GET", fmt.Sprintf("/api/devices/%s/serial?lines=%d", url.PathEscape(name), lines), nil, &out)
 }
 
+// Audit is labd's copy of a Volunteer Mac's Audit log.
+func (c *Client) Audit(ctx context.Context, name string) ([]api.AuditEntry, error) {
+	var out []api.AuditEntry
+	return out, c.do(ctx, "GET", "/api/devices/"+url.PathEscape(name)+"/audit", nil, &out)
+}
+
 func (c *Client) OOBStatus(ctx context.Context, name string) (map[string]any, error) {
 	var out map[string]any
 	return out, c.do(ctx, "GET", "/api/devices/"+url.PathEscape(name)+"/oob", nil, &out)

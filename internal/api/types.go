@@ -85,7 +85,23 @@ type Device struct {
 	// Window is a Volunteer Mac's Availability window settings as its latest
 	// check-in carried them. Only the Volunteer changes them, on the Mac.
 	Window *window.Settings `json:"window,omitempty"`
+	// AccessLevel is what Maintainers may do on a Volunteer's Mac, and
+	// Publish whether its omarchy-m-test reports may be published, as its
+	// latest check-in carried them. Only the Volunteer changes them, on the Mac.
+	AccessLevel string `json:"access_level,omitempty"`
+	Publish     bool   `json:"publish,omitempty"`
 }
+
+// Access levels of a Volunteer's Mac. Qualification, the default, allows
+// only what a Qualification needs: no exec and no Maintainer's script.
+const (
+	AccessQualification = "qualification"
+	AccessFull          = "full"
+)
+
+// AllowsAnything is whether Maintainers may do anything on the Mac a
+// Lab-owned Mac allows: a Lab-owned Mac, or a Volunteer's at Full.
+func (d *Device) AllowsAnything() bool { return !d.IsVolunteer() || d.AccessLevel == AccessFull }
 
 // Kinds of Mac. A Mac keeps its kind for as long as it is enrolled.
 const (
@@ -175,6 +191,10 @@ type Checkin struct {
 	Window *window.Settings `json:"window,omitempty"`
 	// NtfyOwnURL is the topic the Volunteer set with `notify --topic`, if any.
 	NtfyOwnURL string `json:"ntfy_own_url,omitempty"`
+	// AccessLevel and Publish are a Volunteer's Mac's Access level and
+	// publishing opt-in; a Lab-owned Mac sends no AccessLevel.
+	AccessLevel string `json:"access_level,omitempty"`
+	Publish     bool   `json:"publish,omitempty"`
 }
 
 // Report carries command results and kernel events as soon as they exist.
@@ -182,6 +202,8 @@ type Report struct {
 	Results []CommandResult `json:"results,omitempty"`
 	Events  []KernelEvent   `json:"events,omitempty"`
 	Quiet   *Quiet          `json:"quiet,omitempty"`
+	// Audit is the part of the Mac's Audit log labd's copy lacks.
+	Audit []AuditEntry `json:"audit,omitempty"`
 }
 
 // Quiet is the agent saying, while it can, that the Mac is about to go off
@@ -194,12 +216,57 @@ type Quiet struct {
 	Seconds int    `json:"seconds"`
 }
 
+// AuditEntry is one line of a Volunteer Mac's Audit log: a Maintainer action
+// that reached the Mac, written there before lab-agent acted on it.
+type AuditEntry struct {
+	Time       time.Time `json:"time"`
+	Maintainer string    `json:"maintainer,omitempty"` // "" when labd acted on its own
+	Job        string    `json:"job,omitempty"`
+	Action     string    `json:"action"` // what was done, with the command or script text
+	// Refused is why lab-agent refused the action instead; "" when it acted.
+	Refused string `json:"refused,omitempty"`
+	// End is where the entry ends in the Mac's own log, in bytes: labd's copy
+	// keeps each entry once however often the Mac sends it.
+	End int64 `json:"end,omitempty"`
+}
+
+// Line is the entry as `lab-agent log` and `lab audit` print it, in the
+// time zone of loc.
+func (e AuditEntry) Line(loc *time.Location) string {
+	who := e.Maintainer
+	if who == "" {
+		who = "labd"
+	}
+	job := ""
+	if e.Job != "" {
+		job = " job " + e.Job + ":"
+	}
+	what := e.Action
+	if e.Refused != "" {
+		what = "REFUSED " + what + " (" + e.Refused + ")"
+	}
+	return fmt.Sprintf("%s  %s%s %s", e.Time.In(loc).Format("2006-01-02 15:04:05"), who, job, what)
+}
+
+// Published is an omarchy-m-test report of a Volunteer's Mac on
+// omarchy-m-testing.org, with the link that takes it down again.
+type Published struct {
+	Job         string `json:"job"`
+	ReportURL   string `json:"report_url"`
+	DeletionURL string `json:"deletion_url"`
+}
+
 type CheckinResponse struct {
 	Commands   []Command `json:"commands,omitempty"`
 	IntervalMS int       `json:"interval_ms"`
 	// Kind is the Mac's kind as labd enrolled it, for a lab-agent set up
 	// without it.
 	Kind string `json:"kind,omitempty"`
+	// Held is whether a job or lease holds the Mac now: a Volunteer's Mac
+	// lets its screen and live journal be read only then.
+	Held bool `json:"held,omitempty"`
+	// AuditHave is how much of the Mac's Audit log labd's copy holds, in bytes.
+	AuditHave int64 `json:"audit_have,omitempty"`
 }
 
 // Command kinds sent to the agent.
@@ -224,10 +291,13 @@ const (
 )
 
 type Command struct {
-	ID    string          `json:"id"`
-	Kind  string          `json:"kind"`
-	JobID string          `json:"job_id,omitempty"`
-	Args  json.RawMessage `json:"args,omitempty"`
+	ID    string `json:"id"`
+	Kind  string `json:"kind"`
+	JobID string `json:"job_id,omitempty"`
+	// Maintainer is who the command acts for: the Maintainer who asked, or
+	// whose job it is; "" when labd acts on its own.
+	Maintainer string          `json:"maintainer,omitempty"`
+	Args       json.RawMessage `json:"args,omitempty"`
 }
 
 type CommandResult struct {
@@ -238,6 +308,9 @@ type CommandResult struct {
 	// WindowClosed is lab-agent refusing or stopping the command because the
 	// Mac's Availability window is closed: its end came, or its Volunteer paused.
 	WindowClosed bool `json:"window_closed,omitempty"`
+	// AccessLevel is lab-agent refusing or stopping the command because the
+	// Mac's Access level doesn't allow it: its Volunteer lowered it.
+	AccessLevel bool `json:"access_level,omitempty"`
 }
 
 type StageArgs struct {
@@ -297,6 +370,10 @@ type BootOnceArgs struct {
 	Entry          string `json:"entry"`
 	BootTimeoutSec int    `json:"boot_timeout_sec"`
 	JobSec         int    `json:"job_sec"`
+	// Tests are what the job runs on the Lab boot: a Volunteer's Mac records
+	// them in its Audit log, and holds them to its Access level for as long
+	// as the Lab boot lasts.
+	Tests []TestSpec `json:"tests,omitempty"`
 }
 
 type CollectArgs struct {
@@ -321,6 +398,9 @@ const (
 	// DeadlineWindowClosed is the Availability window closing: its end, or
 	// the Volunteer's Pause.
 	DeadlineWindowClosed Deadline = "window_closed"
+	// DeadlineAccessLowered is the Volunteer lowering the Access level below
+	// what the Lab boot's job runs.
+	DeadlineAccessLowered Deadline = "access_lowered"
 )
 
 func (d Deadline) String() string {
@@ -329,6 +409,8 @@ func (d Deadline) String() string {
 		return "hard ceiling"
 	case DeadlineWindowClosed:
 		return "Availability window closing"
+	case DeadlineAccessLowered:
+		return "Access level lowering"
 	}
 	return "no-contact"
 }
@@ -376,6 +458,11 @@ type TestSpec struct {
 	// Volunteer's Mac is locked while a test runs.
 	SkipOnScreen bool `json:"skip_on_screen,omitempty"`
 }
+
+// MaintainerScript is whether the test runs a Maintainer's script (--script,
+// or --gui-script in the GUI user's session): a Volunteer's Mac runs one only
+// at Access level Full.
+func (t TestSpec) MaintainerScript() bool { return t.Script != "" }
 
 type TestResult struct {
 	Name     string  `json:"name"`

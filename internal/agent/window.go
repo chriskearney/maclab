@@ -324,6 +324,7 @@ func (a *Agent) watchWindow(ctx context.Context) {
 		case <-tick.C():
 		}
 		a.keepAwake()
+		a.watchAccess()
 		if _, _, cmdline := a.sys.Identity(); !a.volunteer() || IsLabBoot(cmdline) {
 			continue
 		}

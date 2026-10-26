@@ -93,6 +93,9 @@ type labBootDeadlines struct {
 	// WindowGated is a Volunteer's Mac: the boot also ends as soon as its
 	// Availability window closes, at its end or the Volunteer's Pause.
 	WindowGated bool `json:"window_gated,omitempty"`
+	// NeedsFull is a Volunteer's Mac whose Lab boot runs a Maintainer's
+	// script: the boot ends as soon as the Access level is lowered from Full.
+	NeedsFull bool `json:"needs_full,omitempty"`
 }
 
 // newLabBootDeadlines is the record for a Lab boot starting now: about twice
@@ -212,6 +215,9 @@ func enforceLabBootDeadlines(ctx context.Context, c Clock, workDir string, sys S
 		seen.Deadline = d.due(now, contacted)
 		if d.WindowGated && !windowOpen(workDir, now) {
 			seen.Deadline = api.DeadlineWindowClosed
+		}
+		if accessLowered(workDir, d) {
+			seen.Deadline = api.DeadlineAccessLowered
 		}
 		if seen.Deadline != "" {
 			note()

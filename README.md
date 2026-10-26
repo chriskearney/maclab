@@ -412,6 +412,42 @@ Mac, lab-agent blocks suspend (`systemd-inhibit --what=sleep --mode=block`)
 and releases it after; the idle lock and screensaver are never touched.
 Nothing wakes a sleeping Mac: a window it sleeps through is missed.
 
+The Volunteer also chooses what Maintainers may do on the Mac, its Access
+level, and can read everything done to it, its Audit log:
+
+```sh
+sudo lab-agent access qualification   # the default: no lab exec, --script or --gui-script
+sudo lab-agent access full            # everything a Lab-owned Mac allows
+sudo lab-agent log                    # every Maintainer action on this Mac (works offline)
+sudo lab-agent jobs                   # the lab's jobs on this Mac
+sudo lab-agent publish on|off         # omarchy-m-test publishing; on lists the deletion links
+```
+
+At Qualification labd rejects `lab exec`, `--script` and `--gui-script` at
+submit (`403`, naming the Access level), and lab-agent refuses them at run
+whatever labd sends: Qualification still takes baselines, crash tests,
+built-in tests, omarchy-m-test and lab-kernel runs. Like the window commands,
+`access` takes effect on the Mac at once, with labd down too. Lowering it ends
+a lease at once, and a job running a Maintainer's script ends `incomplete`:
+its Lab boot reboots to the Known-good kernel within a second or two. A job it
+still allows keeps running. At either level the Mac's screen and live journal
+are shown only while a job or lease holds it inside its window; a job's own
+screenshots are still taken.
+
+Every command labd sends carries the Maintainer it acts for (the one who
+asked, or whose job it is) and its job. Before acting, lab-agent appends who,
+what (with the command or script text), the job and the time to the Mac's
+append-only Audit log, `/var/lib/maclab/audit.log`, and records each refusal
+too. Leaving the lab leaves the log in place: it is the Volunteer's record.
+Reports carry new entries to labd, whose copy Maintainers read with `lab audit
+<mac>` (`GET /api/devices/{n}/audit`). `status` shows the Access level and the
+latest entries.
+
+Publishing omarchy-m-test reports is off on a Volunteer's Mac until its
+Volunteer runs `publish on`, whatever `--omt-publish` or a job's `--publish`
+asks; `lab publish` is refused too. Each `publish on` lists the deletion link
+of every report published so far.
+
 A Mac enrolled with `./volunteer` (see [Volunteer a Mac](#volunteer-a-mac)) is a
 Volunteer's too, named and reached by the tailnet login that ran it.
 
@@ -504,7 +540,8 @@ answered yes. The run takes 1 to 3 minutes.
   Publish button uploads the signed report to omarchy-m-testing.org. Only
   known-good runs qualify, because the site names a report's build from the
   installed packages, and those don't describe a lab kernel. The site's deletion
-  link stays in the job's `omt-published.json`.
+  link stays in the job's `omt-published.json`. A Volunteer's Mac is published
+  only once its Volunteer opts in (see above).
 
 ```sh
 labd --omt-publish --omt-every 24h   # refresh each idle Mac's known-good report daily, and publish it

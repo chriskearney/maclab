@@ -354,9 +354,15 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	t0 := r.s.now()
 	r.armedBoot, r.armedAt = oldBoot, t0
 	arm := api.BootOnceArgs{Entry: sr.Entry, BootTimeoutSec: int(r.boot / time.Second), JobSec: int(r.labBootJob() / time.Second)}
+	if j.Spec.Crash == "" {
+		arm.Tests = r.tests()
+	}
 	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); errors.Is(err, errWindowClosed) {
 		r.armedBoot = "" // nothing was armed: there is no reboot for restore to wait for
 		return windowCut("before the Lab boot (" + err.Error() + ")")
+	} else if errors.Is(err, errAccessLevel) {
+		r.armedBoot = ""
+		return accessCut("before the Lab boot (" + err.Error() + ")")
 	} else if err != nil {
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
 	}
@@ -378,6 +384,8 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		r.ev("came back on %s instead of the test entry: %s", d.Kernel, cause)
 		if lost := r.collectLost(ctx); lost.Deadline == api.DeadlineWindowClosed {
 			return windowCut("during the Lab boot of " + sr.KernelRelease + ", which went back to " + d.Kernel + " before it reached labd")
+		} else if lost.Deadline == api.DeadlineAccessLowered {
+			return accessCut("during the Lab boot of " + sr.KernelRelease + ", which went back to " + d.Kernel + " before it reached labd")
 		} else if lost.Deadline != "" {
 			return api.OutcomeLostContact, fmt.Sprintf("%s booted but never reached labd; its %s deadline rebooted the Mac to %s",
 				sr.KernelRelease, lost.Deadline, d.Kernel)
@@ -417,6 +425,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		if errors.Is(err, errWindowClosed) {
 			return windowCut("before test " + t.Name + " (" + err.Error() + ")")
+		}
+		if errors.Is(err, errAccessLevel) {
+			return accessCut("during test " + t.Name + " (" + err.Error() + ")")
 		}
 		cut := err != nil && ctx.Err() != nil // by a cancel
 		if err != nil {
@@ -820,6 +831,8 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 		case "":
 		case api.DeadlineWindowClosed:
 			return windowCut("during test " + test + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
+		case api.DeadlineAccessLowered:
+			return accessCut("during test " + test + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
 		default:
 			o, cause = api.OutcomeLostContact, fmt.Sprintf("labd lost the Lab boot and its %s deadline rebooted it", lostBoot.Deadline)
 		}

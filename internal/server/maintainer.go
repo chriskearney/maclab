@@ -141,7 +141,12 @@ func (s *Server) asMaintainer(w http.ResponseWriter, r *http.Request, name strin
 
 // maintainerName is the Maintainer who made a request on a Maintainer route.
 func maintainerName(r *http.Request) string {
-	name, _ := r.Context().Value(maintainerKey{}).(string)
+	return maintainerOf(r.Context())
+}
+
+// maintainerOf is the Maintainer a request's context acts for; "" for labd.
+func maintainerOf(ctx context.Context) string {
+	name, _ := ctx.Value(maintainerKey{}).(string)
 	return name
 }
 

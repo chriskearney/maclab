@@ -31,6 +31,10 @@ func (s *Server) hExec(w http.ResponseWriter, r *http.Request) {
 	if a.TimeoutSec <= 0 || a.TimeoutSec > 3600 {
 		a.TimeoutSec = 120
 	}
+	if err := refuseAtAccessLevel(v.snapshot(), "lab exec"); err != nil {
+		httpErr(w, 403, "%v", err)
+		return
+	}
 	v.mu.Lock()
 	alive, ctl := v.aliveLocked(), v.oob
 	v.mu.Unlock()

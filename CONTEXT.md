@@ -68,11 +68,11 @@ _Avoid_: Interrupted, aborted (aborted by the Volunteer is a different ending)
 A Volunteer opening their Mac's Availability window by hand, from now until a time they choose, whatever its weekly schedule or a Pause says. It merges with a scheduled window it runs into.
 
 **Access level**:
-What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs) or Full (everything a lab-owned Mac allows).
+What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs: no exec and no Maintainer's script) or Full (everything a lab-owned Mac allows). Lowering it stops at once whatever it no longer allows.
 _Avoid_: Permissions, trust level
 
 **Audit log**:
-The record, per Volunteer Mac, of every Maintainer action on it, which its Volunteer can read.
+The record, per Volunteer Mac, of every Maintainer action on it (who, what, when, which job), kept on the Mac itself and written before each action, which its Volunteer can read. labd keeps a copy.
 
 ## Releases
 

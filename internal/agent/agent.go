@@ -112,6 +112,8 @@ type Agent struct {
 	after             []func() // actions to run once pending results reach labd
 	contacted         string   // the Lab boot whose contact with labd is on record
 	kind              string   // the Mac's kind, as labd's check-ins say
+	held              bool     // a job or lease holds the Mac, as labd's latest answer says
+	auditSent         int64    // how much of the Audit log labd's copy holds, in bytes
 	awake             awakeHold
 	wake              chan struct{}
 	life              context.Context // commands outlive the poll that delivered them
@@ -396,6 +398,11 @@ func (a *Agent) poll(ctx context.Context) error {
 		} else {
 			ci.NtfyOwnURL = u
 		}
+		if ac, err := loadAccess(a.workDir()); err != nil {
+			a.log.Printf("Access level: %v", err) // labd keeps its last copy; the agent reads it as Qualification
+		} else {
+			ci.AccessLevel, ci.Publish = ac.Level, ac.Publish
+		}
 	}
 	if refreshFacts {
 		f := a.sys.Facts()
@@ -422,7 +429,7 @@ func (a *Agent) poll(ctx context.Context) error {
 	a.reachedLabd(bootID, cmdline)
 	a.keepAwake()
 	a.mu.Lock()
-	a.kind = resp.Kind
+	a.kind, a.held, a.auditSent = resp.Kind, resp.Held, resp.AuditHave
 	if ci.Facts != nil {
 		// Cleanup can finish while this request is in flight. Acknowledge
 		// only the revision sent, so that refresh is not lost.
@@ -463,11 +470,19 @@ func (a *Agent) report(ctx context.Context) error {
 	defer a.repMu.Unlock()
 	a.mu.Lock()
 	rep := api.Report{Results: append([]api.CommandResult(nil), a.results...), Events: append([]api.KernelEvent(nil), a.events...)}
+	auditSent := a.auditSent
 	a.mu.Unlock()
-	if len(rep.Results) == 0 && len(rep.Events) == 0 {
+	if a.volunteer() {
+		var err error
+		if rep.Audit, err = readAudit(a.workDir(), auditSent, 200); err != nil {
+			a.log.Printf("Audit log: %v", err)
+		}
+	}
+	if len(rep.Results) == 0 && len(rep.Events) == 0 && len(rep.Audit) == 0 {
 		return nil
 	}
 	err := a.post(ctx, rep)
+	audited := err == nil
 	switch {
 	case tooLarge(err):
 		err = a.sendEach(ctx, rep)
@@ -478,6 +493,10 @@ func (a *Agent) report(ctx context.Context) error {
 		return err
 	}
 	a.mu.Lock()
+	// sendEach sends no Audit log: it goes with the next whole report.
+	if n := len(rep.Audit); n > 0 && audited && rep.Audit[n-1].End > a.auditSent {
+		a.auditSent = rep.Audit[n-1].End
+	}
 	var after []func()
 	if len(a.results) == 0 {
 		after, a.after = a.after, nil
@@ -664,8 +683,12 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 		if cause := context.Cause(ctx); err != nil && errors.Is(cause, errStoppedAtWindowClose) {
 			err = cause // whatever the command made of being stopped
 		}
+		if cause := context.Cause(ctx); errors.Is(cause, errAccessLevel) {
+			err = cause // a test stopped this way ends the job, not the test alone
+		}
 		r := api.CommandResult{ID: c.ID, OK: err == nil,
-			WindowClosed: errors.Is(err, errRefusedOutsideWindow) || errors.Is(err, errStoppedAtWindowClose)}
+			WindowClosed: errors.Is(err, errRefusedOutsideWindow) || errors.Is(err, errStoppedAtWindowClose),
+			AccessLevel:  errors.Is(err, errAccessLevel)}
 		if err != nil {
 			r.Error = err.Error()
 			a.log.Printf("command %s failed: %v", c.ID, err)
@@ -693,8 +716,15 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 // exec runs one command. The returned func runs only after the result reaches labd,
 // so a reboot never swallows its own acknowledgement.
 func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
-	if err := a.refuseOutsideWindow(c); err != nil {
+	refused := a.refuseOutsideWindow(c)
+	if refused == nil {
+		refused = a.refuseByAccess(c)
+	}
+	if err := a.audit(ctx, c, refused); err != nil {
 		return nil, nil, err
+	}
+	if refused != nil {
+		return nil, nil, refused
 	}
 	fetch := a.fetch
 	switch c.Kind {
@@ -878,6 +908,7 @@ func (a *Agent) armLabBoot(args api.BootOnceArgs) error {
 	jobEnd := a.capAtWindowEnd(now.Add(time.Duration(args.JobSec) * time.Second))
 	d := newLabBootDeadlines(now, time.Duration(args.BootTimeoutSec)*time.Second, jobEnd)
 	d.WindowGated = a.volunteer()
+	d.NeedsFull = a.volunteer() && testsNeedFull(args.Tests)
 	dir := a.labBootDir()
 	for _, f := range []string{labBootContactFile, labBootSeenFile} {
 		if err := os.Remove(filepath.Join(dir, f)); err != nil && !os.IsNotExist(err) {

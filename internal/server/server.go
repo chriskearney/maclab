@@ -221,6 +221,9 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		if d.Kind == "" { // enrolled before Kinds existed: ./volunteer's Macs are Volunteers'
 			d.Kind = map[bool]string{false: api.KindLabOwned, true: api.KindVolunteer}[d.Volunteer]
 		}
+		if d.IsVolunteer() && d.AccessLevel == "" {
+			d.AccessLevel = api.AccessQualification // enrolled before Access levels existed
+		}
 		if d.State == api.StateBusy || d.State == api.StateRecovering {
 			d.State = api.StateOffline
 		}
@@ -461,6 +464,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
 	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
+	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
 	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
@@ -514,6 +518,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
 	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
 	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
+	m.HandleFunc("GET /api/devices/{name}/audit", s.maintainer(s.hAudit))
 	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
 	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
 	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
@@ -828,6 +833,9 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy,
 		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{})}
 	d.Volunteer = d.IsVolunteer()
+	if d.IsVolunteer() {
+		d.AccessLevel = api.AccessQualification // until its Volunteer chooses
+	}
 	v := newDev(s, d, hashSecret(secret))
 	v.enrolledWith = hashSecret(req.Token)
 	s.mu.Lock()
@@ -916,7 +924,9 @@ func (s *Server) hCheckin(w http.ResponseWriter, r *http.Request) {
 	if wait > 0 {
 		v.waitFor(r.Context(), wait, func() bool { return len(v.pending) > 0 || v.d.BootID != ci.BootID })
 	}
-	writeJSON(w, v.deliver(ci.BootID))
+	resp := v.deliver(ci.BootID)
+	resp.AuditHave = v.auditHaveNow()
+	writeJSON(w, resp)
 }
 
 func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +935,7 @@ func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentDev(r).report(rep)
+	agentDev(r).copyAudit(rep.Audit)
 	w.Write([]byte("ok"))
 }
 
@@ -1435,6 +1446,11 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 		}
 		if t.Name == "" || strings.ContainsAny(t.Name, "/ ") {
 			return nil, 400, fmt.Errorf("test name %q must be non-empty with no slashes or spaces", t.Name)
+		}
+	}
+	if why := needsFull(spec); why != "" {
+		if err := refuseAtAccessLevel(v.snapshot(), "Maintainer's script ("+why+")"); err != nil {
+			return nil, 403, err
 		}
 	}
 	if spec.Crash != "" && spec.Crash != "panic" {

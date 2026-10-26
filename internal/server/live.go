@@ -216,6 +216,10 @@ func (s *Server) hScreenshot(w http.ResponseWriter, r *http.Request) {
 	if v == nil {
 		return
 	}
+	if why := v.refuseWatching(); why != "" {
+		httpErr(w, 409, "%s", why)
+		return
+	}
 	v.shotMu.Lock()
 	defer v.shotMu.Unlock()
 	v.mu.Lock()
@@ -277,6 +281,10 @@ func (s *Server) hScreens(w http.ResponseWriter, r *http.Request) {
 func (s *Server) hLogs(w http.ResponseWriter, r *http.Request) {
 	v := s.devOr404(w, r)
 	if v == nil {
+		return
+	}
+	if why := v.refuseWatching(); why != "" {
+		httpErr(w, 409, "%s", why)
 		return
 	}
 	v.mu.Lock()

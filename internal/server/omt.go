@@ -389,6 +389,11 @@ func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 	case !res.KnownGood:
 		return "", fmt.Errorf("ran on lab kernel %s, which the installed packages don't describe; only known-good runs are published", res.Kernel)
 	}
+	if v := s.dev(j.Spec.Device); v != nil {
+		if d := v.snapshot(); d.IsVolunteer() && !d.Publish {
+			return "", fmt.Errorf("publishing is off on %s, a Volunteer's Mac: only its Volunteer turns it on (sudo lab-agent publish on)", d.Name)
+		}
+	}
 	// A baseline makes the kernel it booted the known-good one, but only once it
 	// finishes, after this upload; until then compare with what it booted.
 	if j.Spec.Baseline {

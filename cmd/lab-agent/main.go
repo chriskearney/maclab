@@ -24,8 +24,8 @@ const usage = `lab-agent: the Mac side of the test lab
   sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin|--stay-awake] [--volatile-journal]
         [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
                                   (a Volunteer's Mac refuses --autologin and --stay-awake)
-  sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, its Availability window
-                                  and Installed-run eligibility
+  sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, its Availability window,
+                                  Access level, Installed-run eligibility and latest Audit log entries
   sudo lab-agent window show|add|remove [<days> <HH:MM-HH:MM>]
                                   when the lab may use a Volunteer's Mac, e.g. window add mon-fri 19:00-07:00
   sudo lab-agent pause [--until YYYY-MM-DD]
@@ -34,6 +34,13 @@ const usage = `lab-agent: the Mac side of the test lab
                                   open the Mac to the lab now, until HH:MM
   sudo lab-agent notify --topic URL
                                   send this Mac's notices to your own ntfy topic
+  sudo lab-agent access qualification|full
+                                  what Maintainers may do: Qualification (the default) allows no lab exec,
+                                  --script or --gui-script; lowering it stops what it no longer allows
+  sudo lab-agent publish on|off   whether this Mac's omarchy-m-test reports may be published (off until
+                                  you turn it on); on lists the deletion links of those published
+  sudo lab-agent log              every Maintainer action on this Mac, from its own Audit log (works offline)
+  sudo lab-agent jobs             the lab's jobs on this Mac
   sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)

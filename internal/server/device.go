@@ -75,11 +75,14 @@ type dev struct {
 	// from it, and the first check-in of the boot after it.
 	endedBoot            string
 	endedHeard, nextSeen time.Time
+
+	auditMu   sync.Mutex
+	auditHave int64 // how much of the Mac's Audit log labd's copy holds; -1 until read
 }
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{})}
+		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), auditHave: -1}
 	return v
 }
 
@@ -193,6 +196,9 @@ func (v *dev) heartbeat(ci api.Checkin) {
 	if v.syncWindowLocked(ci.Window) {
 		persist = true
 	}
+	if v.syncAccessLocked(ci) {
+		persist = true
+	}
 	if v.capLeaseLocked() {
 		persist = true
 	}
@@ -263,7 +269,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 func (v *dev) deliver(bootID string) api.CheckinResponse {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	resp := api.CheckinResponse{IntervalMS: int(v.s.cfg.Interval / time.Millisecond), Kind: v.d.Kind}
+	resp := api.CheckinResponse{IntervalMS: int(v.s.cfg.Interval / time.Millisecond), Kind: v.d.Kind, Held: v.heldLocked()}
 	if bootID != v.d.BootID {
 		return resp
 	}
@@ -392,9 +398,19 @@ func nextCmdID() string {
 	return fmt.Sprintf("c%d-%d", time.Now().Unix(), cmdSeq.n)
 }
 
-func (v *dev) send(kind, job string, args any) string {
+// send queues a command for the Mac on behalf of the job's Maintainer.
+func (v *dev) send(kind, job string, args any) string { return v.sendFor("", kind, job, args) }
+
+// sendFor queues a command for the Mac on behalf of maintainer, or when that
+// is "" of whoever submitted the job; the Mac records who in its Audit log.
+func (v *dev) sendFor(maintainer, kind, job string, args any) string {
+	if maintainer == "" && job != "" {
+		if j, err := v.s.store.job(job); err == nil {
+			maintainer = j.Maintainer
+		}
+	}
 	b, _ := json.Marshal(args)
-	c := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Args: b}
+	c := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Maintainer: maintainer, Args: b}
 	v.mu.Lock()
 	v.pending = append(v.pending, c)
 	v.target[c.ID] = v.d.BootID
@@ -442,11 +458,12 @@ var errWindowClosed = errors.New("the Mac's Availability window is closed")
 type agentError struct {
 	kind, msg    string
 	windowClosed bool
+	accessLevel  bool
 }
 
 func (e agentError) Error() string { return e.kind + ": " + e.msg }
 func (e agentError) Is(target error) bool {
-	return target == errAgentRefused || (e.windowClosed && target == errWindowClosed)
+	return target == errAgentRefused || (e.windowClosed && target == errWindowClosed) || (e.accessLevel && target == errAccessLevel)
 }
 
 // call sends a command and waits for its result. It gives up early with
@@ -498,7 +515,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 	boot := v.d.BootID
 	name := v.d.Name
 	v.mu.Unlock()
-	id := v.send(kind, job, args)
+	id := v.sendFor(maintainerOf(ctx), kind, job, args)
 	deadline := v.s.now().Add(timeout)
 	var (
 		res            api.CommandResult
@@ -601,7 +618,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 		if res.Error == errDeviceLost.Error() {
 			return errDeviceLost
 		}
-		return agentError{kind, res.Error, res.WindowClosed}
+		return agentError{kind, res.Error, res.WindowClosed, res.AccessLevel}
 	}
 	if out != nil && len(res.Output) > 0 {
 		return json.Unmarshal(res.Output, out)
