@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/window"
 )
 
 // A Lab boot comes back to the Mac's own entry by itself, whatever breaks.
@@ -89,6 +90,9 @@ type labBootDeadlines struct {
 	Armed     time.Time `json:"armed"`      // when lab-agent armed the Lab boot
 	NoContact time.Time `json:"no_contact"` // reboot unless lab-agent has reached labd by then
 	Ceiling   time.Time `json:"ceiling"`    // reboot regardless
+	// WindowGated is a Volunteer's Mac: the boot also ends as soon as its
+	// Availability window closes, at its end or the Volunteer's Pause.
+	WindowGated bool `json:"window_gated,omitempty"`
 }
 
 // newLabBootDeadlines is the record for a Lab boot starting now: about twice
@@ -177,9 +181,12 @@ type labBootSeen struct {
 }
 
 // enforceLabBootDeadlines is the early unit: on a Lab boot, it reboots the Mac
-// once a deadline in the record under dir passes. On the Mac's own boot there
-// is nothing to do.
-func enforceLabBootDeadlines(ctx context.Context, c Clock, dir string, sys System, logf func(string, ...any)) error {
+// once a deadline in the record under lab-agent's work directory passes, or on
+// a Volunteer's Mac once the Availability window there closes. It needs
+// neither labd nor lab-agent, so the Mac is back on time with both gone. On
+// the Mac's own boot there is nothing to do.
+func enforceLabBootDeadlines(ctx context.Context, c Clock, workDir string, sys System, logf func(string, ...any)) error {
+	dir := filepath.Join(workDir, labBootDir)
 	bootID, _, cmdline := sys.Identity()
 	if !IsLabBoot(cmdline) {
 		return nil
@@ -196,11 +203,17 @@ func enforceLabBootDeadlines(ctx context.Context, c Clock, dir string, sys Syste
 		}
 	}
 	note()
-	tick := c.NewTicker(5 * time.Second)
+	// Every second: a Pause should hand the Mac back at once.
+	tick := c.NewTicker(time.Second)
 	defer tick.Stop()
 	for {
+		now := c.Now()
 		contacted := readTrim(filepath.Join(dir, labBootContactFile)) == bootID
-		if seen.Deadline = d.due(c.Now(), contacted); seen.Deadline != "" {
+		seen.Deadline = d.due(now, contacted)
+		if d.WindowGated && !windowOpen(workDir, now) {
+			seen.Deadline = api.DeadlineWindowClosed
+		}
+		if seen.Deadline != "" {
 			note()
 			syncDisks()
 			logf("Lab boot %s passed its %s deadline: rebooting to the known-good kernel", bootID, seen.Deadline)
@@ -214,9 +227,17 @@ func enforceLabBootDeadlines(ctx context.Context, c Clock, dir string, sys Syste
 	}
 }
 
+// windowOpen is whether the Availability window in workDir is open at now.
+// Settings that can't be read count as closed, as lab-agent refuses lab
+// commands then.
+func windowOpen(workDir string, now time.Time) bool {
+	s, _, err := readWindow(workDir)
+	return err == nil && window.Evaluate(s, now).Open
+}
+
 // EnforceLabBootDeadlines runs the early unit on this Mac.
 func EnforceLabBootDeadlines(ctx context.Context, workDir string) error {
-	return enforceLabBootDeadlines(ctx, WallClock, filepath.Join(workDir, labBootDir), &Linux{WorkDir: workDir},
+	return enforceLabBootDeadlines(ctx, WallClock, workDir, &Linux{WorkDir: workDir},
 		func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) })
 }
 

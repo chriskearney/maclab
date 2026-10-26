@@ -453,6 +453,9 @@ func (s *Server) omtPublish(ctx context.Context, j *api.Job) (string, error) {
 	return url, err
 }
 
+// omtHolder holds the jobs omtScheduler queues.
+const omtHolder = "maclab-omt"
+
 // omtScheduler re-runs omarchy-m-test on each Mac's known-good kernel once
 // every OMTEvery, publishing the result if that's on: the reference that lab
 // kernels are compared with stays fresh, and so does the site.
@@ -476,7 +479,7 @@ func (s *Server) omtScheduler() {
 			if l := d.Lease; l != nil && s.now().Before(l.Expires) {
 				continue
 			}
-			spec := api.JobSpec{Device: d.Name, Holder: "maclab-omt", Publish: s.cfg.OMTPublish}
+			spec := api.JobSpec{Device: d.Name, Holder: omtHolder, Publish: s.cfg.OMTPublish}
 			length := (&jobRun{s: s, v: v, j: &api.Job{Spec: spec}, boot: s.cfg.BootTimeout}).expectedLength()
 			v.mu.Lock()
 			held := v.windowHoldLocked(length) != ""

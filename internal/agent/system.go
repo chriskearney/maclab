@@ -63,6 +63,10 @@ type System interface {
 	// an error if it doesn't before ctx ends. The agent feeds the watchdog
 	// only while it answers.
 	PingInit(ctx context.Context) error
+	// InhibitSuspend keeps the machine from suspending, for the reason why,
+	// until release; a boot ends it too. It never inhibits idle, so the idle
+	// lock and screensaver carry on.
+	InhibitSuspend(why string) (release func(), err error)
 
 	// Alive is false while a simulated machine is hung. Always true on Linux.
 	Alive() bool

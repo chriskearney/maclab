@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os/exec"
+	"sync"
 	"time"
 )
 
@@ -76,4 +78,72 @@ func parseSleepSignal(line []byte) (sleeping, ok bool) {
 		return false, false
 	}
 	return m.Payload.Data[0], true
+}
+
+// inhibitSuspendArgs is the command line that keeps the Mac from suspending
+// while a job holds it, for the reason why. It blocks sleep only: idle stays
+// free, so the Volunteer's idle lock and screensaver keep working.
+func inhibitSuspendArgs(why string) []string {
+	return []string{"systemd-inhibit", "--what=sleep", "--mode=block", "--who=lab-agent", "--why=" + why, "sleep", "infinity"}
+}
+
+func (l *Linux) InhibitSuspend(why string) (func(), error) {
+	args := inhibitSuspendArgs(why)
+	cmd := exec.Command(args[0], args[1:]...)
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("systemd-inhibit: %w", err)
+	}
+	return func() {
+		cmd.Process.Kill()
+		cmd.Wait()
+	}, nil
+}
+
+// awakeHold is the suspend inhibitor lab-agent holds while a job holds the Mac.
+type awakeHold struct {
+	mu      sync.Mutex
+	bootID  string // the boot it was taken on, which ends it
+	release func()
+}
+
+// keepAwake keeps a Volunteer's Mac from suspending while a job holds it: on
+// a Lab boot, or while one of a job's commands runs. Nothing wakes a Mac that
+// sleeps before a job starts. A Lab-owned Mac stays awake by its own settings.
+func (a *Agent) keepAwake() {
+	bootID, _, cmdline := a.sys.Identity()
+	job := ""
+	if a.volunteer() {
+		a.mu.Lock()
+		for _, r := range a.running {
+			if r.c.JobID != "" && r.bootID == bootID {
+				job = r.c.JobID
+				break
+			}
+		}
+		a.mu.Unlock()
+		if job == "" && IsLabBoot(cmdline) {
+			job = jobTag(cmdline)
+			if job == "" {
+				job = "on a Lab boot"
+			}
+		}
+	}
+	h := &a.awake
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.release != nil && h.bootID != bootID {
+		h.release = nil // gone with its boot
+	}
+	switch {
+	case job != "" && h.release == nil:
+		release, err := a.sys.InhibitSuspend("maclab job " + job + " holds the Mac")
+		if err != nil {
+			a.log.Printf("keep the Mac awake: %v", err)
+			return
+		}
+		h.release, h.bootID = release, bootID
+	case job == "" && h.release != nil:
+		h.release()
+		h.release = nil
+	}
 }

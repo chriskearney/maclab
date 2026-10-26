@@ -126,7 +126,8 @@ reboot lands on the Mac's own entry.
   `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout,
   unless lab-agent reaches labd first) and a **hard ceiling** (the job's end).
   `maclab-lab-boot-deadlines.service`, an early unit with no network
-  dependency, reboots a Lab boot when either passes. labd waits for that
+  dependency, reboots a Lab boot when either passes, and on a Volunteer's Mac
+  as soon as its Availability window closes. labd waits for that
   before its recovery ladder, so a Lab-owned Mac's OOB hard resets are a later rung.
 - After any recovery, lab-agent uploads the lost boot's journal (by boot ID)
   and any pstore/ramoops records, as `prevboot/` in the job.
@@ -400,6 +401,16 @@ on a Volunteer's Mac only inside its window, on AC power, and when the job's
 expected length fits in what is left of the window; until then the job stays
 `queued`. `--omt-every` refreshes wait for a window the same way. A Lab boot's
 hard ceiling is the window's end if that comes before the job's end.
+
+At the window's end, or on `pause`, lab-agent stops the job itself, on its own
+clock and with labd or the tailnet down too: staging stops where it is, and a
+Lab boot (one that hasn't reached labd yet included) reboots to the Known-good
+kernel within a second or two. The job ends `incomplete`, not failed, and labd
+queues it again as a new job for a later window. A lease on a Volunteer's Mac
+ends with the window at the latest, and `pause` ends it. While a job holds the
+Mac, lab-agent blocks suspend (`systemd-inhibit --what=sleep --mode=block`)
+and releases it after; the idle lock and screensaver are never touched.
+Nothing wakes a sleeping Mac: a window it sleeps through is missed.
 
 A Mac enrolled with `./volunteer` (see [Volunteer a Mac](#volunteer-a-mac)) is a
 Volunteer's too, named and reached by the tailnet login that ran it.

@@ -232,6 +232,36 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		outcome, summary = r.ir.seal(outcome, summary, at)
 	}
 	r.finishAt(outcome, summary, at)
+	if outcome == api.OutcomeIncomplete {
+		r.retry()
+	}
+}
+
+// windowCut is the outcome of a job the Mac's Availability window closing
+// (its end, or the Volunteer's Pause) cut short, what: incomplete, not failed.
+// lab-agent stopped it by itself.
+func windowCut(what string) (string, string) {
+	return api.OutcomeIncomplete, "the Mac's Availability window closed " + what
+}
+
+// retry queues an incomplete job again as a new job; like any job on a
+// Volunteer's Mac, it waits for a window it fits in. labd's own omarchy-m-test
+// refreshes aren't retried: the next one is due anyway.
+func (r *jobRun) retry() {
+	if r.j.Spec.Holder == omtHolder {
+		return
+	}
+	spec := r.j.Spec
+	if spec.Source != "" && spec.Kernel != "" {
+		// the kernel is built: the retry boots it again
+		spec.Source, spec.Config = "", ""
+	}
+	j, _, err := r.s.submit(r.j.Maintainer, spec, r.j.ID)
+	if err != nil {
+		r.ev("not retried: %v", err)
+		return
+	}
+	r.ev("retried in a later window as job %s", j.ID)
 }
 
 // canceledAfter is the outcome of a job canceled while it ran, given what
@@ -260,7 +290,7 @@ func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 		j.Events = append(j.Events, api.JobEvent{Time: at, Msg: "done: " + outcome + ": " + summary})
 	})
 	r.s.log.Printf("job %s done: %s: %s", r.j.ID, outcome, summary)
-	if outcome != api.OutcomePass && outcome != api.OutcomeCanceled {
+	if outcome != api.OutcomePass && outcome != api.OutcomeCanceled && outcome != api.OutcomeIncomplete {
 		r.s.notify(Notification{Device: r.j.Spec.Device, Title: fmt.Sprintf("job %s on %s: %s", r.j.ID, r.j.Spec.Device, outcome), Body: summary, Priority: "low"})
 	}
 }
@@ -303,9 +333,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
 	}
 	args.WatchdogOpenTimeoutSec = int(r.s.cfg.WatchdogOpenTimeout / time.Second)
-	sr, why := r.stage(ctx, args)
-	if why != "" {
-		return api.OutcomeStageFailed, why
+	sr, outcome, why := r.stage(ctx, args)
+	if outcome != "" {
+		return outcome, why
 	}
 	v.mu.Lock()
 	v.dirty = true
@@ -324,7 +354,10 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	t0 := r.s.now()
 	r.armedBoot, r.armedAt = oldBoot, t0
 	arm := api.BootOnceArgs{Entry: sr.Entry, BootTimeoutSec: int(r.boot / time.Second), JobSec: int(r.labBootJob() / time.Second)}
-	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); err != nil {
+	if err := v.call(ctx, api.CmdBootOnce, j.ID, arm, 2*time.Minute, nil); errors.Is(err, errWindowClosed) {
+		r.armedBoot = "" // nothing was armed: there is no reboot for restore to wait for
+		return windowCut("before the Lab boot (" + err.Error() + ")")
+	} else if err != nil {
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
 	}
 	r.ev("one-shot armed, rebooting into %s", sr.Entry)
@@ -343,7 +376,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		o, cause := r.classify(t0, steps)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.FellBack = true })
 		r.ev("came back on %s instead of the test entry: %s", d.Kernel, cause)
-		if lost := r.collectLost(ctx); lost.Deadline != "" {
+		if lost := r.collectLost(ctx); lost.Deadline == api.DeadlineWindowClosed {
+			return windowCut("during the Lab boot of " + sr.KernelRelease + ", which went back to " + d.Kernel + " before it reached labd")
+		} else if lost.Deadline != "" {
 			return api.OutcomeLostContact, fmt.Sprintf("%s booted but never reached labd; its %s deadline rebooted the Mac to %s",
 				sr.KernelRelease, lost.Deadline, d.Kernel)
 		}
@@ -379,6 +414,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, r.testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
+		}
+		if errors.Is(err, errWindowClosed) {
+			return windowCut("before test " + t.Name + " (" + err.Error() + ")")
 		}
 		cut := err != nil && ctx.Err() != nil // by a cancel
 		if err != nil {
@@ -510,30 +548,39 @@ var stageBackoff = []time.Duration{30 * time.Second, 2 * time.Minute}
 // files, modules and boot entry; the job fails instead. The same error twice
 // in a row looks permanent (a broken package, a refused cmdline) and ends it
 // early.
-func (r *jobRun) stage(ctx context.Context, args api.StageArgs) (api.StageResult, string) {
+func (r *jobRun) stage(ctx context.Context, args api.StageArgs) (sr api.StageResult, outcome, why string) {
 	attempts := len(stageBackoff) + 1
 	how := fmt.Sprintf(". Retry with `lab retry %s`", r.j.ID)
 	last := ""
 	for n := 1; ; n++ {
-		var sr api.StageResult
+		sr = api.StageResult{}
 		boot := r.v.snapshot().BootID
 		err := r.v.call(ctx, api.CmdStage, r.j.ID, args, r.s.cfg.StageTimeout, &sr)
 		if err == nil {
-			return sr, ""
+			return sr, "", ""
 		}
 		if ctx.Err() != nil {
-			return sr, "staging failed: " + err.Error()
+			return sr, api.OutcomeStageFailed, "staging failed: " + err.Error()
+		}
+		if errors.Is(err, errWindowClosed) {
+			outcome, why := windowCut("while staging (" + err.Error() + ")")
+			return sr, outcome, why
+		}
+		if errors.Is(err, errDeviceLost) && r.v.windowClosed() {
+			// Out of reach as its window closed: lab-agent stops staging by itself.
+			outcome, why := windowCut("while staging, with the Mac out of reach")
+			return sr, outcome, why
 		}
 		reason := strings.TrimPrefix(err.Error(), api.CmdStage+": ")
 		if !errors.Is(err, errAgentRefused) && r.v.snapshot().BootID == boot {
-			return sr, "staging failed: " + reason + " (not tried again: the Mac may still be staging it)" + how
+			return sr, api.OutcomeStageFailed, "staging failed: " + reason + " (not tried again: the Mac may still be staging it)" + how
 		}
 		r.ev("staging attempt %d of %d failed: %s", n, attempts, reason)
 		if errText(reason) == last {
-			return sr, "couldn't stage: " + reason + " (the same error twice: looks permanent, not retrying)" + how
+			return sr, api.OutcomeStageFailed, "couldn't stage: " + reason + " (the same error twice: looks permanent, not retrying)" + how
 		}
 		if n == attempts {
-			return sr, fmt.Sprintf("couldn't stage: %s (%d attempts failed)%s", reason, attempts, how)
+			return sr, api.OutcomeStageFailed, fmt.Sprintf("couldn't stage: %s (%d attempts failed)%s", reason, attempts, how)
 		}
 		last = errText(reason)
 		// what the failed attempt left behind may be what is in the way
@@ -543,7 +590,7 @@ func (r *jobRun) stage(ctx context.Context, args api.StageArgs) (api.StageResult
 		r.ev("staging again in %s", stageBackoff[n-1])
 		select {
 		case <-ctx.Done():
-			return sr, "canceled between staging attempts"
+			return sr, api.OutcomeStageFailed, "canceled between staging attempts"
 		case <-time.After(stageBackoff[n-1]):
 		}
 	}
@@ -769,7 +816,11 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	})
 	if err == nil && ok {
 		r.ev("back after %.0fs", r.s.since(lost).Seconds())
-		if lostBoot := r.collectLost(ctx); lostBoot.Deadline != "" {
+		switch lostBoot := r.collectLost(ctx); lostBoot.Deadline {
+		case "":
+		case api.DeadlineWindowClosed:
+			return windowCut("during test " + test + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
+		default:
 			o, cause = api.OutcomeLostContact, fmt.Sprintf("labd lost the Lab boot and its %s deadline rebooted it", lostBoot.Deadline)
 		}
 	}

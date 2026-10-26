@@ -193,6 +193,9 @@ func (v *dev) heartbeat(ci api.Checkin) {
 	if v.syncWindowLocked(ci.Window) {
 		persist = true
 	}
+	if v.capLeaseLocked() {
+		persist = true
+	}
 	if v.d.IsVolunteer() && ci.NtfyOwnURL != "" && v.d.NtfyOwnURL != ci.NtfyOwnURL { // a check-in without it (file unreadable) keeps the stored one
 		v.d.NtfyOwnURL = ci.NtfyOwnURL
 		persist = true
@@ -432,10 +435,19 @@ func (v *dev) waitFor(ctx context.Context, timeout time.Duration, cond func() bo
 // the command being lost or timing out, when it may or may not have run.
 var errAgentRefused = errors.New("the agent returned an error")
 
-type agentError struct{ kind, msg string }
+// errWindowClosed matches lab-agent refusing or stopping a command because
+// the Mac's Availability window is closed.
+var errWindowClosed = errors.New("the Mac's Availability window is closed")
 
-func (e agentError) Error() string        { return e.kind + ": " + e.msg }
-func (e agentError) Is(target error) bool { return target == errAgentRefused }
+type agentError struct {
+	kind, msg    string
+	windowClosed bool
+}
+
+func (e agentError) Error() string { return e.kind + ": " + e.msg }
+func (e agentError) Is(target error) bool {
+	return target == errAgentRefused || (e.windowClosed && target == errWindowClosed)
+}
 
 // call sends a command and waits for its result. It gives up early with
 // errDeviceLost if the Mac reboots or stops heartbeating.
@@ -589,7 +601,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 		if res.Error == errDeviceLost.Error() {
 			return errDeviceLost
 		}
-		return agentError{kind, res.Error}
+		return agentError{kind, res.Error, res.WindowClosed}
 	}
 	if out != nil && len(res.Output) > 0 {
 		return json.Unmarshal(res.Output, out)

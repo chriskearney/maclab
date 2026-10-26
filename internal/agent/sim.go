@@ -101,6 +101,11 @@ type Sim struct {
 	// ends, as lab-agent's early systemd unit does; the agent sets it.
 	earlyUnit func(ctx context.Context)
 	endBoot   context.CancelFunc
+	down      chan struct{} // closed when the current boot ends
+
+	testLength time.Duration    // see SetTestLength
+	inhibitors map[int][]string // held inhibitors' --what names, by token; a boot clears them
+	inhibitSeq int
 }
 
 // simDisk is what a snapper snapshot holds of the simulated @ (packages and
@@ -129,6 +134,7 @@ func NewSim(workDir string) *Sim {
 	s.cmdline = "root=UUID=sim rw"
 	s.alive = true
 	s.kmsg = make(chan string, 100)
+	s.down = make(chan struct{})
 	return s
 }
 
@@ -319,6 +325,9 @@ func (s *Sim) boot(last string) {
 		s.endBoot()
 		s.endBoot = nil
 	}
+	close(s.down)
+	s.down = make(chan struct{})
+	s.inhibitors = nil
 	s.mu.Unlock()
 	if down != nil {
 		down()
@@ -480,10 +489,70 @@ func (s *Sim) wake(announce bool) {
 	}
 }
 
+// SetTestLength makes every test the Sim runs take d of wall time, unless its
+// context ends or its boot ends first (the Mac reboots or powers off); 0, the
+// default, is the usual near-instant test. Safe to call while the agent runs.
+func (s *Sim) SetTestLength(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.testLength = d
+}
+
+// InhibitSuspend takes the inhibitor the real Mac's command line takes.
+func (s *Sim) InhibitSuspend(why string) (func(), error) {
+	var what []string
+	for _, a := range inhibitSuspendArgs(why) {
+		if v, ok := strings.CutPrefix(a, "--what="); ok {
+			what = append(what, strings.Split(v, ":")...)
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.inhibitSeq++
+	tok := s.inhibitSeq
+	if s.inhibitors == nil {
+		s.inhibitors = map[int][]string{}
+	}
+	s.inhibitors[tok] = what
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		delete(s.inhibitors, tok)
+	}, nil
+}
+
+// Inhibitors is what lab-agent holds inhibited on the Mac now, named as
+// systemd-inhibit's --what names them ("sleep", "idle", ...). A boot ends
+// every inhibitor taken on it.
+func (s *Sim) Inhibitors() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var names []string
+	for _, what := range s.inhibitors {
+		for _, w := range what {
+			if !slices.Contains(names, w) {
+				names = append(names, w)
+			}
+		}
+	}
+	return names
+}
+
 func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	s.mu.Lock()
-	b := s.behavior
+	b, length, down := s.behavior, s.testLength, s.down
 	s.mu.Unlock()
+	if length > 0 {
+		wait := time.NewTimer(length)
+		defer wait.Stop()
+		select {
+		case <-wait.C:
+		case <-ctx.Done():
+			return api.TestResult{Name: t.Name, ExitCode: -1, Error: "stopped: " + context.Cause(ctx).Error()}
+		case <-down:
+			return api.TestResult{Name: t.Name, Error: "machine went away"}
+		}
+	}
 	if t.Builtin == "omarchy-m-test" {
 		return s.omtReport(t, outDir, b)
 	}

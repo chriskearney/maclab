@@ -235,6 +235,9 @@ type CommandResult struct {
 	OK     bool            `json:"ok"`
 	Error  string          `json:"error,omitempty"`
 	Output json.RawMessage `json:"output,omitempty"`
+	// WindowClosed is lab-agent refusing or stopping the command because the
+	// Mac's Availability window is closed: its end came, or its Volunteer paused.
+	WindowClosed bool `json:"window_closed,omitempty"`
 }
 
 type StageArgs struct {
@@ -315,11 +318,17 @@ type Deadline string
 const (
 	DeadlineNoContact Deadline = "no_contact" // lab-agent never reached labd in time
 	DeadlineCeiling   Deadline = "ceiling"    // the hard ceiling: the job's end
+	// DeadlineWindowClosed is the Availability window closing: its end, or
+	// the Volunteer's Pause.
+	DeadlineWindowClosed Deadline = "window_closed"
 )
 
 func (d Deadline) String() string {
-	if d == DeadlineCeiling {
+	switch d {
+	case DeadlineCeiling:
 		return "hard ceiling"
+	case DeadlineWindowClosed:
+		return "Availability window closing"
 	}
 	return "no-contact"
 }
@@ -415,6 +424,9 @@ const (
 	OutcomeBuildFailed = "build_failed"
 	OutcomeInfra       = "infra_error"
 	OutcomeCanceled    = "canceled"
+	// OutcomeIncomplete is a job its Availability window's end or the
+	// Volunteer's Pause cut short: not a failure, and retried in a later window.
+	OutcomeIncomplete = "incomplete"
 )
 
 type JobSpec struct {

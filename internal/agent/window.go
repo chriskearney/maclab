@@ -25,7 +25,13 @@ const windowFile = "availability.json"
 // loadWindow reads the Mac's window settings in its local time zone. A Mac
 // whose Volunteer has set nothing has none (set false), and is closed.
 func loadWindow(cfg *Config) (s window.Settings, set bool, err error) {
-	b, err := os.ReadFile(filepath.Join(cfg.workDir(), windowFile))
+	return readWindow(cfg.workDir())
+}
+
+// readWindow is loadWindow from the work directory alone, as the early unit
+// reads it.
+func readWindow(workDir string) (s window.Settings, set bool, err error) {
+	b, err := os.ReadFile(filepath.Join(workDir, windowFile))
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		err = nil
@@ -249,6 +255,10 @@ func windowGated(kind string) bool {
 // window; labd records the error on the job.
 var errRefusedOutsideWindow = errors.New("refused")
 
+// errStoppedAtWindowClose is lab-agent stopping a lab command that was
+// running when the window closed.
+var errStoppedAtWindowClose = errors.New("stopped")
+
 // refuseOutsideWindow is nil when a Volunteer's Mac may run c now. A reboot
 // out of a Lab boot goes back to the Mac's own system, so it always may.
 func (a *Agent) refuseOutsideWindow(c api.Command) error {
@@ -294,4 +304,47 @@ func (a *Agent) capAtWindowEnd(ceiling time.Time) time.Time {
 		return st.End
 	}
 	return ceiling
+}
+
+// watchWindow stops lab work on a Volunteer's Mac as soon as its Availability
+// window closes, at its end or on a Pause, on lab-agent's own clock: it needs
+// neither labd nor the tailnet. On the Mac's own boot it stops every lab
+// command still running (staging, say), which ends with the window closed. A
+// Lab boot is the early unit's to end: it reboots to the Known-good kernel.
+// It also keeps the Mac awake while a job holds it, a Lab boot that can't
+// reach labd included. An Installed run's Rollback at the window's end
+// belongs here too.
+func (a *Agent) watchWindow(ctx context.Context) {
+	tick := a.clock().NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C():
+		}
+		a.keepAwake()
+		if _, _, cmdline := a.sys.Identity(); !a.volunteer() || IsLabBoot(cmdline) {
+			continue
+		}
+		a.mu.Lock()
+		var gated []runningCmd
+		for _, r := range a.running {
+			if windowGated(r.c.Kind) {
+				gated = append(gated, r)
+			}
+		}
+		a.mu.Unlock()
+		if len(gated) == 0 {
+			continue
+		}
+		now := a.clock().Now()
+		s, _, err := loadWindow(a.cfg)
+		if err == nil && window.Evaluate(s, now).Open {
+			continue
+		}
+		for _, r := range gated {
+			r.stop(fmt.Errorf("%w: %s's Availability window closed (%s), so lab-agent stopped %s", errStoppedAtWindowClose, a.cfg.Name, describeWindow(s, now), r.c.Kind))
+		}
+	}
 }

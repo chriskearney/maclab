@@ -60,6 +60,10 @@ _Avoid_: Supervised window
 **Pause**:
 A Volunteer closing their Mac's Availability window early: by default only the current window, or until a date they choose. Work in progress stops as it would at the window's end.
 
+**Incomplete**:
+How a job ends when its Availability window's end or a Pause cuts it short: lab-agent stops it and puts the Mac back on its own system by itself. It is not a failure, and labd tries it again as a new job in a later window.
+_Avoid_: Interrupted, aborted (aborted by the Volunteer is a different ending)
+
 **Open now**:
 A Volunteer opening their Mac's Availability window by hand, from now until a time they choose, whatever its weekly schedule or a Pause says. It merges with a scheduled window it runs into.
 

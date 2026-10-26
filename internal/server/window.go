@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/window"
 )
 
@@ -47,4 +48,45 @@ func (v *dev) syncWindowLocked(s *window.Settings) bool {
 	now, _ := json.Marshal(s)
 	v.d.Window = s
 	return string(old) != string(now)
+}
+
+// openUntilLocked is when a Volunteer's Mac's Availability window, open now,
+// ends; zero while it is closed. Caller holds v.mu.
+func (v *dev) openUntilLocked() time.Time {
+	var s window.Settings
+	if v.d.Window != nil {
+		s = *v.d.Window
+	}
+	if st := window.Evaluate(s, v.s.now()); st.Open {
+		return st.End
+	}
+	return time.Time{}
+}
+
+// capLeaseLocked ends a lease on a Volunteer's Mac with its Availability
+// window at the latest: at the window's end, or now once it has closed (a
+// Pause). An end that moves later doesn't stretch a lease again. It says
+// whether the lease changed. Caller holds v.mu.
+func (v *dev) capLeaseLocked() bool {
+	l := v.d.Lease
+	if l == nil || !v.d.IsVolunteer() {
+		return false
+	}
+	end := v.openUntilLocked()
+	if end.IsZero() {
+		end = v.s.now()
+	}
+	if !l.Expires.After(end) {
+		return false
+	}
+	v.d.Lease = &api.Lease{Holder: l.Holder, Expires: end}
+	return true
+}
+
+// windowClosed is whether labd's copy of a Volunteer's Mac's Availability
+// window is closed now; a Lab-owned Mac's never is.
+func (v *dev) windowClosed() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.d.IsVolunteer() && v.openUntilLocked().IsZero()
 }
