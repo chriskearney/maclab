@@ -167,8 +167,8 @@ func (p Plan) Validate() error {
 	if err := decodeValue(p.Inputs, &input); err != nil {
 		return fmt.Errorf("inputs: %w", err)
 	}
-	if len(p.Phases) == 0 || len(p.Phases) > 100 {
-		return errors.New("need 1..100 phases")
+	if len(p.Phases) == 0 || len(p.Phases) > 256 {
+		return errors.New("need 1..256 phases")
 	}
 	known := map[string]bool{"inputs": true, "workflow": true}
 	for _, x := range p.Helpers {
