@@ -99,3 +99,26 @@ class LeaseBudgetRegression(unittest.TestCase):
   p={'device':'m1','holder':'coordinator'};b={'expected_boot_id':'actual','expected_kernel':'old6'};d={'name':'m1','state':'ready','alive':True,'boot_id':'actual','kernel':'old6','lease':{'holder':'coordinator','expires':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=1)).isoformat()}}
   with self.assertRaisesRegex(RuntimeError,'expire inside phase'):controller.state_gate(d,p,b,True,990)
   d['lease']['expires']=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=1000)).isoformat();controller.state_gate(d,p,b,True,990)
+
+class PreparedFileRealFS(unittest.TestCase):
+ def setUp(self):CacheTests.setUp(self)
+ def tearDown(self):CacheTests.tearDown(self)
+ def fixture(self):
+  import base64
+  source=b'# CPU backup source fixture\n';authority=b'{"CPU":"authority fixture"}'
+  self.profile['backup_source']={'sha256':hashlib.sha256(source).hexdigest(),'bytes':len(source)};self.profile['authority_source']={'sha256':hashlib.sha256(authority).hexdigest(),'bytes':len(authority)}
+  target.stage_cache(self.profile,{},time.monotonic()+10,uid=self.uid)
+  raw={'backup-m1.py':source,'STANDING-BOOT-AUTHORITY.json':authority,'backup-spec.json':b'{}','backup-clearance.json':b'{}','BACKUP-SOURCE-FREEZE.json':b'{}'}
+  files={n:{'sha256':hashlib.sha256(b).hexdigest(),'bytes':len(b),'base64':base64.b64encode(b).decode()} for n,b in raw.items()}
+  return {'expected_boot_id':'cpu-boot','prepared_inputs':{'packet':self.profile['packet'],'boot_id':'cpu-boot','files':files}}
+ def test_fixed_prepared_closure_writes_once_reuses_exact(self):
+  request=self.fixture();out=target.stage_prepared(self.profile,request,time.monotonic()+10,'backup',uid=self.uid);self.assertEqual(out['status'],'EXACT_INPUTS_STAGED_ONLY');self.assertFalse(out['package_changes'])
+  again=target.stage_prepared(self.profile,request,time.monotonic()+10,'backup',uid=self.uid);self.assertTrue(all(x['reused_exact_input'] for x in again['files'].values()))
+ def test_foreign_partial_input_is_not_overwritten(self):
+  request=self.fixture();p=self.packet/'backup-m1.py';p.write_bytes(b'partial untrusted bytes');p.chmod(0o600)
+  with self.assertRaisesRegex(RuntimeError,'hash/size mismatch'):target.stage_prepared(self.profile,request,time.monotonic()+10,'backup',uid=self.uid)
+  self.assertEqual(p.read_bytes(),b'partial untrusted bytes')
+ def test_extra_or_replaced_source_rejected_before_writes(self):
+  request=self.fixture();request['prepared_inputs']['files']['credential']={'sha256':'a'*64,'bytes':1,'base64':'eA=='}
+  with self.assertRaisesRegex(RuntimeError,'exact prepared input closure'):target.stage_prepared(self.profile,request,time.monotonic()+10,'backup',uid=self.uid)
+  self.assertFalse((self.packet/'backup-m1.py').exists())

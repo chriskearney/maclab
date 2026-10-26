@@ -6,7 +6,7 @@ import argparse,base64,datetime,hashlib,json,os,shlex,stat,time,urllib.error,url
 from pathlib import Path
 
 LIMIT=4*1024**2
-ALLOWED={'inventory-cache','stage-cache','invoke-packet'}
+ALLOWED={'inventory-cache','stage-cache','invoke-packet','stage-backup-inputs','capture-original','collect-backup','stage-supplement-inputs','capture-supplement','collect-supplement'}
 def need(v,msg):
  if not v:raise RuntimeError(msg)
 def read_pin(pin):
@@ -42,11 +42,12 @@ def run(binding,api=None):
  # closure; do not dynamically import arbitrary plan modules.
  pin=p['target_adapter'];need(Path(pin['path']).name=='target.py','fixed target adapter basename required');source=read_pin(pin)
  need(source==Path(__file__).with_name('target.py').read_bytes(),'controller/target closure mismatch')
- c=api or API(config());mutates=action!='inventory-cache';d=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe=''));binding=dict(binding)
+ c=api or API(config());mutates=action not in ('inventory-cache','collect-backup','collect-supplement');d=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe=''));binding=dict(binding)
  if not mutates and binding.get('expected_boot_id') is None:binding['expected_boot_id']=d['boot_id']
  state_gate(d,p,binding,mutates,int(binding['deadline_seconds'])+90)
  payload={k:binding[k] for k in ('action','profile','expected_boot_id','expected_kernel','deadline_seconds')}
- if 'entry' in binding:payload['entry']=binding['entry']
+ for extra in ['entry','prepared_inputs','receipt_sha256']:
+  if extra in binding:payload[extra]=binding[extra]
  if mutates:
   authority=read_pin(p['authority_source']);a=json.loads(authority)
   need(a['authorization_is_persistent'] is True and a['manual_saved_work_confirmed'] is False and a['manual_nearby_recovery_confirmed'] is False and a['does_not_lift_existing_holds'] is True,'standing authority facts mismatch')
@@ -59,12 +60,13 @@ def run(binding,api=None):
  command=shlex.join(argv);need(len(command.encode())<=120000,'fixed transport ceiling exceeded')
  timeout=int(binding['deadline_seconds']);need(1<=timeout<=1900,'bounded phase timeout required')
  if action=='invoke-packet':need(timeout==1900,'owner/PacketC requires complete1900-second outer cleanup envelope')
+ elif action=='capture-original':need(timeout==1200,'full900s capture and cleanup requires1200s envelope')
  else:need(timeout<=900,'metadata/cache deadline ceiling')
  result=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe='')+'/exec',{'command':command,'timeout_sec':timeout+60},timeout+90)
  if result['exit_code']!=0 or result.get('via')!='agent':return {'status':'M1_TARGET_FAILED','device':p['device'],'boot_id':d['boot_id'],'actual_exec':result,'source_sha256':pin['sha256']}
  # Preserve the authentic full API receipt in caller stdout for the workflow
  # journal; a success status is never synthesized from missing target evidence.
  out={'status':'OWNER_EXIT_ONLY_REQUIRES_INDEPENDENT_RECEIPT_VALIDATION','exit_code':result['exit_code'],'completion_claim':False} if action=='invoke-packet' else json.loads(result['stdout']);need(isinstance(out,dict),'target result is not an object')
- return {'status':'M1_'+action.upper().replace('-','_')+'_OBSERVED','device':p['device'],'boot_id':d['boot_id'],'kernel':d['kernel'],'actual_exec':result,'target':out,'source_sha256':pin['sha256'],'no_new_user_confirmation':True}
+ return {'status':'M1_'+action.upper().replace('-','_')+'_OBSERVED','device':p['device'],'boot_id':d['boot_id'],'kernel':d['kernel'],'actual_exec':result,'target':out,'source_sha256':pin['sha256'],'controller_state':{k:d.get(k) for k in ['name','state','alive','boot_id','kernel','lease','active_job','queued']},'no_new_user_confirmation':True}
 if __name__=='__main__':
  a=argparse.ArgumentParser();a.add_argument('--binding',type=Path,required=True);x=a.parse_args();print(json.dumps(run(json.loads(x.binding.read_bytes())),separators=(',',':')))

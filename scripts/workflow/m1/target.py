@@ -89,7 +89,10 @@ def current_observation(p,boot,deadline):
  for version in [p['old_kernel'],p['candidate_kernel']]:
   for marker in ['.maclab-job','.maclab-owned','.keep-local-kernel']:
    name=str(Path('/usr/lib/modules')/version/marker);markers[name]=os.path.lexists(name);need(not markers[name],'unowned module marker prevents safe test preparation')
- return {'schema':'maclab.m1-fresh-observation/1','boot_id':boot,'kernel':os.uname().release,'packages':versions,'files':observed,'original_guard_mismatches':mismatch,'old_module_tree_sha256':module_sha,'module_markers':markers,'esp_free_bytes':os.statvfs('/boot/efi').f_bavail*os.statvfs('/boot/efi').f_frsize,'no_package_changes':True,'no_boot_changes':True,'historical_receipts_reused':False}
+ parent=Path(os.readlink('/proc/'+str(os.getppid())+'/exe'))
+ need('lab-agent' in parent.name,'current metadata must come directly from lab-agent')
+ with held_regular(parent,64*1024**2) as (fd,st):parent_image={'path':str(parent),'sha256':hash_fd(fd,st.st_size,deadline),'bytes':st.st_size}
+ return {'schema':'maclab.m1-fresh-observation/1','agent_parent':parent_image,'boot_id':boot,'kernel':os.uname().release,'packages':versions,'files':observed,'original_guard_mismatches':mismatch,'old_module_tree_sha256':module_sha,'module_markers':markers,'esp_free_bytes':os.statvfs('/boot/efi').f_bavail*os.statvfs('/boot/efi').f_frsize,'no_package_changes':True,'no_boot_changes':True,'historical_receipts_reused':False}
 
 def exact_profile(p):
  need(p['schema']=='maclab.m1-cohort-profile/1' and p['device']=='m1' and p['board']=='apple,j293','wrong supported profile')
@@ -176,6 +179,66 @@ def stage_cache(p,request,deadline,uid=0):
   write_once(dst/('CACHE-VERIFIED-'+str(time.time_ns())+'.json'),report);return report
  finally:os.close(lockfd)
 
+def verify_owned_packet(p,uid=0):
+ packet=private_dir(p['packet'],uid);owner=read_json(packet/'CACHE-PROFILE.json',uid)
+ need(owner=={'profile_sha256':exact_profile(p),'source_packet':p['source_packet']},'fresh packet ownership mismatch');return packet
+
+def prepared_files(p,request,kind):
+ prepared=request['prepared_inputs'];need(prepared['packet']==p['packet'] and prepared['boot_id']==request['expected_boot_id'],'prepared input packet/boot drift')
+ names={'backup-m1.py','backup-spec.json','backup-clearance.json','STANDING-BOOT-AUTHORITY.json','BACKUP-SOURCE-FREEZE.json'} if kind=='backup' else {'backup-supplement.py','supplement-binding.json'}
+ need(set(prepared['files'])==names,'exact prepared input closure required')
+ for name,row in prepared['files'].items():
+  raw=base64.b64decode(row['base64'],validate=True);need(len(raw)==row['bytes']<=65536 and digest(raw)==row['sha256'],'prepared input hash/size drift')
+  if name=='backup-m1.py':need(row['sha256']==p['backup_source']['sha256'] and row['bytes']==p['backup_source']['bytes'],'backup source changed')
+  if name=='backup-supplement.py':need(row['sha256']==p['supplement_source']['sha256'] and row['bytes']==p['supplement_source']['bytes'],'supplement source changed')
+  if name=='STANDING-BOOT-AUTHORITY.json':need(row['sha256']==p['authority_source']['sha256'],'standing authority changed')
+ return prepared['files']
+
+def stage_prepared(p,request,deadline,kind,uid=0):
+ packet=verify_owned_packet(p,uid);files=prepared_files(p,request,kind);lock=cache_lock(packet/'.inputs.lock',uid)
+ try:
+  results={}
+  for name,pin in files.items():
+   q=packet/name;raw=base64.b64decode(pin['base64'],validate=True)
+   if os.path.lexists(q):results[name]={**verify(q,pin,deadline,uid),'reused_exact_input':True};continue
+   # A source/spec is immutable once written. On interrupted partial input,
+   # refuse and retain it for reconciliation rather than overwrite/adopt.
+   fd=os.open(q,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+   try:
+    view=memoryview(raw)
+    while view:need(time.monotonic()<deadline,'input staging deadline');n=os.write(fd,view);need(n>0,'short input write');view=view[n:]
+    os.fsync(fd)
+   finally:os.close(fd)
+   syncdir(packet);results[name]={**verify(q,pin,deadline,uid),'reused_exact_input':False}
+  return {'schema':'maclab.m1-prepared-inputs/1','status':'EXACT_INPUTS_STAGED_ONLY','kind':kind,'packet':str(packet),'files':results,'package_changes':False,'boot_changes':False}
+ finally:os.close(lock)
+
+def capture_original(p,request,deadline):
+ packet=verify_owned_packet(p);files=prepared_files(p,request,'backup')
+ for name,pin in files.items():verify(packet/name,pin,deadline)
+ need(not os.path.lexists(packet/'original-backup'),'original capture exists; reconcile instead of replay')
+ os.execv('/usr/bin/python3',['/usr/bin/python3','-E','-B',str(packet/'backup-m1.py'),'--packet',str(packet),'--spec',str(packet/'backup-spec.json'),'--clearance',str(packet/'backup-clearance.json')])
+
+def capture_supplement(p,request,deadline):
+ packet=verify_owned_packet(p);files=prepared_files(p,request,'supplement')
+ for name,pin in files.items():verify(packet/name,pin,deadline)
+ need(not os.path.lexists(packet/'original-boot-supplement-r2'),'supplement exists; reconcile instead of replay')
+ os.execv('/usr/bin/python3',['/usr/bin/python3','-E','-B',str(packet/'backup-supplement.py'),'--authorize-backup-supplement','--packet',str(packet),'--binding',str(packet/'supplement-binding.json')])
+
+def collect_capture(p,request,deadline,kind):
+ packet=verify_owned_packet(p);relative='original-backup/BACKUP-RECEIPT.json' if kind=='backup' else 'original-boot-supplement-r2/SUPPLEMENT-RECEIPT.json';q=packet/relative
+ with held_regular(q,MAX_JSON) as (fd,s):raw=os.pread(fd,s.st_size+1,0);need(len(raw)==s.st_size,'capture receipt size drift')
+ need(digest(raw)==request['receipt_sha256'],'actual capture receipt drift');r=json.loads(raw)
+ need(r['device']==p['device'] and r['packet']==p['packet'] and r['boot_id']==request['expected_boot_id'],'fresh capture identity mismatch')
+ need(r['status']==('LOCAL_BACKUP_VERIFIED_ONLY' if kind=='backup' else 'LOCAL_SUPPLEMENT_VERIFIED_ONLY'),'capture did not complete')
+ if kind=='backup':need(r['old_module_tree_sha256']==p['old_module_tree_sha256'] and r['script_sha256']==p['backup_source']['sha256'],'capture module/source drift')
+ else:need(r['supplement_script_sha256']==p['supplement_source']['sha256'],'supplement source drift')
+ objects={}
+ for name,pin in r['objects'].items():need(Path(name).name==name,'invalid capture object leaf');objects[name]=verify(q.parent/name,pin,deadline)
+ freeze=packet/'BACKUP-SOURCE-FREEZE.json'
+ with held_regular(freeze,MAX_JSON) as (fd,s):freeze_raw=os.pread(fd,s.st_size,0)
+ return {'schema':'maclab.m1-capture-collection/1','kind':kind,'packet':p['packet'],'boot_id':request['expected_boot_id'],'receipt':r,'receipt_base64':base64.b64encode(raw).decode(),'receipt_sha256':digest(raw),'source_freeze_sha256':digest(freeze_raw),'objects':objects,'package_changes':False,'boot_changes':False,'independent_retention_claim':False}
+
 def dispatch_packet(p,request,deadline):
  """Preserve direct lab-agent parent: replace adapter, never subprocess owner.
  Reviewable fixed flag map only; source itself owns all package/recovery checks.
@@ -183,9 +246,9 @@ def dispatch_packet(p,request,deadline):
  packet=private_dir(p['packet']);entry=request['entry'];table={'install':('transact-m1.py',[]),'restore-modules':('transact-m1.py',['--restore-old-only']),'verify-modules':('transact-m1.py',['--verify-retained-old']),'rollback-packages':('packet-c-old5.py',[])}
  need(entry in table,'unsupported fixed owner operation');name,flags=table[entry];pin=p['owner_sources'][name];verify(packet/name,pin,deadline)
  # This file is a root-reviewed fresh scope, not a copied historical clearance.
- auth=read_json(packet/'WORKFLOW-ROOT-SCOPE.json');need(auth['profile_sha256']==exact_profile(p) and auth['packet']==str(packet) and auth['expected_boot_id']==request['expected_boot_id'] and entry in auth['operations'],'scope/boot mismatch')
+ auth=request['root_scope'];need(auth['packet']==str(packet) and auth['expected_boot_id']==request['expected_boot_id'] and auth['entries']==[entry] and HEX.fullmatch(auth['root_plan_sha256']),'entry/plan/current-boot scope mismatch')
  need(auth['manual_saved_work_confirmed'] is False and auth['manual_nearby_recovery_confirmed'] is False,'confirmation facts changed')
- verify(packet/'STANDING-BOOT-AUTHORITY.json',auth['authority_pin'],deadline)
+ verify(packet/'STANDING-BOOT-AUTHORITY.json',p['authority_source'],deadline)
  # A process replacement preserves the parent's direct-agent requirement.
  argv=['/usr/bin/python3','-E','-B',str(packet/name)]
  argv+=['--packet',str(packet),*flags]
@@ -193,17 +256,24 @@ def dispatch_packet(p,request,deadline):
 
 def main(request):
  p=request['profile'];profile_sha=exact_profile(p);boot=gate(p,request)
- if request['action']!='inventory-cache':
+ if request['action'] not in ('inventory-cache','collect-backup','collect-supplement'):
   authority=base64.b64decode(request['standing_authority_b64'],validate=True);need(digest(authority)==p['authority_source']['sha256'],'authority source drift');a=json.loads(authority);scope=request['root_scope']
   need(a['authorization_is_persistent'] is True and a['manual_saved_work_confirmed'] is False and a['manual_nearby_recovery_confirmed'] is False and a['does_not_lift_existing_holds'] is True,'standing authority facts mismatch')
   need(scope['packet']==p['packet'] and scope['device']==p['device'] and scope['expected_boot_id']==boot and scope['authority_sha256']==digest(authority) and request['action'] in scope['operations'] and scope['reviewed_by'],'root scope mismatch')
   need(scope['manual_saved_work_confirmed'] is False and scope['manual_nearby_recovery_confirmed'] is False,'manual confirmations must remain factual')
  budget=int(request['deadline_seconds']);need(1<=budget<=1900,'phase deadline ceiling');action=request['action']
  if action=='invoke-packet':need(budget==1900,'full package-owner outer cleanup envelope required')
+ elif action=='capture-original':need(budget==1200,'900s capture plus complete cleanup envelope required')
  else:need(budget<=900,'cache/metadata budget ceiling')
  deadline=time.monotonic()+budget
- if action=='inventory-cache':return {'status':'FRESH_METADATA_AND_CACHE_ONLY','boot_id':boot,'kernel':os.uname().release,'current':current_observation(p,boot,deadline),'files':inventory_cache(p,deadline),'package_changes':False,'boot_changes':False}
+ if action=='inventory-cache':return {'status':'FRESH_METADATA_AND_CACHE_ONLY','profile_sha256':profile_sha,'boot_id':boot,'kernel':os.uname().release,'current':current_observation(p,boot,deadline),'files':inventory_cache(p,deadline),'package_changes':False,'boot_changes':False}
  if action=='stage-cache':return stage_cache(p,request,deadline)
+ if action=='stage-backup-inputs':return stage_prepared(p,request,deadline,'backup')
+ if action=='capture-original':capture_original(p,request,deadline)
+ if action=='collect-backup':return collect_capture(p,request,deadline,'backup')
+ if action=='stage-supplement-inputs':return stage_prepared(p,request,deadline,'supplement')
+ if action=='capture-supplement':capture_supplement(p,request,deadline)
+ if action=='collect-supplement':return collect_capture(p,request,deadline,'supplement')
  if action=='invoke-packet':dispatch_packet(p,request,deadline)
  raise RuntimeError('unsupported typed M1 action')
 if __name__=='__main__':
