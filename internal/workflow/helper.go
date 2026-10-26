@@ -209,8 +209,13 @@ func RunHelper(ctx context.Context, h Helper, binding []byte, dir string) (out [
 	// The leader may have exited0 while a redirected child continues: drain it
 	// before returning success, then reap. External detached contexts are not
 	// inferred safe; their receipt belongs to each reviewed target helper.
+	liveAtExit, liveErr := groupLive(cmd.Process.Pid)
 	cleanup := drainGroup(cmd.Process.Pid)
 	waitErr := cmd.Wait()
+	if !aborted && liveAtExit {
+		waitErr = errors.Join(waitErr, errors.New("INCOMPLETE: helper exited with live owned descendants; forced cleanup cannot complete its work"))
+	}
+	cleanup = errors.Join(cleanup, liveErr)
 	if aborted {
 		return nil, errors.Join(fmt.Errorf("helper aborted; reconcile side effects: %w", ctx.Err()), cleanup, waitErr)
 	}

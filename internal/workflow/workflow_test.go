@@ -503,7 +503,7 @@ func TestHelperFailureRetainsGenuineLogs(t *testing.T) {
 		}
 	}
 }
-func TestHelperSuccessDrainsRedirectedDescendant(t *testing.T) {
+func TestHelperOrphanIsDrainedButCannotBecomeSuccess(t *testing.T) {
 	python, e := exec.LookPath("python3")
 	if e != nil {
 		t.Skip(e)
@@ -514,8 +514,8 @@ func TestHelperSuccessDrainsRedirectedDescendant(t *testing.T) {
 	pidfile := filepath.Join(dir, "pid")
 	source := pinFile(t, filepath.Join(dir, "fork.py"), []byte("import subprocess,json,sys\np=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nopen("+fmt.Sprintf("%q", pidfile)+",'w').write(str(p.pid))\nprint(json.dumps({'status':'PASS'}),flush=True)\n"))
 	_, e = RunHelper(context.Background(), Helper{Python: Pin{python, Hash(b), int64(len(b))}, Source: source}, []byte(`{}`), filepath.Join(dir, "invoke"))
-	if e != nil {
-		t.Fatal(e)
+	if e == nil || !strings.Contains(e.Error(), "INCOMPLETE") {
+		t.Fatal("forced cleanup salvaged success", e)
 	}
 	pidraw, _ := os.ReadFile(pidfile)
 	bstat, err := os.ReadFile("/proc/" + strings.TrimSpace(string(pidraw)) + "/stat")
