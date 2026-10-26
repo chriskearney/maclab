@@ -512,7 +512,7 @@ func TestHelperSuccessDrainsRedirectedDescendant(t *testing.T) {
 	b, _ := os.ReadFile(python)
 	dir := t.TempDir()
 	pidfile := filepath.Join(dir, "pid")
-	source := pinFile(t, filepath.Join(dir, "fork.py"), []byte("import subprocess,json\np=subprocess.Popen(['/bin/sleep','60'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nopen("+fmt.Sprintf("%q", pidfile)+",'w').write(str(p.pid))\nprint(json.dumps({'status':'PASS'}),flush=True)\n"))
+	source := pinFile(t, filepath.Join(dir, "fork.py"), []byte("import subprocess,json,sys\np=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)\nopen("+fmt.Sprintf("%q", pidfile)+",'w').write(str(p.pid))\nprint(json.dumps({'status':'PASS'}),flush=True)\n"))
 	_, e = RunHelper(context.Background(), Helper{Python: Pin{python, Hash(b), int64(len(b))}, Source: source}, []byte(`{}`), filepath.Join(dir, "invoke"))
 	if e != nil {
 		t.Fatal(e)

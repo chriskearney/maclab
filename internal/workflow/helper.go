@@ -164,7 +164,7 @@ func RunHelper(ctx context.Context, h Helper, binding []byte, dir string) (out [
 		return nil, err
 	}
 	defer python.Close()
-	cmd := exec.Command("/proc/self/fd/3", "-I", "-B", source, "--binding", request)
+	cmd := exec.Command("/proc/self/fd/3", "-I", "-B", "-c", "import runpy,sys; sys.executable=sys.argv.pop(1); p=sys.argv.pop(1); sys.argv[0]=p; runpy.run_path(p,run_name='__main__')", h.Python.Path, source, "--binding", request)
 	cmd.ExtraFiles = []*os.File{python}
 	cmd.Env = []string{"PATH=/usr/sbin:/usr/bin:/sbin:/bin", "LANG=C.UTF-8", "LC_ALL=C.UTF-8"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGTERM}
