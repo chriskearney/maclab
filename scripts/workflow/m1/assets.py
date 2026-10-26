@@ -51,7 +51,9 @@ def syncdir(p):
  f=os.open(p,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
  try:os.fsync(f)
  finally:os.close(f)
-need(os.geteuid()==0 and os.uname().machine=='aarch64' and os.uname().release=='7.2.11-6-1-ARCH','only original6 preinstall stage')
+need(os.geteuid()==0 and os.uname().machine=='aarch64','root AArch64 stage only')
+need(os.uname().release==q['expected_kernel'],'current kernel mismatch')
+if q['expected_kernel']!='7.2.11-6-1-ARCH':need(q['expected_kernel']=='7.2.11-7-1-ARCH' and q['operation']=='stage-input' and [r['name'] for r in q['assets']]==['packet-c-clearance.json'],'only fresh PacketC clearance may stage on normal7')
 need(re.fullmatch('/var/lib/maclab/rc7-m1-[a-z0-9-]{8,96}',str(P)) and re.fullmatch('/var/lib/maclab/rc7-m1-[a-z0-9-]{8,96}',str(S)) and P!=S,'distinct supported packets');parent_dirs(P);parent_dirs(S)
 need(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==q['boot_id'] and b'maclab.job=' not in Path('/proc/cmdline').read_bytes() and Path('/proc/device-tree/compatible').read_bytes().split(b'\0')[0]==b'apple,j293','fresh normal M1 identity')
 need(not os.path.lexists('/var/lib/pacman/db.lck'),'ALPM active')
@@ -95,7 +97,9 @@ print(json.dumps({'status':'EXACT_ASSETS_STAGED_ONLY','operation':q['operation']
 '''
 def run(binding,api=None):
  c=sdk();p=binding['profile'];op=binding['operation'];need(op in ('reuse-assets','stage-input'),'finite asset action');need(binding['source_reviewed_by'],'root-reviewed source needed')
- client=api or c.API(c.config());d=client.request('/api/devices/m1');c.state_gate(d,p,{'expected_boot_id':binding['expected_boot_id'],'expected_kernel':'7.2.11-6-1-ARCH'},True,450)
+ client=api or c.API(c.config());d=client.request('/api/devices/m1');expected_kernel=binding.get('expected_kernel','7.2.11-6-1-ARCH')
+ if expected_kernel!='7.2.11-6-1-ARCH':need(expected_kernel=='7.2.11-7-1-ARCH' and op=='stage-input' and [r['name'] for r in binding['assets']]==['packet-c-clearance.json'],'only PacketC clearance stage on normal7')
+ c.state_gate(d,p,{'expected_boot_id':binding['expected_boot_id'],'expected_kernel':expected_kernel},True,450)
  rows=[]
  for row in binding['assets']:
   need(row['name'] in (IMMUTABLE if op=='reuse-assets' else INPUTS),'unsupported named artifact');q={k:row[k] for k in ('name','sha256','bytes')}
@@ -104,7 +108,7 @@ def run(binding,api=None):
    raw=c.read_pin(row['source']);need(len(raw)==q['bytes'] and H(raw)==q['sha256'],'root input data/source drift');q['base64']=base64.b64encode(raw).decode()
   rows.append(q)
  need(op!='stage-input' or len(rows)==1,'changed files use individually bounded calls')
- payload={'operation':op,'packet':p['packet'],'source_packet':p['source_packet'],'boot_id':binding['expected_boot_id'],'profile_sha256':binding['packet_profile_sha256'],'agent_parent':binding['agent_parent'],'assets':rows}
+ payload={'operation':op,'packet':p['packet'],'source_packet':p['source_packet'],'boot_id':binding['expected_boot_id'],'profile_sha256':binding['packet_profile_sha256'],'expected_kernel':expected_kernel,'agent_parent':binding['agent_parent'],'assets':rows}
  command=shlex.join(['/usr/bin/python3','-E','-B','-c',REMOTE,json.dumps(payload,separators=(',',':'))]);need(len(command.encode())<=120000,'fixed transport ceiling; never broaden argument limit')
  r=client.request('/api/devices/m1/exec',{'command':command,'timeout_sec':240},330)
  if r['exit_code']!=0 or r.get('via')!='agent':return {'status':'M1_ASSET_STAGE_FAILED','actual_exec':r,'completion_claim':False}
