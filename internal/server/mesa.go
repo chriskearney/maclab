@@ -37,7 +37,7 @@ func (s *Server) validateMesa(spec api.JobSpec, d api.Device) (int, error) {
 	switch {
 	case m.OfficialGPU:
 		return 409, errors.New("official GPU adapter pending independent review; staged provider mode is available")
-	case m.SigningPublicSHA256 != "":
+	case m.SigningPublicSHA256 != "" || m.SigningStateHome != "":
 		return 400, errors.New("signing public pin requires optional official GPU mode")
 	case m.Mode == api.MesaInstalled:
 		return 400, errors.New("installed Mesa mode is not supported yet: it needs a package transaction with a recovery contract, judged through the installed manifest")

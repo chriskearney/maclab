@@ -67,4 +67,46 @@ type RuntimePlan struct {
 	GUIEnv              map[string]string `json:"gui_env"`
 	OfficialGPU         bool              `json:"official_gpu"`
 	SigningPublicSHA256 string            `json:"signing_public_sha256,omitempty"`
+	SigningStateHome    string            `json:"signing_state_home,omitempty"`
+	OfficialIdentity    *OfficialIdentity `json:"official_identity,omitempty"`
+}
+
+// OfficialIdentity is observed by the root runtime before any provider work,
+// then rechecked at every identity boundary. No private key bytes are read.
+type RuntimeFileIdentity struct {
+	Path    string `json:"path"`
+	Type    string `json:"type"`
+	Dev     uint64 `json:"dev"`
+	Inode   uint64 `json:"inode"`
+	Mode    uint32 `json:"mode"`
+	UID     uint32 `json:"uid"`
+	GID     uint32 `json:"gid"`
+	Size    int64  `json:"size"`
+	MTimeNS int64  `json:"mtime_ns"`
+	CTimeNS int64  `json:"ctime_ns"`
+}
+type SigningIdentity struct {
+	StateHome    string                `json:"state_home"`
+	PublicSHA256 string                `json:"public_sha256"`
+	Files        []RuntimeFileIdentity `json:"files"`
+}
+type RenderIdentity struct {
+	Path  string `json:"path"`
+	Major uint32 `json:"major"`
+	Minor uint32 `json:"minor"`
+	Mode  uint32 `json:"mode"`
+	UID   uint32 `json:"uid"`
+	GID   uint32 `json:"gid"`
+	Dev   uint64 `json:"dev"`
+	Inode uint64 `json:"inode"`
+}
+type RuntimeDevice struct {
+	Board      string         `json:"board"`
+	SoC        string         `json:"soc"`
+	Compatible []string       `json:"compatible"`
+	RenderNode RenderIdentity `json:"render_node"`
+}
+type OfficialIdentity struct {
+	Signing SigningIdentity `json:"signing"`
+	Device  RuntimeDevice   `json:"device"`
 }

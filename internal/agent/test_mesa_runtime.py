@@ -217,4 +217,33 @@ sys.exit(int(os.environ['TEST_EXIT']))
   for kw in ({'exitcode':7},{'no_oracle':True}):
    with self.subTest(kw=kw),self.assertRaises((m.Stop,AssertionError)):self.lifecycle(**kw)
 
+
+
+class OfficialIdentityControls(unittest.TestCase):
+ def fixture(self,d):
+  home=Path(d);state=home/'.local/state';keydir=state/'omarchy-m-test';keydir.mkdir(parents=True,mode=0o700);os.chmod(keydir,0o700);private=keydir/'machine-key';public=keydir/'machine-key.pub';private.write_bytes(b'never read private fixture');private.chmod(0o600);public.write_bytes(b'ssh-ed25519 TEST-FIXTURE-PUBLIC\n');public.chmod(0o644);return {'gui_home':str(home),'gui_uid':os.getuid(),'gui_gid':os.getgid(),'signing_state_home':str(state),'signing_public_sha256':m.sha(public),'manifest_path':str(home/'private/job/manifest.json')},private,public
+ def capture(self,p):
+  read=Path.read_bytes
+  def bytes_(path):return b'apple,j313\0apple,t8103\0apple,arm-platform\0' if str(path)=='/proc/device-tree/compatible' else read(path)
+  with mock.patch.object(Path,'read_bytes',bytes_),mock.patch.object(m,'render_node',return_value={'path':'/dev/dri/renderD128','major':226,'minor':128,'mode':0o666,'uid':0,'gid':987,'dev':7,'inode':9}):return m.capture_official_identity(p)
+ def test_explicit_existing_signing_identity_never_opens_private_or_creates(self):
+  with tempfile.TemporaryDirectory() as d:
+   p,private,public=self.fixture(d);real=os.open;seen=[]
+   def opened(path,flags,*a):seen.append((str(path),flags));return real(path,flags,*a)
+   with mock.patch.object(m.os,'open',opened):identity=self.capture(p)
+   self.assertTrue(seen);self.assertFalse(any(path==str(private) or flags&(os.O_CREAT|os.O_TRUNC|os.O_WRONLY) for path,flags in seen));self.assertEqual(identity['signing']['state_home'],p['signing_state_home']);self.assertEqual(identity['signing']['public_sha256'],p['signing_public_sha256']);self.assertEqual(identity['device']['board'],'j313');self.assertEqual(identity['device']['soc'],'t8103');self.assertEqual(identity['device']['render_node']['minor'],128)
+ def test_missing_wrong_private_prefix_or_drift_identity_refuses(self):
+  with tempfile.TemporaryDirectory() as d:
+   p,private,public=self.fixture(d);before=self.capture(p)
+   for change in ({'signing_state_home':''},{'signing_state_home':str(Path(p['gui_home'])/'../outside')},{'signing_public_sha256':'0'*64},{'signing_state_home':str(Path(p['manifest_path']).parent/'state')},{'gui_uid':p['gui_uid']+1}):
+    with self.subTest(change=change),self.assertRaises((m.Stop,OSError)):self.capture({**p,**change})
+   private.chmod(0o644)
+   with self.assertRaises(m.Stop):self.capture(p)
+   private.chmod(0o600);public.write_bytes(b'changed public')
+   with self.assertRaises(m.Stop):self.capture(p)
+ def test_signing_symlinks_never_followed(self):
+  with tempfile.TemporaryDirectory() as d:
+   p,private,public=self.fixture(d);public.unlink();public.symlink_to(private)
+   with self.assertRaises(m.Stop):self.capture(p)
+
 if __name__=='__main__':unittest.main()

@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The runtime's adversarial tests use temporary files, simulated unit metadata
@@ -41,5 +42,29 @@ func TestMesaCleanupPreservesNestedOrUnreadableCgroup(t *testing.T) {
 	os.Remove(filepath.Join(child, "cgroup.procs"))
 	if e := mesaGroupsEmpty(root, "j-test"); e == nil {
 		t.Fatal("missing nested membership accepted")
+	}
+}
+
+func TestMesaCleanupReserveFitsInsideTestWatchdogBudget(t *testing.T) {
+	for _, total := range []time.Duration{120 * time.Second, 2100 * time.Second} {
+		run, cleanup, err := mesaProcessBudget(total)
+		if err != nil || cleanup < 60*time.Second || cleanup <= 39*time.Second || run+cleanup != total {
+			t.Fatalf("total=%s run=%s cleanup=%s err=%v", total, run, cleanup, err)
+		}
+	}
+	if _, _, err := mesaProcessBudget(60 * time.Second); err == nil {
+		t.Fatal("no cleanup reserve accepted")
+	}
+}
+
+func TestMesaSessionEnvironmentIsExplicitAdapterContract(t *testing.T) {
+	env := mesaSessionEnv([]string{"HOME=/normal/home", "USER=owner", "XDG_SESSION_ID=7", "LD_PRELOAD=bad", "XDG_RUNTIME_DIR=/run/user/1001", "WAYLAND_DISPLAY=wayland-1", "HYPRLAND_INSTANCE_SIGNATURE=actual"})
+	if len(env) != 3 || env["XDG_RUNTIME_DIR"] != "/run/user/1001" || env["HYPRLAND_INSTANCE_SIGNATURE"] != "actual" {
+		t.Fatal(env)
+	}
+	for _, k := range []string{"HOME", "USER", "XDG_SESSION_ID", "LD_PRELOAD"} {
+		if _, exists := env[k]; exists {
+			t.Fatal("leaked", k)
+		}
 	}
 }

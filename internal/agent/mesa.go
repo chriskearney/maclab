@@ -78,18 +78,12 @@ func (l *Linux) StageMesa(ctx context.Context, job string, a api.MesaStageArgs, 
 	if uid <= 0 || gid <= 0 {
 		return result, errors.New("Mesa probes require a nonroot GUI account")
 	}
-	envMap := map[string]string{}
-	for _, entry := range env {
-		key, v, ok := strings.Cut(entry, "=")
-		if ok {
-			envMap[key] = v
-		}
-	}
+	envMap := mesaSessionEnv(env)
 	h, err := mesa.Hash(filepath.Join(m.Prefix, "manifest.json"), 8<<20)
 	if err != nil {
 		return result, err
 	}
-	p := mesa.RuntimePlan{Schema: mesa.Schema, Job: job, BootID: boot, Kernel: kernel, CmdlineSHA256: a.CmdlineSHA256, ManifestPath: filepath.Join(m.Prefix, "manifest.json"), ManifestSHA256: h, GUIUser: l.GUIUser, GUIUID: uid, GUIGID: gid, GUIHome: u.HomeDir, GUIEnv: envMap, OfficialGPU: a.Spec.OfficialGPU, SigningPublicSHA256: a.Spec.SigningPublicSHA256}
+	p := mesa.RuntimePlan{Schema: mesa.Schema, Job: job, BootID: boot, Kernel: kernel, CmdlineSHA256: a.CmdlineSHA256, ManifestPath: filepath.Join(m.Prefix, "manifest.json"), ManifestSHA256: h, GUIUser: l.GUIUser, GUIUID: uid, GUIGID: gid, GUIHome: u.HomeDir, GUIEnv: envMap, OfficialGPU: a.Spec.OfficialGPU, SigningPublicSHA256: a.Spec.SigningPublicSHA256, SigningStateHome: a.Spec.SigningStateHome}
 	if err = mesaWrite(filepath.Join(m.Prefix, "runtime-plan.json"), mesa.JSON(p), 0600); err != nil {
 		return result, err
 	}
@@ -152,7 +146,11 @@ func (l *Linux) runMesaProvider(ctx context.Context, job string, t api.TestSpec,
 	if err = mesaWrite(filepath.Join(out, "source-pins.json"), mesa.JSON(map[string]string{"runtime_sha256": mesa.Sum(mesaRuntime), "official_adapter_sha256": mesa.Sum(mesaOfficial), "gl_probe_sha256": mesa.GLProbeSHA, "vulkan_probe_sha256": mesa.VKProbeSHA}), 0600); err != nil {
 		return fail(err)
 	}
-	tctx, cancel := context.WithTimeout(ctx, testTimeout(t))
+	runBudget, cleanupBudget, err := mesaProcessBudget(testTimeout(t))
+	if err != nil {
+		return fail(err)
+	}
+	tctx, cancel := context.WithTimeout(ctx, runBudget)
 	defer cancel()
 	cmd := exec.CommandContext(tctx, "python3", "-B", script, filepath.Join(prefix, "runtime-plan.json"), out)
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "LC_ALL=C", "PYTHONDONTWRITEBYTECODE=1"}
@@ -162,7 +160,7 @@ func (l *Linux) runMesaProvider(ctx context.Context, job string, t api.TestSpec,
 		}
 		return nil
 	}
-	cmd.WaitDelay = 20 * time.Second
+	cmd.WaitDelay = cleanupBudget
 	log, err := os.OpenFile(filepath.Join(out, "log.txt"), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
 		return fail(err)
@@ -302,4 +300,26 @@ func mesaGroupsEmpty(root, job string) error {
 		}
 	}
 	return nil
+}
+
+// Reserve cleanup INSIDE the test/watchdog budget. The reviewed optional
+// adapter can spend39s in stop/kill/stop/final-journal;60s leaves bounded margin.
+func mesaProcessBudget(total time.Duration) (time.Duration, time.Duration, error) {
+	const cleanup = 60 * time.Second
+	if total <= cleanup {
+		return 0, 0, errors.New("Mesa test needs more than60s including owned cleanup reserve")
+	}
+	return total - cleanup, cleanup, nil
+}
+
+func mesaSessionEnv(env []string) map[string]string {
+	allowed := map[string]bool{"XDG_RUNTIME_DIR": true, "WAYLAND_DISPLAY": true, "DISPLAY": true, "DBUS_SESSION_BUS_ADDRESS": true, "XDG_SESSION_TYPE": true, "XDG_CURRENT_DESKTOP": true, "HYPRLAND_INSTANCE_SIGNATURE": true}
+	result := map[string]string{}
+	for _, entry := range env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok && allowed[key] {
+			result[key] = value
+		}
+	}
+	return result
 }

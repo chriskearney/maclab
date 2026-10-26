@@ -221,6 +221,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		mesaMode := fs.String("mesa-mode", api.MesaStaged, "with --mesa-package: staged (a diagnostic of the packages in a private prefix; the desktop keeps the installed Mesa)")
 		mesaOfficial := fs.Bool("mesa-official-gpu", false, "optional reviewed official65 GPU suite after staged native provider checks (requires adapter support)")
 		mesaPublic := fs.String("mesa-signing-public-sha256", "", "with --mesa-official-gpu: actual existing GUI machine-key.pub file SHA256")
+		mesaState := fs.String("mesa-signing-state-home", "", "with --mesa-official-gpu: explicit existing normal XDG_STATE_HOME (never inferred from private job HOME)")
 		mesaBuild := fs.String("mesa-build", "", "with --mesa-package: the package build that produced the packages, for the record")
 		var tests, guiTests, scripts, guiScripts, mesaPkgs multi
 		fs.Var(&mesaPkgs, "mesa-package", "a pinned Mesa split package to test, name=FILE or name=SHA256 (repeatable), e.g. mesa-aurora=mesa-aurora-…pkg.tar.zst")
@@ -245,7 +246,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 			spec.InstalledManifest = sha
 		}
 		if len(mesaPkgs) > 0 {
-			m := &api.MesaSpec{Mode: *mesaMode, Build: *mesaBuild, OfficialGPU: *mesaOfficial, SigningPublicSHA256: *mesaPublic}
+			m := &api.MesaSpec{Mode: *mesaMode, Build: *mesaBuild, OfficialGPU: *mesaOfficial, SigningPublicSHA256: *mesaPublic, SigningStateHome: *mesaState}
 			for _, p := range mesaPkgs {
 				name, src, ok := strings.Cut(p, "=")
 				if !ok || name == "" || src == "" {
@@ -258,7 +259,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 				m.Packages = append(m.Packages, api.MesaPackage{Name: name, SHA256: sha})
 			}
 			spec.Mesa = m
-		} else if *mesaBuild != "" || *mesaMode != api.MesaStaged || *mesaOfficial || *mesaPublic != "" {
+		} else if *mesaBuild != "" || *mesaMode != api.MesaStaged || *mesaOfficial || *mesaPublic != "" || *mesaState != "" {
 			return errors.New("--mesa-mode and --mesa-build need at least one --mesa-package")
 		}
 		if *scriptTimeout > 4*time.Hour {

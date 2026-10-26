@@ -395,6 +395,7 @@ const (
 type MesaSpec struct {
 	OfficialGPU         bool          `json:"official_gpu,omitempty"`
 	SigningPublicSHA256 string        `json:"signing_public_sha256,omitempty"`
+	SigningStateHome    string        `json:"signing_state_home,omitempty"`
 	Mode                string        `json:"mode"`            // MesaStaged (MesaInstalled is refused for now)
 	Packages            []MesaPackage `json:"packages"`        // the exact split packages, as uploaded artifacts
 	Build               string        `json:"build,omitempty"` // the finished package build whose files they are (checked by sha256 at submission), if any

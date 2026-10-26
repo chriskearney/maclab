@@ -61,8 +61,26 @@ def save(path,value):
     with open(path,'xb') as f:f.write(data);f.flush();os.fsync(f.fileno())
     os.chmod(path,0o600)
 def render_node():
-    s=Path('/dev/dri/renderD128').lstat();need(stat.S_ISCHR(s.st_mode) and os.major(s.st_rdev)==226 and os.minor(s.st_rdev)==128,'native render node missing/type');return {'major':226,'minor':128,'mode':stat.S_IMODE(s.st_mode),'uid':s.st_uid,'gid':s.st_gid}
+    s=Path('/dev/dri/renderD128').lstat();need(stat.S_ISCHR(s.st_mode) and os.major(s.st_rdev)==226 and os.minor(s.st_rdev)==128,'native render node missing/type');return {'path':'/dev/dri/renderD128','major':226,'minor':128,'mode':stat.S_IMODE(s.st_mode),'uid':s.st_uid,'gid':s.st_gid,'dev':s.st_dev,'inode':s.st_ino}
+def signing_metadata(path,kind,uid,gid,mode=None):
+    st=path.lstat();need((stat.S_ISDIR(st.st_mode) if kind=='directory' else stat.S_ISREG(st.st_mode)) and st.st_uid==uid and st.st_gid==gid,'existing signing owner/type')
+    if mode is not None:need(stat.S_IMODE(st.st_mode)==mode,'existing signing mode')
+    return {'path':str(path),'type':kind,'dev':st.st_dev,'inode':st.st_ino,'mode':stat.S_IMODE(st.st_mode),'uid':st.st_uid,'gid':st.st_gid,'size':st.st_size,'mtime_ns':st.st_mtime_ns,'ctime_ns':st.st_ctime_ns}
+def capture_official_identity(plan):
+    # This is the explicit existing NORMAL signing location, never job HOME or
+    # an inferred default. The private key is only lstat'ed, never data-opened.
+    value=plan.get('signing_state_home');home=Path(plan['gui_home']);need(isinstance(value,str) and value and Path(value).is_absolute() and str(Path(value))==value and '..' not in Path(value).parts and not any(c in value for c in ('\0','\n','\r',':')),'explicit signing state absent/unclean');state=Path(value)
+    need(state!=home and state.is_relative_to(home) and not state.is_relative_to(Path(plan['manifest_path']).parent),'existing signing state must be outside private prefix and inside actual GUI home')
+    for directory in [state,*state.parents]:
+        if not directory.is_relative_to(home):break
+        st=directory.lstat();need(stat.S_ISDIR(st.st_mode) and st.st_uid==plan['gui_uid'] and not stat.S_IMODE(st.st_mode)&0o022,'signing ancestry owner/type/mode')
+    directory=state/'omarchy-m-test';key=directory/'machine-key';public=directory/'machine-key.pub';rows=[signing_metadata(directory,'directory',plan['gui_uid'],plan['gui_gid'],0o700),signing_metadata(key,'regular',plan['gui_uid'],plan['gui_gid'],0o600),signing_metadata(public,'regular',plan['gui_uid'],plan['gui_gid'])]
+    need(rows[-1]['mode'] in (0o600,0o644) and 0<rows[-1]['size']<=16384,'existing public key size/mode');digest=sha(public);need(re.fullmatch('[0-9a-f]{64}',str(plan.get('signing_public_sha256',''))) and digest==plan['signing_public_sha256'],'existing public key pin mismatch');need(rows==[signing_metadata(directory,'directory',plan['gui_uid'],plan['gui_gid'],0o700),signing_metadata(key,'regular',plan['gui_uid'],plan['gui_gid'],0o600),signing_metadata(public,'regular',plan['gui_uid'],plan['gui_gid'])],'signing identity changed during public read')
+    raw=Path('/proc/device-tree/compatible').read_bytes();need(0<len(raw)<=4096 and raw.endswith(b'\0'),'compatible schema');compatible=raw[:-1].decode('ascii').split('\0');need(re.fullmatch('apple,j[a-z0-9]+',compatible[0]) and all(compatible),'board identity');soc=[x for x in compatible if re.fullmatch('apple,t[0-9a-f]+',x)];need(len(soc)==1,'ambiguous SoC identity')
+    return {'signing':{'state_home':value,'public_sha256':digest,'files':rows},'device':{'board':compatible[0].removeprefix('apple,'),'soc':soc[0].removeprefix('apple,'),'compatible':compatible,'render_node':render_node()}}
 def identity(plan):
+    if plan.get('official_gpu'):
+        need('official_identity' in plan and capture_official_identity(plan)==plan['official_identity'],'official signing/device identity drift')
     need(Path('/proc/sys/kernel/random/boot_id').read_text().strip()==plan['boot_id'],'unexpected reboot')
     need(Path('/proc/sys/kernel/osrelease').read_text().strip()==plan['kernel'],'kernel drift')
     need(hashlib.sha256(Path('/proc/cmdline').read_bytes()).hexdigest()==plan['cmdline_sha256'],'cmdline drift')
@@ -101,7 +119,7 @@ def verify_system(pins):
         st=os.stat(p,follow_symlinks=False);need(stat.S_ISREG(st.st_mode) and st.st_dev==v['dev'] and st.st_ino==v['inode'] and st.st_size==v['size'] and sha(p)==v['sha256'],'system loader/provider drift')
 def child_env(plan,m):
     run=Path(m['prefix'])/'run';env={'PATH':'/usr/bin:/bin','LC_ALL':'C','HOME':str(run/'home'),'TMPDIR':str(run/'tmp'),'XDG_CACHE_HOME':str(run/'cache'),'XDG_CONFIG_HOME':str(run/'config'),'XDG_DATA_HOME':str(run/'data'),'XDG_STATE_HOME':str(run/'state')}
-    for k in ('XDG_RUNTIME_DIR','WAYLAND_DISPLAY','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XDG_SESSION_TYPE'):
+    for k in ('XDG_RUNTIME_DIR','WAYLAND_DISPLAY','DISPLAY','DBUS_SESSION_BUS_ADDRESS','XDG_SESSION_TYPE','XDG_CURRENT_DESKTOP','HYPRLAND_INSTANCE_SIGNATURE'):
         if k in plan['gui_env']:env[k]=plan['gui_env'][k]
     lib=str(Path(m['root'])/'usr/lib');env.update({'RENDER_CHECK_RENDERER':'Apple','RENDER_CHECK_DEVICE':'Apple','LD_LIBRARY_PATH':lib+':/usr/lib','VK_DRIVER_FILES':m['vulkan_json'],'VK_ICD_FILENAMES':m['vulkan_json'],'__EGL_VENDOR_LIBRARY_FILENAMES':m['egl_json'],'LIBGL_DRIVERS_PATH':lib+'/dri','GBM_BACKENDS_PATH':lib+'/gbm'})
     return env
@@ -412,7 +430,10 @@ def probe(api,plan,m,pins,env,out):
             finally:witnesses.close()
 
 def run(plan,out):
-    need(os.geteuid()==0 and plan['gui_uid']>0 and plan['gui_gid']>0,'root supervisor/nonroot child required');plan['render_node_pin']=render_node();account=pwd.getpwnam(plan['gui_user']);need((account.pw_uid,account.pw_gid,account.pw_dir)==(plan['gui_uid'],plan['gui_gid'],plan['gui_home']),'GUI account drift');need(plan['gui_env'].get('XDG_RUNTIME_DIR')=='/run/user/'+str(plan['gui_uid']),'GUI runtime directory drift');identity(plan);m=json.loads(Path(plan['manifest_path']).read_text());verify_manifest(plan,m)
+    need(os.geteuid()==0 and plan['gui_uid']>0 and plan['gui_gid']>0,'root supervisor/nonroot child required');plan['render_node_pin']=render_node();account=pwd.getpwnam(plan['gui_user']);need((account.pw_uid,account.pw_gid,account.pw_dir)==(plan['gui_uid'],plan['gui_gid'],plan['gui_home']),'GUI account drift');need(plan['gui_env'].get('XDG_RUNTIME_DIR')=='/run/user/'+str(plan['gui_uid']),'GUI runtime directory drift');
+    if plan.get('official_gpu'):
+        plan['official_identity']=capture_official_identity(plan);save(out/'official-runtime-identity.json',plan['official_identity'])
+    identity(plan);m=json.loads(Path(plan['manifest_path']).read_text());verify_manifest(plan,m)
     runroot=Path(m['prefix'])/'run';runroot.mkdir(mode=0o700);os.chown(runroot,plan['gui_uid'],plan['gui_gid'])
     for name in ('home','tmp','cache','config','data','state','reports'):
         p=runroot/name;p.mkdir(mode=0o700);os.chown(p,plan['gui_uid'],plan['gui_gid'])
