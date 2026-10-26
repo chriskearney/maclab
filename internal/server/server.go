@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/oob"
 	"github.com/iconidentify/maclab/internal/web"
@@ -80,6 +81,8 @@ type Config struct {
 	TestGrace, GUIGrace time.Duration
 	// AgentBinary is the linux/arm64 lab-agent that ./volunteer downloads.
 	AgentBinary string
+	// Clock is where labd reads time; nil is the wall clock.
+	Clock agent.Clock
 }
 
 type Server struct {
@@ -103,6 +106,34 @@ type Server struct {
 	tsMu        sync.Mutex
 	tsAt        time.Time // when tsNames were looked up
 	tsNames     []string  // its MagicDNS names
+}
+
+// clock is where labd reads time: Config.Clock, or the wall clock when unset.
+func (s *Server) clock() agent.Clock {
+	if s.cfg.Clock == nil {
+		return agent.WallClock
+	}
+	return s.cfg.Clock
+}
+
+func (s *Server) now() time.Time                  { return s.clock().Now() }
+func (s *Server) since(t time.Time) time.Duration { return s.clock().Now().Sub(t) }
+
+// withTimeout is context.WithTimeout on labd's clock.
+func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	c := s.clock()
+	if c == agent.WallClock {
+		return context.WithTimeout(parent, d)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-c.After(d):
+			cancel()
+		}
+	}()
+	return ctx, cancel
 }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
@@ -158,7 +189,8 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, start: time.Now(), devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}, hosts: hosts}
+	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}, hosts: hosts}
+	s.start = s.now()
 	rows, err := st.devices()
 	if err != nil {
 		return nil, err
@@ -207,19 +239,19 @@ func (s *Server) OnNotify(f func(Notification)) {
 }
 
 func (s *Server) monitor() {
-	t := time.NewTicker(time.Second)
+	t := s.clock().NewTicker(time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		for _, v := range s.allDevs() {
 			v.mu.Lock()
 			// After a restart, agents need a moment to reconnect before silence means anything.
-			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && time.Since(s.start) > s.cfg.OfflineAfter
-			if idle && !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(time.Now()) {
+			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && s.since(s.start) > s.cfg.OfflineAfter
+			if idle && !v.d.LastSeen.IsZero() && s.since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(s.now()) {
 				v.restore = v.d.State
 				why := "no heartbeat since " + v.d.LastSeen.Format(time.TimeOnly)
 				if !v.asleep.IsZero() {
@@ -300,7 +332,7 @@ func (s *Server) attachOOB(v *dev) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-s.clock().After(backoff):
 			}
 			if backoff < time.Minute {
 				backoff *= 2
@@ -320,7 +352,7 @@ func (s *Server) appendSerial(name, line string) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02T15:04:05.000"), line)
+	fmt.Fprintf(f, "%s %s\n", s.now().Format("2006-01-02T15:04:05.000"), line)
 	f.Close()
 }
 
@@ -368,7 +400,7 @@ func (s *Server) updateJob(j *api.Job, f func(*api.Job)) {
 	defer jobMu.Unlock()
 	j.GateExclusion = s.store.gateExclusion(j.ID)
 	f(j)
-	j.Updated = time.Now()
+	j.Updated = s.now()
 	if err := s.store.saveJob(j); err != nil {
 		s.log.Printf("save job %s: %v", j.ID, err)
 	}
@@ -600,10 +632,10 @@ func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest, v
 		req.Model = api.ModelLaptop
 	}
 	tok := "enr_" + randHex(16)
-	exp := time.Now().Add(24 * time.Hour)
+	exp := s.now().Add(24 * time.Hour)
 	var err error
 	if volunteer != "" {
-		err = s.store.addVolunteerToken(hashSecret(tok), req, volunteer, exp, maxVolunteerTokens)
+		err = s.store.addVolunteerToken(hashSecret(tok), req, volunteer, exp, s.now(), maxVolunteerTokens)
 	} else {
 		err = s.store.addToken(hashSecret(tok), req, exp)
 	}
@@ -776,7 +808,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, enrollBodyMax, &req) {
 		return
 	}
-	t, err := s.store.takeToken(hashSecret(req.Token))
+	t, err := s.store.takeToken(hashSecret(req.Token), s.now())
 	if err != nil {
 		httpErr(w, 403, "enrollment token unknown, used or expired")
 		return
@@ -874,7 +906,7 @@ func (s *Server) storeArtifact(r io.Reader) (string, int64, error) {
 		return "", 0, err
 	}
 	sha := hex.EncodeToString(h.Sum(nil))
-	now := time.Now()
+	now := s.now()
 	os.Chtimes(tmp.Name(), now, now)
 	return sha, n, os.Rename(tmp.Name(), s.artifactPath(sha))
 }
@@ -952,7 +984,7 @@ func (s *Server) hDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, struct {
 			DeviceView
 			Events []api.KernelEvent `json:"recent_events"`
-		}{s.view(v), v.eventsSince(time.Now().Add(-24 * time.Hour))})
+		}{s.view(v), v.eventsSince(s.now().Add(-24 * time.Hour))})
 	}
 }
 
@@ -1030,16 +1062,16 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	if v.d.State == api.StateBusy || v.d.State == api.StateRecovering || len(v.queue) > 0 || len(open) > 0 {
 		return 409, fmt.Errorf("%s has a job running or queued; cancel it first", name)
 	}
-	if l := v.d.Lease; !force && l != nil && time.Now().Before(l.Expires) && l.Holder != holder {
+	if l := v.d.Lease; !force && l != nil && s.now().Before(l.Expires) && l.Holder != holder {
 		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s --holder %s`), or pass --force",
 			name, l.Holder, l.Expires.Format(time.DateTime), name, l.Holder)
 	}
 	// An agent that told labd it is leaving may still check in until
 	// uninstall has stopped it. Any other one that checks in is still set up,
 	// and would only get 401s once its row is gone.
-	if seen := v.d.LastSeen; !force && v.d.State != api.StateLeft && !seen.IsZero() && time.Since(seen) < s.cfg.OfflineAfter {
+	if seen := v.d.LastSeen; !force && v.d.State != api.StateLeft && !seen.IsZero() && s.since(seen) < s.cfg.OfflineAfter {
 		return 409, fmt.Errorf("%s's lab-agent checked in %s ago, so it is still set up: run `sudo lab-agent uninstall` on the Mac first, or pass --force",
-			name, time.Since(seen).Round(time.Second))
+			name, s.since(seen).Round(time.Second))
 	}
 	if err := s.store.deleteDevice(v.d.ID); err != nil {
 		return 500, err
@@ -1074,11 +1106,11 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && time.Now().Before(l.Expires) && l.Holder != req.Holder {
+	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
 		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: time.Now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
 }
@@ -1091,7 +1123,7 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 	holder := r.URL.Query().Get("holder")
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && time.Now().Before(l.Expires) {
+	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
 		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
 		return
 	}
@@ -1120,7 +1152,7 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
-	if lease != nil && time.Now().Before(lease.Expires) && lease.Holder != by {
+	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
 		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
 		return
 	}
@@ -1388,7 +1420,7 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 	if l := d.Lease; l != nil && l.Holder != spec.Holder {
 		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 	}
-	now := time.Now()
+	now := s.now()
 	msg := "queued"
 	if retryOf != "" {
 		msg = "queued: a retry of job " + retryOf
@@ -1460,21 +1492,21 @@ func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
 	if sec <= 0 || sec > 3600 {
 		sec = 60
 	}
-	deadline := time.Now().Add(time.Duration(sec) * time.Second)
+	deadline := s.now().Add(time.Duration(sec) * time.Second)
 	for {
 		j, err := s.store.job(id)
 		if err != nil {
 			httpErr(w, 404, "no job %s", id)
 			return
 		}
-		if j.State == api.JobDone || time.Now().After(deadline) {
+		if j.State == api.JobDone || s.now().After(deadline) {
 			writeJSON(w, j)
 			return
 		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-s.clock().After(500 * time.Millisecond):
 		}
 	}
 }

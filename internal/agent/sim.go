@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,8 +25,9 @@ import (
 // "krel=7.1-test behavior=panic"; behaviors are ok, omt-regress (boots, but
 // Wi-Fi fails in omarchy-m-test), panic (at boot),
 // hang (at boot), silent (hang with no serial output), crash-in-test,
-// reboot-in-test (reboots with no kernel message) and hang-in-test (goes silent
-// for HangFor, then a watchdog resets it, again with no kernel message).
+// reboot-in-test (reboots with no kernel message), hang-in-test (goes silent
+// for HangFor, then a watchdog resets it, again with no kernel message) and
+// no-network (boots to the login prompt, then never reaches labd).
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
 // logind does; one named quiet-suspend-* sleeps without announcing it. The
 // builtin suspend-devices tells labd to expect QuietFor of silence first, as
@@ -77,6 +79,26 @@ type Sim struct {
 
 	stageFail  func(attempt int) error
 	stageTries int
+
+	// A Volunteer's Mac. Every knob is off by default.
+	// Encrypted holds every cold boot at the disk password prompt until TypePassword.
+	Encrypted bool
+	// KexecPass is whether the Mac can kexec a Lab boot with its volume key in memory.
+	KexecPass bool
+	// OnBattery is a Mac unplugged from AC power.
+	OnBattery bool
+
+	unlock   func() // the boot waiting at the disk password prompt
+	snapshot *simDisk
+	notices  []string
+}
+
+// simDisk is what a snapper snapshot holds of the simulated @ (packages and
+// the agent's record) and ESP (boot entries).
+type simDisk struct {
+	defaultKernel, recordedKnownGood, armed string
+	packagedKernels                         []string
+	staged                                  map[string]simEntry
 }
 
 type simEntry struct {
@@ -283,30 +305,89 @@ func (s *Sim) boot(last string) {
 		if e.behavior != "silent" {
 			s.say("Booting Linux on physical CPU 0x0000000000 [0x611f0221]")
 		}
-		switch e.behavior {
-		case "panic":
-			s.say("Kernel panic - not syncing: VFS: Unable to mount root fs")
-			s.say("Rebooting in 10 seconds..")
-			time.Sleep(s.RebootDelay)
-			s.boot("")
-			return
-		case "hang":
-			s.say("rcu: INFO: rcu_sched self-detected stall on CPU")
-			return
-		case "silent":
-			return
-		}
 		s.mu.Lock()
-		if gen != s.gen {
+		if s.Encrypted && gen == s.gen {
+			s.unlock = func() { s.up(gen, e) }
 			s.mu.Unlock()
+			s.say("Please enter passphrase for disk root:")
 			return
 		}
-		s.kernel, s.cmdline, s.behavior = e.krel, e.cmdline, e.behavior
-		s.alive = true
 		s.mu.Unlock()
-		s.say("Run /init as init process")
-		s.say("sim login: ")
+		s.up(gen, e)
 	}()
+}
+
+// up carries a boot on from the kernel's first line, once any disk password is in.
+func (s *Sim) up(gen int, e simEntry) {
+	switch e.behavior {
+	case "panic":
+		s.say("Kernel panic - not syncing: VFS: Unable to mount root fs")
+		s.say("Rebooting in 10 seconds..")
+		time.Sleep(s.RebootDelay)
+		s.boot("")
+		return
+	case "hang":
+		s.say("rcu: INFO: rcu_sched self-detected stall on CPU")
+		return
+	case "silent":
+		return
+	}
+	s.mu.Lock()
+	if gen != s.gen {
+		s.mu.Unlock()
+		return
+	}
+	s.kernel, s.cmdline, s.behavior = e.krel, e.cmdline, e.behavior
+	s.alive = e.behavior != "no-network" // up, but labd never hears from it
+	s.mu.Unlock()
+	s.say("Run /init as init process")
+	s.say("sim login: ")
+}
+
+// TypePassword is the Volunteer typing the disk password at the prompt.
+func (s *Sim) TypePassword() {
+	s.mu.Lock()
+	unlock := s.unlock
+	s.unlock = nil
+	s.mu.Unlock()
+	if unlock != nil {
+		unlock()
+	}
+}
+
+// Snapshot takes a snapper snapshot of the simulated @ and ESP.
+func (s *Sim) Snapshot() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.snapshot = &simDisk{defaultKernel: s.DefaultKernel, recordedKnownGood: s.RecordedKnownGood, armed: s.armed,
+		packagedKernels: slices.Clone(s.PackagedKernels), staged: maps.Clone(s.staged)}
+}
+
+// Rollback puts @ and the ESP back as Snapshot found them; the next boot shows it.
+func (s *Sim) Rollback() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	d := s.snapshot
+	if d == nil {
+		return fmt.Errorf("no snapshot to roll back to")
+	}
+	s.DefaultKernel, s.RecordedKnownGood, s.armed = d.defaultKernel, d.recordedKnownGood, d.armed
+	s.PackagedKernels, s.staged = d.packagedKernels, d.staged
+	s.snapshot = nil
+	return nil
+}
+
+// Notify shows a desktop notice to the Volunteer; Notices lists those shown.
+func (s *Sim) Notify(text string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.notices = append(s.notices, text)
+}
+
+func (s *Sim) Notices() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return slices.Clone(s.notices)
 }
 
 func (s *Sim) WatchSleep(ctx context.Context, fn func(bool)) {
@@ -317,6 +398,19 @@ func (s *Sim) WatchSleep(ctx context.Context, fn func(bool)) {
 
 // suspend sleeps the machine for d: no heartbeats, no reports, nothing lost.
 func (s *Sim) suspend(d time.Duration, announce bool) {
+	s.sleep(announce)
+	time.Sleep(d)
+	s.wake(announce)
+}
+
+// Sleep suspends the Mac the way closing its lid does, announced as logind
+// does, until Wake.
+func (s *Sim) Sleep() { s.sleep(true) }
+
+// Wake resumes the Mac from Sleep.
+func (s *Sim) Wake() { s.wake(true) }
+
+func (s *Sim) sleep(announce bool) {
 	s.mu.Lock()
 	fn := s.sleepFn
 	s.mu.Unlock()
@@ -326,9 +420,12 @@ func (s *Sim) suspend(d time.Duration, announce bool) {
 	s.mu.Lock()
 	s.alive = false
 	s.mu.Unlock()
-	time.Sleep(d)
+}
+
+func (s *Sim) wake(announce bool) {
 	s.mu.Lock()
 	s.alive = true
+	fn := s.sleepFn
 	s.mu.Unlock()
 	if announce && fn != nil {
 		fn(false)

@@ -16,7 +16,7 @@ import (
 func (l *Linux) WatchSleep(ctx context.Context, fn func(sleeping bool)) {
 	for ctx.Err() == nil {
 		l.watchSleep(ctx, fn)
-		sleepCtx(ctx, 10*time.Second) // busctl or logind went away; start over
+		sleepCtx(ctx, WallClock, 10*time.Second) // busctl or logind went away; start over
 	}
 }
 

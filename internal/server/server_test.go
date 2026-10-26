@@ -71,6 +71,8 @@ type lab struct {
 	url    string
 	name   string // the simulated Mac
 	secret string // its device secret
+	ctx    context.Context
+	agent  *agent.Config // the simulated Mac's enrolled lab-agent
 }
 
 func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "sim-mac") }
@@ -80,6 +82,27 @@ func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "s
 var testKnobs sync.Once
 
 func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
+	return newLabWith(t, labConfig{oob: withOOB, name: name})
+}
+
+// labConfig shapes a lab; the zero value is one lab-owned, OOB-less Mac
+// named sim-mac on the wall clock.
+type labConfig struct {
+	oob       bool
+	name      string
+	clock     *agent.FakeClock // nil runs labd and lab-agent on the wall clock
+	volunteer bool             // the Mac is a Volunteer's; drive its commands with l.volunteer
+}
+
+func newLabWith(t *testing.T, c labConfig) *lab {
+	name, withOOB := c.name, c.oob
+	if name == "" {
+		name = "sim-mac"
+	}
+	var clock agent.Clock = agent.WallClock
+	if c.clock != nil {
+		clock = c.clock
+	}
 	testKnobs.Do(func() {
 		aliveWindow = 1500 * time.Millisecond
 		panicGrace = 2 * time.Second
@@ -89,7 +112,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &lab{t: t, cancel: cancel, name: name}
+	l := &lab{t: t, cancel: cancel, name: name, ctx: ctx}
 	sim := agent.NewSim(t.TempDir())
 	sim.RebootDelay = 300 * time.Millisecond
 	l.sim = sim
@@ -105,7 +128,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 		quiet = log.New(os.Stderr, "labd: ", log.Ltime|log.Lmicroseconds)
 	}
 	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "admin", Interval: 200 * time.Millisecond,
-		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld",
+		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
 		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}, quiet)
 	if err != nil {
 		t.Fatal(err)
@@ -117,13 +140,18 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 	t.Cleanup(func() { cancel(); hs.Close() })
 
 	// Enroll the simulated Mac exactly as lab-agent setup would.
-	tok, _ := s.store.addTokenForTest(name)
+	addToken := s.store.addTokenForTest
+	if c.volunteer {
+		addToken = s.store.addVolunteerTokenForTest
+	}
+	tok, _ := addToken(name)
 	resp, err := agent.Enroll(ctx, hs.URL, tok, sim.Facts())
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.secret = resp.Secret
-	a := agent.New(&agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir()}, sim, quiet)
+	l.agent = &agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir(), Clock: clock}
+	a := agent.New(l.agent, sim, quiet)
 	go a.Run(ctx)
 	if withOOB {
 		v := s.dev(name)
@@ -138,6 +166,20 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 func (st *store) addTokenForTest(name string) (string, error) {
 	tok := "enr_test_" + name
 	return tok, st.addToken(hashSecret(tok), api.EnrollTokenRequest{Name: name, Model: api.ModelLaptop}, time.Now().Add(time.Hour))
+}
+
+// addVolunteerTokenForTest is the token a Volunteer's Mac enrolls with. Until
+// Volunteer enrollment tokens exist (#25), it is an ordinary one.
+func (st *store) addVolunteerTokenForTest(name string) (string, error) {
+	return st.addTokenForTest(name)
+}
+
+// volunteer runs a Volunteer command on the simulated Mac, as
+// `sudo lab-agent <args>` would, and returns what it printed.
+func (l *lab) volunteer(args ...string) (string, error) {
+	var out bytes.Buffer
+	err := agent.Volunteer(l.ctx, l.agent, l.sim, args, &out)
+	return out.String(), err
 }
 
 func (l *lab) artifact(content string) string {

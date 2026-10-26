@@ -104,13 +104,13 @@ var errVolunteerTokens = errors.New("too many volunteers hold unused enrollment 
 // it, in place of any unused one they still hold: nobody holds two, and
 // asking again after a setup that stopped half way just works. It refuses
 // with errVolunteerTokens while max others hold unused ones.
-func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who string, exp time.Time, max int) error {
+func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who string, exp, now time.Time, max int) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`DELETE FROM tokens WHERE requester != '' AND (requester=? OR expires<?)`, who, time.Now().Unix()); err != nil {
+	if _, err := tx.Exec(`DELETE FROM tokens WHERE requester != '' AND (requester=? OR expires<?)`, who, now.Unix()); err != nil {
 		return err
 	}
 	var n int
@@ -128,7 +128,7 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 
 // takeToken consumes a one-time enrollment token. VolunteeredBy is the
 // login that asked for a volunteer token.
-func (s *store) takeToken(hash string) (*api.EnrollTokenRequest, error) {
+func (s *store) takeToken(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
 	err := s.db.QueryRow(`DELETE FROM tokens WHERE token_hash=? RETURNING name,label,model,volunteer,requester,expires`, hash).
@@ -136,7 +136,7 @@ func (s *store) takeToken(hash string) (*api.EnrollTokenRequest, error) {
 	if err != nil {
 		return nil, err
 	}
-	if time.Now().Unix() > exp {
+	if now.Unix() > exp {
 		return nil, sql.ErrNoRows
 	}
 	return &r, nil

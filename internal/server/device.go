@@ -125,7 +125,7 @@ func (v *dev) leaving() string {
 }
 
 func (v *dev) aliveLocked() bool {
-	return !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) < aliveWindow
+	return !v.d.LastSeen.IsZero() && v.s.since(v.d.LastSeen) < aliveWindow
 }
 
 func (v *dev) setState(st api.DeviceState, reason string) {
@@ -164,7 +164,7 @@ func (v *dev) idleStateLocked() api.DeviceState {
 func (v *dev) heartbeat(ci api.Checkin) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	now := time.Now()
+	now := v.s.now()
 	rebooted := v.d.BootID != "" && ci.BootID != v.d.BootID
 	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel
 	if rebooted {
@@ -243,7 +243,7 @@ func (v *dev) deliver(bootID string) api.CheckinResponse {
 	if bootID != v.d.BootID {
 		return resp
 	}
-	now := time.Now()
+	now := v.s.now()
 	v.d.LastSeen = now
 	for _, c := range v.pending {
 		// A command is for the boot it was issued against. A reboot aimed at a
@@ -268,7 +268,7 @@ func (v *dev) report(rep api.Report) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID {
-		switch now := time.Now(); {
+		switch now := v.s.now(); {
 		case q.Seconds > 0:
 			d := min(time.Duration(q.Seconds)*time.Second, maxQuiet)
 			v.quietBoot, v.quietUntil = q.BootID, now.Add(d)
@@ -298,13 +298,13 @@ func (v *dev) report(rep api.Report) {
 
 func (v *dev) addEventLocked(e api.KernelEvent) {
 	if e.Time.IsZero() {
-		e.Time = time.Now()
+		e.Time = v.s.now()
 	}
 	switch e.Kind {
 	case detect.Sleep:
-		v.asleep = time.Now()
+		v.asleep = v.s.now()
 	case detect.Wake:
-		v.asleep, v.awoke = time.Time{}, time.Now()
+		v.asleep, v.awoke = time.Time{}, v.s.now()
 	}
 	v.events = append(v.events, e)
 	v.s.hub.publish("kevent", v.d.Name, struct {
@@ -344,7 +344,7 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 func (v *dev) onSerial(line string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	now := time.Now()
+	now := v.s.now()
 	v.serialLast, v.serialLine = now, line
 	v.s.hub.publish("serial", v.d.Name, map[string]any{"device": v.d.Name, "time": now, "line": line})
 	if m := detect.Marker(line); m != "" {
@@ -384,11 +384,9 @@ func (v *dev) send(kind, job string, args any) string {
 func (v *dev) waitFor(ctx context.Context, timeout time.Duration, cond func() bool) error {
 	var deadline <-chan time.Time
 	if timeout > 0 {
-		t := time.NewTimer(timeout)
-		defer t.Stop()
-		deadline = t.C
+		deadline = v.s.clock().After(timeout)
 	}
-	tick := time.NewTicker(time.Second)
+	tick := v.s.clock().NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		v.mu.Lock()
@@ -404,7 +402,7 @@ func (v *dev) waitFor(ctx context.Context, timeout time.Duration, cond func() bo
 		case <-deadline:
 			return context.DeadlineExceeded
 		case <-ch:
-		case <-tick.C:
+		case <-tick.C():
 		}
 	}
 }
@@ -462,7 +460,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 	name := v.d.Name
 	v.mu.Unlock()
 	id := v.send(kind, job, args)
-	deadline := time.Now().Add(timeout)
+	deadline := v.s.now().Add(timeout)
 	var (
 		res            api.CommandResult
 		lost, timedOut bool
@@ -471,7 +469,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 		askedHuman     bool
 		notes          []string
 	)
-	tick := time.NewTicker(time.Second)
+	tick := v.s.clock().NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		v.mu.Lock()
@@ -485,7 +483,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 				lost = true
 				return true
 			}
-			now := time.Now()
+			now := v.s.now()
 			if v.aliveLocked() {
 				if !quietSince.IsZero() {
 					away := v.d.LastSeen.Sub(quietSince)
@@ -549,7 +547,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 			v.forget(id)
 			return ctx.Err()
 		case <-ch:
-		case <-tick.C:
+		case <-tick.C():
 		}
 	}
 	if timedOut {

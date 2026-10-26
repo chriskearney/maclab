@@ -201,7 +201,7 @@ func (s *Server) validateInstalled(spec api.JobSpec, d api.Device) (int, error) 
 		return 400, errors.New("an installed job boots the installer's own cmdline: --cmdline, --cmdline-base, --cmdline-strip and --verbose-boot are refused")
 	case spec.Baseline || spec.Crash != "" || spec.Publish || len(spec.OMTAllow) > 0:
 		return 400, errors.New("an installed job is not a baseline, crash test or publication, and takes no --omt-allow (exceptions belong to the gate)")
-	case d.Lease == nil || d.Lease.Holder != spec.Holder || time.Now().After(d.Lease.Expires):
+	case d.Lease == nil || d.Lease.Holder != spec.Holder || s.now().After(d.Lease.Expires):
 		return 409, fmt.Errorf("%s must be leased by the job's holder (%q) for an installed job", d.Name, spec.Holder)
 	case !versionAtLeast(d.Facts.AgentVersion, installedMinAgent):
 		return 409, fmt.Errorf("%s runs lab-agent %s; installed jobs need %s or later", d.Name, orStr(d.Facts.AgentVersion, "(unknown)"), installedMinAgent)
@@ -723,7 +723,7 @@ func (s *Server) hFreezeManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins := fmt.Sprintf("# PINS.expected %s by maclab (approved by %s): do not rewrite\n%s  expected/manifest.json\n%s  %s\n",
-		time.Now().Format(time.RFC3339), strings.Join(req.ApprovedBy, ", "), installed.SHA256(mb), installed.SHA256(pb), rel)
+		s.now().Format(time.RFC3339), strings.Join(req.ApprovedBy, ", "), installed.SHA256(mb), installed.SHA256(pb), rel)
 	if err := writeOnce(filepath.Join(dir, "PINS.expected"), []byte(pins)); err != nil {
 		httpErr(w, 409, "%v", err)
 		return
@@ -780,7 +780,7 @@ func (s *Server) hFreezeEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pins := fmt.Sprintf("# PINS.installer-entry.%s %s by maclab, manifest %s: do not rewrite\n%s  installer-entry/%s.json\n",
-		device, time.Now().Format(time.RFC3339), msha, installed.SHA256(eb), device)
+		device, s.now().Format(time.RFC3339), msha, installed.SHA256(eb), device)
 	if err := writeOnce(filepath.Join(dir, "PINS.installer-entry."+device), []byte(pins)); err != nil {
 		httpErr(w, 409, "%v", err)
 		return
@@ -858,7 +858,7 @@ func (s *Server) hPromote(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "job %s: %v", j.ID, err)
 		return
 	}
-	ob, err := json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: kernel, Tool: tool, Status: status}, "", "  ")
+	ob, err := json.MarshalIndent(omtBaseline{Job: j.ID, Time: s.now(), Kernel: kernel, Tool: tool, Status: status}, "", "  ")
 	if err != nil {
 		httpErr(w, 500, "%v", err)
 		return
@@ -978,9 +978,9 @@ func (s *Server) promote(ctx context.Context, v *dev, release string, j *api.Job
 		}
 		staged[p] = t
 	}
-	line := fmt.Sprintf("%s\t%s\t%s\t%s\taccepted-by=%s\n", time.Now().Format(time.RFC3339), j.Spec.Device, j.ID, j.Result.BootKernel, by)
+	line := fmt.Sprintf("%s\t%s\t%s\t%s\taccepted-by=%s\n", s.now().Format(time.RFC3339), j.Spec.Device, j.ID, j.Result.BootKernel, by)
 	fail := func(why string) string {
-		return fmt.Sprintf("%s\t%s\t%s\tFAILED\t%s\n", time.Now().Format(time.RFC3339), j.Spec.Device, j.ID, why)
+		return fmt.Sprintf("%s\t%s\t%s\tFAILED\t%s\n", s.now().Format(time.RFC3339), j.Spec.Device, j.ID, why)
 	}
 	if err := appendSynced(ledger, line); err != nil {
 		cleanup()
