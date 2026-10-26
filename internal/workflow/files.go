@@ -170,7 +170,47 @@ func atomicWrite(path string, b []byte) error {
 	}
 	return nil
 }
+
+const cacheSyncBytes = 1 << 20
+
+// Bound pending data in this cache file without relaxing final durability or
+// readback checks. A sync error aborts this attempt; it is never retried here.
+type cacheChunkWriter struct {
+	file    *os.File
+	sync    func(*os.File) error
+	pending int
+}
+
+func (w *cacheChunkWriter) Write(b []byte) (int, error) {
+	total := 0
+	for len(b) > 0 {
+		count := min(len(b), cacheSyncBytes-w.pending)
+		n, err := w.file.Write(b[:count])
+		total += n
+		w.pending += n
+		b = b[n:]
+		if err != nil {
+			return total, err
+		}
+		if n != count {
+			return total, io.ErrShortWrite
+		}
+		if w.pending == cacheSyncBytes {
+			if err = w.sync(w.file); err != nil {
+				return total, err
+			}
+			w.pending = 0
+		}
+	}
+	return total, nil
+}
 func (r *Runner) cache(ctx context.Context, p Pin) ([]byte, error) {
+	return r.cacheWithSync(ctx, p, func(f *os.File) error { return f.Sync() })
+}
+
+// The private callback permits a real cache failure test without a global hook
+// or a runtime configuration that could disable checked syncs.
+func (r *Runner) cacheWithSync(ctx context.Context, p Pin, syncFile func(*os.File) error) ([]byte, error) {
 	dir := filepath.Join(r.Dir, "cache")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -191,9 +231,9 @@ func (r *Runner) cache(ctx context.Context, p Pin) ([]byte, error) {
 		return nil, err
 	}
 	defer os.Remove(f.Name())
-	err = copyPinned(ctx, p, f)
+	err = copyPinned(ctx, p, &cacheChunkWriter{file: f, sync: syncFile})
 	if err == nil {
-		err = f.Sync()
+		err = syncFile(f)
 	}
 	closeErr := f.Close()
 	if err == nil {
