@@ -6,7 +6,7 @@ then delegates to the reviewed direct-agent execv transport. No cached gate.
 import argparse,hashlib,json,os,stat,types
 from pathlib import Path
 SDK='d5e4a7cc72c2bffaf9fdbe7e44a56ac50486f9cb47fcb28aee047d292919094a'
-TECH='57c08ee729fafa46d42f755f0db5c664f8a9d9ece73afc990a92ca5413b311bb'
+TECH='ff997259d1371c5fff49557218d469b9041127365d930bae3d81dfc3545284e7'
 def need(v,msg):
  if not v:raise RuntimeError(msg)
 def H(b):return hashlib.sha256(b).hexdigest()

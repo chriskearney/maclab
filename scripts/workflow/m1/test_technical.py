@@ -18,6 +18,13 @@ class Technical(unittest.TestCase):
  def test_live_oob_failure_and_boot_drift_are_stops_not_cached_pass(self):
   for api in (self.api(error=True),self.api(drift=True)):
    with self.assertRaises(RuntimeError):m.observe(self.binding(),api)
+ def test_network_calls_take_only_remaining_global_readiness_budget(self):
+  base=self.api();timeouts=[]
+  class Timed:
+   def request(self,path,body=None,timeout=60):timeouts.append(timeout);return base.request(path,body,timeout)
+  ticks=iter([100,100,108,119,120]);out=m.observe(self.binding(),Timed(),monotonic=lambda:next(ticks));self.assertEqual(timeouts,[10,10,1]);self.assertEqual(out['status'],'FRESH_M1_TECHNICAL_READINESS_OBSERVED')
+  ticks=iter([100,121])
+  with self.assertRaisesRegex(RuntimeError,'request deadline exceeded'):m.observe(self.binding(),Timed(),monotonic=lambda:next(ticks))
  def test_slow_observation_or_too_short_phase_lease_refused(self):
   t=datetime.datetime.now(datetime.timezone.utc);times=iter([t,t+datetime.timedelta(seconds=21),t+datetime.timedelta(seconds=21)])
   with self.assertRaisesRegex(RuntimeError,'freshness bound'):m.observe(self.binding(),self.api(),lambda:next(times))
