@@ -6,7 +6,7 @@ import argparse,base64,datetime,hashlib,json,os,shlex,stat,time,urllib.error,url
 from pathlib import Path
 
 LIMIT=4*1024**2
-ALLOWED={'inventory-cache','stage-cache','invoke-packet','stage-backup-inputs','capture-original','collect-backup','stage-supplement-inputs','capture-supplement','collect-supplement'}
+ALLOWED={'inventory-cache','stage-cache','invoke-packet','stage-backup-inputs','capture-original','collect-backup','stage-supplement-inputs','capture-supplement','collect-supplement','collect-closure'}
 def need(v,msg):
  if not v:raise RuntimeError(msg)
 def read_pin(pin):
@@ -36,8 +36,37 @@ def state_gate(d,p,binding,mutates,minimum_seconds=0):
   expires=datetime.datetime.fromisoformat(lease['expires'].replace('Z','+00:00'));need(expires.tzinfo is not None and (expires-datetime.datetime.now(datetime.timezone.utc)).total_seconds()>=minimum_seconds,'lease would expire inside phase/cleanup; renew existing lease, no new user permission')
  return d
 
+def write_capture(path,value):
+ raw=(json.dumps(value,sort_keys=True,separators=(',',':'))+'\n').encode();need(len(raw)<=LIMIT,'private capture ceiling')
+ fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+ try:
+  view=memoryview(raw)
+  while view:n=os.write(fd,view);need(n>0,'short capture write');view=view[n:]
+  os.fsync(fd)
+ finally:os.close(fd)
+ need(path.read_bytes()==raw,'private capture readback mismatch');d=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try:os.fsync(d)
+ finally:os.close(d)
+ return {'path':str(path),'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw),'independent_retention_claim':False}
+
+def run_closure(binding,api=None):
+ p=binding['profile'];pin=p['closure_collector'];source=read_pin(pin);need(source==Path(__file__).with_name('closure-collector.py').read_bytes(),'reviewed collector closure mismatch')
+ c=api or API(config());d=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe=''));bound=dict(binding)
+ if bound.get('expected_boot_id') is None:bound['expected_boot_id']=d['boot_id']
+ state_gate(d,p,bound,False)
+ # Source is fixed/pinned. All three pacman-conf calls are literal read-only
+ # queries; no hook command or captured text is ever executed.
+ remote="import base64,contextlib,io,json,subprocess\nsource=base64.b64decode("+repr(base64.b64encode(source).decode())+",validate=True);buf=io.StringIO();ns={'__name__':'reviewed_closure'}\nwith contextlib.redirect_stdout(buf):\n exec(compile(source,'<reviewed-readonly-collector>','exec'),ns);ns['main']()\nconf={}\nfor key in ['HookDir','NoExtract','NoUpgrade']:\n p=subprocess.run(['/usr/bin/pacman-conf',key],capture_output=True,text=True,timeout=10);conf[key]={'exit_code':p.returncode,'stdout':p.stdout,'stderr':p.stderr}\nprint(json.dumps({'collector_stdout':buf.getvalue(),'pacman_conf':conf},separators=(',',':')))"
+ command=shlex.join(['/usr/bin/python3','-E','-B','-c',remote]);need(len(command.encode())<=120000,'fixed closure transport ceiling')
+ result=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe='')+'/exec',{'command':command,'timeout_sec':180},270)
+ capture=write_capture(Path(__file__).parent/'closure-api-capture.json',{'schema':'maclab.m1-closure-api-capture/1','collector_source_sha256':pin['sha256'],'actual_exec':result,'controller_boot_id':d['boot_id']})
+ if result['exit_code']!=0 or result.get('via')!='agent':return {'status':'M1_CLOSURE_CAPTURE_FAILED','capture':capture,'device':p['device'],'boot_id':d['boot_id']}
+ envelope=json.loads(result['stdout']);actual=json.loads(envelope['collector_stdout']);need(actual['boot_id']==d['boot_id'] and actual['kernel']==bound['expected_kernel'] and actual['board']==p['board'],'closure collector actual identity mismatch')
+ return {'status':'M1_CLOSURE_OBSERVED','capture':capture,'collector_source_sha256':pin['sha256'],'device':p['device'],'boot_id':actual['boot_id'],'kernel':actual['kernel'],'board':actual['board'],'collector_status':actual['status'],'STOP':actual['STOP'],'old_module_tree_sha256':actual['old_module_tree_sha256'],'hook_source_count':len(actual['all_vendor_and_local_hook_sources']),'closure_file_count':len(actual['closure_files']),'fallback_config_directories':actual['fallback_config_directories'],'pacman_conf':envelope['pacman_conf'],'readiness_claim':False,'independent_retention_claim':False}
+
 def run(binding,api=None):
  p=binding['profile'];action=binding['action'];need(action in ALLOWED,'unknown typed M1 operation')
+ if action=='collect-closure':return run_closure(binding,api)
  # Structural target validation also runs before the RPC, from the exact source
  # closure; do not dynamically import arbitrary plan modules.
  pin=p['target_adapter'];need(Path(pin['path']).name=='target.py','fixed target adapter basename required');source=read_pin(pin)
