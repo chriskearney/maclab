@@ -17,15 +17,8 @@ import (
 func (r *Runner) archivedBindKinds() map[string]bool {
 	consumed := map[string]bool{}
 	for _, p := range r.Plan.Phases {
-		if p.InputPhase != "" {
-			consumed[p.InputPhase] = true
-		}
-		for _, v := range p.Bind {
-			consumed[v.From] = true
-		}
-		if p.M1Admission != nil {
-			consumed[p.M1Admission.BootID.From] = true
-			consumed[p.M1Admission.AgentSHA256.From] = true
+		for _, ref := range phaseReferences(p) {
+			consumed[ref] = true
 		}
 	}
 	eligible := map[string]bool{}

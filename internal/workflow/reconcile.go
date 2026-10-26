@@ -20,7 +20,7 @@ type Reconciliation struct {
 	Attempt       string `json:"attempt"`
 	RequestSHA256 string `json:"request_sha256,omitempty"`
 	ReviewedBy    string `json:"reviewed_by"`
-	Decision      string `json:"decision"` // completed, proven-not-started, failed
+	Decision      string `json:"decision"` // completed, proven-not-started, failed, refresh-observation
 	Evidence      Pin    `json:"evidence"`
 	Output        *Pin   `json:"output,omitempty"`
 }
@@ -49,7 +49,7 @@ func (r *Runner) Reconcile(path, expectedSHA string) error {
 	}
 	defer lock.Close()
 	rec := s.Records[proof.Phase]
-	if rec == nil || rec.State == "done" || rec.Attempt != proof.Attempt || rec.RequestSHA256 != proof.RequestSHA256 {
+	if rec == nil || (rec.State == "done" && proof.Decision != "refresh-observation") || rec.Attempt != proof.Attempt || rec.RequestSHA256 != proof.RequestSHA256 {
 		return errors.New("reconciliation does not bind exact unfinished attempt/request")
 	}
 	var phase *Phase
@@ -63,6 +63,9 @@ func (r *Runner) Reconcile(path, expectedSHA string) error {
 	}
 	if err = verifyPin(proof.Evidence); err != nil {
 		return err
+	}
+	if proof.Decision == "refresh-observation" {
+		return r.refreshObservation(s, phase, rec, proof, b)
 	}
 	// Retain proof and source evidence before changing the state checkpoint.
 	if err = atomicWrite(r.Dir+"/reconcile-"+proof.Phase+"-"+rec.Attempt+".json", b); err != nil {
