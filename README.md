@@ -159,6 +159,14 @@ It then climbs a ladder:
    > 3. Wait 5 seconds, then press it once to turn it back on.
    > 4. That's it. The lab notices when it checks in again and picks up from there.
 
+On a Volunteer's Mac the ladder differs: nothing reaches the Volunteer until
+the Lab boot's Hard ceiling plus one boot timeout have passed with no check-in
+(by then its own deadlines have had every chance to bring it back), and the
+notice goes only to the Mac's own ntfy topic, never the lab-wide topic or
+`--notify-cmd`, which are the Maintainers'. `sudo lab-agent notify --topic
+https://ntfy.sh/my-topic` switches the Mac to the Volunteer's own topic; it
+reaches labd at the next check-in, and `status` shows the `subscribe to:` URL.
+
 When the Mac checks in again, the alert clears, leftover staged kernels are
 removed, and queued jobs continue. `lab status` shows the same instruction
 while it's outstanding.

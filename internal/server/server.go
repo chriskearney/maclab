@@ -862,7 +862,7 @@ func enrollment(t *api.EnrollTokenRequest, old api.Enrollment) api.Enrollment {
 	if !t.Volunteer {
 		return api.Enrollment{Kind: api.KindLabOwned}
 	}
-	e := api.Enrollment{Kind: api.KindVolunteer, VolunteerName: t.VolunteerName, Contact: t.Contact, NtfyTopic: old.NtfyTopic}
+	e := api.Enrollment{Kind: api.KindVolunteer, VolunteerName: t.VolunteerName, Contact: t.Contact, NtfyTopic: old.NtfyTopic, NtfyOwnURL: old.NtfyOwnURL}
 	if e.NtfyTopic == "" {
 		e.NtfyTopic = newNtfyTopic()
 	}
@@ -876,10 +876,18 @@ func newNtfyTopic() string {
 	return fmt.Sprintf("maclab-%032d", n)
 }
 
+// macTopicURL is where a Volunteer Mac's own notices are posted: the topic
+// the Volunteer chose, else the Mac's generated one on the lab's ntfy server.
+func (s *Server) macTopicURL(e api.Enrollment) string { return s.agentEnrollment(e).NtfyURL }
+
 // agentEnrollment is e as the Mac is told it, with its topic's URL on the
 // lab's ntfy server (the one --ntfy posts to).
 func (s *Server) agentEnrollment(e api.Enrollment) api.AgentEnrollment {
 	ae := api.AgentEnrollment{Enrollment: e}
+	if e.NtfyOwnURL != "" {
+		ae.NtfyURL = e.NtfyOwnURL
+		return ae
+	}
 	if u, err := url.Parse(s.cfg.NtfyURL); err == nil && e.NtfyTopic != "" && u.Host != "" {
 		ae.NtfyURL = (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/" + e.NtfyTopic}).String()
 	}

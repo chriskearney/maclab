@@ -193,6 +193,10 @@ func (v *dev) heartbeat(ci api.Checkin) {
 	if v.syncWindowLocked(ci.Window) {
 		persist = true
 	}
+	if v.d.IsVolunteer() && ci.NtfyOwnURL != "" && v.d.NtfyOwnURL != ci.NtfyOwnURL { // a check-in without it (file unreadable) keeps the stored one
+		v.d.NtfyOwnURL = ci.NtfyOwnURL
+		persist = true
+	}
 	if ci.Facts != nil {
 		v.d.Facts = *ci.Facts
 	}

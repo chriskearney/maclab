@@ -13,6 +13,7 @@ import (
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
 	"github.com/iconidentify/maclab/internal/installed"
+	"github.com/iconidentify/maclab/internal/window"
 )
 
 type jobRun struct {
@@ -204,7 +205,13 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 			summary += "; restore failed: " + err.Error()
 		}
 	default:
-		summary += ". " + v.snapshot().Name + " needs a human power cycle; the lab cleans up the staged kernel when it is back"
+		d := v.snapshot()
+		who := "needs a human power cycle"
+		if d.IsVolunteer() {
+			// Maintainers can't; the Volunteer was asked on the Mac's own topic.
+			who = "is waiting for its Volunteer to reset it"
+		}
+		summary += ". " + d.Name + " " + who + "; the lab cleans up the staged kernel when it is back"
 	}
 	if j.Spec.Baseline && outcome == api.OutcomePass {
 		v.mu.Lock()
@@ -574,7 +581,7 @@ func (r *jobRun) testTimeout(t api.TestSpec) time.Duration {
 // timeout, collecting its logs. The Lab boot's hard ceiling is that far off;
 // on a Volunteer's Mac lab-agent caps it at the Availability window's end.
 func (r *jobRun) labBootJob() time.Duration {
-	d := r.boot + r.selfRecovery() + 5*time.Minute
+	d := r.boot + r.noContactWait() + 5*time.Minute
 	for _, t := range r.tests() {
 		d += r.testTimeout(t)
 	}
@@ -594,12 +601,32 @@ func (r *jobRun) expectedLength() time.Duration {
 	return d
 }
 
+// noContactWait is how long past its boot timeout a Lab boot gets to come back
+// by itself: lab-agent's early unit reboots one that never reaches labd at its
+// no-contact deadline (twice the boot timeout), and the Mac then needs a boot
+// to check in.
+func (r *jobRun) noContactWait() time.Duration { return 2 * r.boot }
+
 // selfRecovery is how long past its boot timeout labd waits for a Lab boot to
-// come back by itself before the recovery ladder: lab-agent's early unit
-// reboots one that never reaches labd at its no-contact deadline (twice the
-// boot timeout), and the Mac then needs a boot to check in. A Lab-owned Mac's
-// OOB hard resets are the next rung.
-func (r *jobRun) selfRecovery() time.Duration { return 2 * r.boot }
+// come back by itself before the recovery ladder. A Lab-owned Mac's OOB hard
+// resets are the next rung. A Volunteer's Mac is asked for nothing until its
+// Lab boot's hard ceiling (the job's end, or the Availability window's end if
+// that comes first) plus one boot timeout have passed with no check-in: only
+// then can it not have recovered by itself.
+func (r *jobRun) selfRecovery() time.Duration {
+	r.v.mu.Lock()
+	defer r.v.mu.Unlock()
+	if !r.v.d.IsVolunteer() {
+		return r.noContactWait()
+	}
+	ceiling := r.labBootJob()
+	if r.v.d.Window != nil {
+		if st := window.Evaluate(*r.v.d.Window, r.s.now()); st.Open {
+			ceiling = min(ceiling, st.End.Sub(r.s.now()))
+		}
+	}
+	return max(ceiling, r.noContactWait())
+}
 
 const noAppleWDTNote = "the test kernel was built without apple_wdt: the watchdog U-Boot leaves running resets it about 60 s into every boot, healthy or not"
 

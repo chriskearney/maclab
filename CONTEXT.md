@@ -41,6 +41,10 @@ _Avoid_: Boot timeout (labd's own wait, a different thing)
 The time a Lab boot ends whatever happens, even in contact with labd: the job's end, or the Availability window's end if that comes first.
 _Avoid_: Job timeout
 
+**Needs hands**:
+The state of a Mac that has to be power cycled by a person because it can't come back by itself. A Lab-owned Mac reaches it after the boot timeout and its recovery ladder; a Volunteer's Mac only after the Hard ceiling plus one boot timeout with no check-in, and its Volunteer is asked on the Mac's own topic.
+_Avoid_: Stuck, bricked
+
 **Lost boot**:
 A Lab boot the Mac came back from without labd ending it (a panic, a watchdog reset, a deadline or a hard reset); its logs are collected afterwards.
 _Avoid_: Crashed boot, failed boot

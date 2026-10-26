@@ -24,6 +24,7 @@ var volunteerCommands = map[string]volunteerCommand{
 	"window": windowCmd,
 	"pause":  pause,
 	"open":   open,
+	"notify": notifyCmd,
 }
 
 // IsVolunteerCommand is whether lab-agent's command line routes name here.

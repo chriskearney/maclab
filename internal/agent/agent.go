@@ -388,6 +388,13 @@ func (a *Agent) poll(ctx context.Context) error {
 	} else if set || a.volunteer() {
 		ci.Window = &s
 	}
+	if a.volunteer() {
+		if u, err := loadNtfyTopic(a.cfg); err != nil {
+			a.log.Printf("ntfy topic: %v", err)
+		} else {
+			ci.NtfyOwnURL = u
+		}
+	}
 	if refreshFacts {
 		f := a.sys.Facts()
 		f.AgentVersion = Version

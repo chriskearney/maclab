@@ -27,6 +27,10 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 			return true
 		}
 		now := v.s.now()
+		if v.d.IsVolunteer() {
+			// A Volunteer's Mac gets to recover by itself until its Hard ceiling plus a boot timeout.
+			return false
+		}
 		for _, e := range v.events {
 			if e.Time.After(since) && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
 				reason = "kernel panicked and did not reboot within " + panicGrace.String()
@@ -134,13 +138,17 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 	}
 	v.mu.Lock()
 	act := humanAction(v.d, reason, v.lastLogLocked(), v.s.now())
+	n := Notification{Device: v.d.Name, Title: act.Title, Body: act.Text(), Priority: "urgent"}
+	if v.d.IsVolunteer() {
+		n.Volunteer, n.MacTopic = true, v.s.macTopicURL(v.d.Enrollment)
+	}
 	v.d.Action = act
 	v.restore = ""
 	v.setStateLocked(api.StateNeedsHands, reason)
 	v.dirty = true
 	v.mu.Unlock()
 	steps = append(steps, "asked a human to power cycle it")
-	v.s.notify(Notification{Device: v.d.Name, Title: act.Title, Body: act.Text(), Priority: "urgent"})
+	v.s.notify(n)
 	return steps, false
 }
 

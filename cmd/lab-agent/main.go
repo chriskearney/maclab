@@ -32,6 +32,8 @@ const usage = `lab-agent: the Mac side of the test lab
                                   end the current window now, or stay closed until that date
   sudo lab-agent open --until HH:MM
                                   open the Mac to the lab now, until HH:MM
+  sudo lab-agent notify --topic URL
+                                  send this Mac's notices to your own ntfy topic
   sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)

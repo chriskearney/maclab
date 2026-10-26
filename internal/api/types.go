@@ -103,6 +103,9 @@ type Enrollment struct {
 	VolunteerName string `json:"volunteer_name,omitempty"`
 	Contact       string `json:"contact,omitempty"`
 	NtfyTopic     string `json:"ntfy_topic,omitempty"`
+	// NtfyOwnURL is the topic the Volunteer chose with `notify --topic`, as
+	// the Mac's check-ins carried it; it replaces the generated one.
+	NtfyOwnURL string `json:"ntfy_own_url,omitempty"`
 }
 
 func (e Enrollment) IsVolunteer() bool { return e.Kind == KindVolunteer }
@@ -170,6 +173,8 @@ type Checkin struct {
 	// Window is the Mac's Availability window settings, once its Volunteer
 	// has set any: check-ins are how they reach labd.
 	Window *window.Settings `json:"window,omitempty"`
+	// NtfyOwnURL is the topic the Volunteer set with `notify --topic`, if any.
+	NtfyOwnURL string `json:"ntfy_own_url,omitempty"`
 }
 
 // Report carries command results and kernel events as soon as they exist.
