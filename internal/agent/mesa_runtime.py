@@ -434,6 +434,9 @@ def run(plan,out):
     if plan.get('official_gpu'):
         plan['official_identity']=capture_official_identity(plan);save(out/'official-runtime-identity.json',plan['official_identity'])
     identity(plan);m=json.loads(Path(plan['manifest_path']).read_text());verify_manifest(plan,m)
+    if plan.get('official_gpu'):
+        from mesa_official_integration import source_closure
+        source_closure(plan,m)  # All dependencies must pass before either GPU phase.
     runroot=Path(m['prefix'])/'run';runroot.mkdir(mode=0o700);os.chown(runroot,plan['gui_uid'],plan['gui_gid'])
     for name in ('home','tmp','cache','config','data','state','reports'):
         p=runroot/name;p.mkdir(mode=0o700);os.chown(p,plan['gui_uid'],plan['gui_gid'])
@@ -441,7 +444,7 @@ def run(plan,out):
     try:
         for api in ('gl','vulkan'):result['provider'][api]=probe(api,plan,m,pins,env,out)
         if plan.get('official_gpu'):
-            from mesa_official import run_official
+            from mesa_official_integration import run_official
             result['official']=run_official(plan,m,out,env,pins)
             need(result['official'].get('status')=='PASS' and result['official'].get('native_invocations')==65 and result['official'].get('signature_verified') is True,'official suite incomplete')
         verify_manifest(plan,m);verify_system(pins);identity(plan);need(health(plan)==before and capture(['pacman','-Q'])==packages,'postflight desktop/package drift');result['cleanup_verified']=True;result['verdict']='PASS';return result

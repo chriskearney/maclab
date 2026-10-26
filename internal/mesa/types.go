@@ -8,6 +8,11 @@ const Schema = 1
 const GLProbeSHA = "24007754c92e05220edc4645702853ac86c0ff5d98c084da126955ccdd4d6e82"
 const VKProbeSHA = "e4a7b8d50c10d1cc3bf40c1dcaf9e74cd566ebb1901857e84b06256bbdf0d40d"
 const OfficialArchiveSHA = "f209493b34e13e2985b1752c147a33a9a45e3e2eac99eb9606ae5a664c252f99"
+const OfficialCommit = "e81d80938876c906b64c4e3f31f76c6c33ba95b1"
+const OfficialAdapterSHA = "ecadaa3a772c7ea2c5fce91e4563914fe33187e660e5b059cea60f761217f2cb"
+const OfficialSupervisorSHA = "10e5805c5f8c6eaf3149f0d846813191a536c02b69d3cd6a609065f38339db0a"
+const OfficialGuardSHA = "f65d169c599f08213632849090c75a8e6f4499ed85691baff2e21890821c0efe"
+const OfficialArchiveBytes int64 = 372821
 const Semantics = "staged diagnostic: pinned packages ran only in job-owned processes; the desktop kept installed Mesa; not installed-desktop qualification"
 const MaxCompressed int64 = 256 << 20
 const MaxExpanded int64 = 2 << 30
@@ -36,6 +41,7 @@ type Tool struct {
 // outside Root are allowed. Providers contains canonical regular-file relative
 // paths for egl, gallium and vulkan; loaders are independently frozen at runtime.
 type Manifest struct {
+	OfficialArchive  *Tool             `json:"official_archive,omitempty"`
 	Schema           int               `json:"schema"`
 	Job              string            `json:"job"`
 	Prefix           string            `json:"prefix"`
@@ -68,6 +74,7 @@ type RuntimePlan struct {
 	OfficialGPU         bool              `json:"official_gpu"`
 	SigningPublicSHA256 string            `json:"signing_public_sha256,omitempty"`
 	SigningStateHome    string            `json:"signing_state_home,omitempty"`
+	OfficialSources     map[string]Tool   `json:"official_sources,omitempty"`
 	OfficialIdentity    *OfficialIdentity `json:"official_identity,omitempty"`
 }
 

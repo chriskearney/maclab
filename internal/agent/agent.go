@@ -342,7 +342,7 @@ func (a *Agent) poll(ctx context.Context) error {
 		_, f.MesaStaged = a.sys.(interface {
 			StageMesa(context.Context, string, api.MesaStageArgs, Fetcher) (api.MesaStageResult, error)
 		})
-		f.MesaOfficial = false // separate reviewed optional adapter; never inferred from version alone
+		f.MesaOfficial = false // integrated source remains disabled until explicit runtime qualification
 		if a.wd.Load() != nil {
 			f.WatchdogArmed = true // systemd is off it on a test boot; the agent holds it
 		}

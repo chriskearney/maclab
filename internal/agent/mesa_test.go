@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"context"
 	"errors"
+	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -98,5 +101,36 @@ func TestMesaCleanupErrorCannotSkipIndependentKernelCleanup(t *testing.T) {
 		if tc.mesa == nil && tc.kernel == nil && got != nil {
 			t.Fatal(got)
 		}
+	}
+}
+
+func TestOfficialEmbeddedSourceClosureKeepsReviewedBytes(t *testing.T) {
+	for role, source := range officialMesaSources() {
+		if mesa.Sum(source.data) != source.sha {
+			t.Fatal("source drift", role)
+		}
+	}
+	if mesa.Sum(mesaOfficial) != mesa.OfficialAdapterSHA || mesa.Sum(mesaOfficialSupervisor) != mesa.OfficialSupervisorSHA || mesa.Sum(mesaOfficialGuard) != mesa.OfficialGuardSHA {
+		t.Fatal("reviewed source changed")
+	}
+}
+func TestOfficialIntegrationHostControls(t *testing.T) {
+	cmd := exec.Command("python3", "-B", "-m", "unittest", "discover", "-s", ".", "-p", "test_mesa_official_integration.py")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("official source integration: %v\n%s", err, output)
+	}
+}
+
+func TestSimulatorDoesNotInventOfficialGPUQualification(t *testing.T) {
+	sim := NewSim(t.TempDir())
+	sim.cmdline = "root=UUID=sim maclab.job=job"
+	boot, kernel, cmd := sim.Identity()
+	_, err := sim.StageMesa(context.Background(), "job", api.MesaStageArgs{Spec: api.MesaSpec{Mode: api.MesaStaged, OfficialGPU: true}, BootID: boot, Kernel: kernel, CmdlineSHA256: mesa.Sum([]byte(cmd + "\n"))}, nil)
+	if err == nil {
+		t.Fatal("simulator accepted physical official signature/observation claim")
+	}
+	result := sim.simMesaProvider("job", api.TestSpec{Name: "mesa-provider"})
+	if result.Passed || result.Mesa != nil {
+		t.Fatal("unstaged simulator invented official proof", result)
 	}
 }

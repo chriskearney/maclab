@@ -24,6 +24,15 @@ var mesaRuntime []byte
 //go:embed mesa_official.py
 var mesaOfficial []byte
 
+//go:embed mesa_official_integration.py
+var mesaOfficialIntegration []byte
+
+//go:embed mesa_official_sources/full-supervisor.py
+var mesaOfficialSupervisor []byte
+
+//go:embed mesa_official_sources/admission-supervisor.py
+var mesaOfficialGuard []byte
+
 func (l *Linux) mesaParent() string { return filepath.Join(l.WorkDir, "mesa") }
 func (l *Linux) StageMesa(ctx context.Context, job string, a api.MesaStageArgs, fetch Fetcher) (api.MesaStageResult, error) {
 	var result api.MesaStageResult
@@ -37,8 +46,8 @@ func (l *Linux) StageMesa(ctx context.Context, job string, a api.MesaStageArgs, 
 	if a.Spec.Mode != api.MesaStaged {
 		return result, errors.New("installed Mesa refused")
 	}
-	if a.Spec.OfficialGPU {
-		return result, errors.New("official GPU adapter pending independent review")
+	if a.Spec.OfficialGPU && (len(a.Spec.SigningPublicSHA256) != 64 || strings.Trim(a.Spec.SigningPublicSHA256, "0123456789abcdef") != "" || !filepath.IsAbs(a.Spec.SigningStateHome) || filepath.Clean(a.Spec.SigningStateHome) != a.Spec.SigningStateHome || strings.ContainsAny(a.Spec.SigningStateHome, "\x00\r\n:")) {
+		return result, errors.New("official suite needs explicit existing signing state and public SHA")
 	}
 	if l.GUIUser == "" {
 		return result, errors.New("Mesa needs existing GUI user")
@@ -84,6 +93,25 @@ func (l *Linux) StageMesa(ctx context.Context, job string, a api.MesaStageArgs, 
 		return result, err
 	}
 	p := mesa.RuntimePlan{Schema: mesa.Schema, Job: job, BootID: boot, Kernel: kernel, CmdlineSHA256: a.CmdlineSHA256, ManifestPath: filepath.Join(m.Prefix, "manifest.json"), ManifestSHA256: h, GUIUser: l.GUIUser, GUIUID: uid, GUIGID: gid, GUIHome: u.HomeDir, GUIEnv: envMap, OfficialGPU: a.Spec.OfficialGPU, SigningPublicSHA256: a.Spec.SigningPublicSHA256, SigningStateHome: a.Spec.SigningStateHome}
+
+	if a.Spec.OfficialGPU {
+		if m.OfficialArchive == nil || m.OfficialArchive.SHA256 != mesa.OfficialArchiveSHA {
+			return result, errors.New("official archive was not staged")
+		}
+		p.OfficialSources = map[string]mesa.Tool{"archive": *m.OfficialArchive}
+		for role, source := range officialMesaSources() {
+			if mesa.Sum(source.data) != source.sha {
+				return result, fmt.Errorf("embedded official source %s drift", role)
+			}
+			target := filepath.Join(m.Prefix, source.path)
+			if role == "supervisor" || role == "guard" {
+				if err = mesaWrite(target, source.data, 0644); err != nil {
+					return result, err
+				}
+			}
+			p.OfficialSources[role] = mesa.Tool{Path: target, SHA256: source.sha}
+		}
+	}
 	if err = mesaWrite(filepath.Join(m.Prefix, "runtime-plan.json"), mesa.JSON(p), 0600); err != nil {
 		return result, err
 	}
@@ -91,6 +119,9 @@ func (l *Linux) StageMesa(ctx context.Context, job string, a api.MesaStageArgs, 
 		return result, err
 	}
 	if err = mesaWrite(filepath.Join(m.Prefix, "mesa_official.py"), mesaOfficial, 0600); err != nil {
+		return result, err
+	}
+	if err = mesaWrite(filepath.Join(m.Prefix, "mesa_official_integration.py"), mesaOfficialIntegration, 0600); err != nil {
 		return result, err
 	}
 	return api.MesaStageResult{ManifestSHA256: h, Prefix: m.Prefix}, nil
@@ -126,6 +157,10 @@ func (l *Linux) runMesaProvider(ctx context.Context, job string, t api.TestSpec,
 	if err != nil || h != mesa.Sum(mesaOfficial) {
 		return fail(errors.New("official adapter source drift"))
 	}
+	h, err = mesa.Hash(filepath.Join(prefix, "mesa_official_integration.py"), 4<<20)
+	if err != nil || h != mesa.Sum(mesaOfficialIntegration) {
+		return fail(errors.New("official integration source drift"))
+	}
 	if err = os.MkdirAll(out, 0700); err != nil {
 		return fail(err)
 	}
@@ -143,7 +178,7 @@ func (l *Linux) runMesaProvider(ctx context.Context, job string, t api.TestSpec,
 			return fail(e)
 		}
 	}
-	if err = mesaWrite(filepath.Join(out, "source-pins.json"), mesa.JSON(map[string]string{"runtime_sha256": mesa.Sum(mesaRuntime), "official_adapter_sha256": mesa.Sum(mesaOfficial), "gl_probe_sha256": mesa.GLProbeSHA, "vulkan_probe_sha256": mesa.VKProbeSHA}), 0600); err != nil {
+	if err = mesaWrite(filepath.Join(out, "source-pins.json"), mesa.JSON(map[string]string{"runtime_sha256": mesa.Sum(mesaRuntime), "official_adapter_sha256": mesa.Sum(mesaOfficial), "official_integration_sha256": mesa.Sum(mesaOfficialIntegration), "official_supervisor_sha256": mesa.OfficialSupervisorSHA, "official_guard_sha256": mesa.OfficialGuardSHA, "gl_probe_sha256": mesa.GLProbeSHA, "vulkan_probe_sha256": mesa.VKProbeSHA}), 0600); err != nil {
 		return fail(err)
 	}
 	runBudget, cleanupBudget, err := mesaProcessBudget(testTimeout(t))
@@ -205,6 +240,23 @@ func (l *Linux) runMesaProvider(ctx context.Context, job string, t api.TestSpec,
 	mb, e := mesa.Read(filepath.Join(prefix, "manifest.json"), 8<<20)
 	if e != nil || json.Unmarshal(mb, &m) != nil {
 		return fail(errors.New("staged manifest unreadable"))
+	}
+	if official, ok := doc["official"]; ok {
+		data, e := json.Marshal(official)
+		if e != nil {
+			return fail(e)
+		}
+		r.Mesa.Official = &api.MesaOfficialResult{}
+		if e = json.Unmarshal(data, r.Mesa.Official); e != nil {
+			return fail(e)
+		}
+	}
+	if m.OfficialArchive != nil {
+		if err = validateOfficialExport(out, job, raw.BootID, raw.Kernel, raw.ManifestSHA256, r.Mesa.Official); err != nil {
+			return fail(err)
+		}
+	} else if r.Mesa.Official != nil {
+		return fail(errors.New("unexpected official export for provider-only job"))
 	}
 	for _, p := range m.Packages {
 		r.Mesa.Packages = append(r.Mesa.Packages, p.MesaPackage)
@@ -322,4 +374,18 @@ func mesaSessionEnv(env []string) map[string]string {
 		}
 	}
 	return result
+}
+
+type officialMesaSource struct {
+	path, sha string
+	data      []byte
+}
+
+func officialMesaSources() map[string]officialMesaSource {
+	return map[string]officialMesaSource{
+		"adapter":     {"mesa_official.py", mesa.OfficialAdapterSHA, mesaOfficial},
+		"integration": {"mesa_official_integration.py", mesa.Sum(mesaOfficialIntegration), mesaOfficialIntegration},
+		"supervisor":  {"official/full-supervisor.py", mesa.OfficialSupervisorSHA, mesaOfficialSupervisor},
+		"guard":       {"official/admission-supervisor.py", mesa.OfficialGuardSHA, mesaOfficialGuard},
+	}
 }

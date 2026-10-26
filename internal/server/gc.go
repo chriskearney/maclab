@@ -59,8 +59,8 @@ func (s *Server) gcArtifacts() {
 	if budget <= 0 {
 		budget = 20 << 30
 	}
-	pinned := map[string]bool{mesa.GLProbeSHA: true, mesa.VKProbeSHA: true} // never deleted: unfinished work
-	keep := map[string]bool{}                                               // deleted only when over budget
+	pinned := map[string]bool{mesa.GLProbeSHA: true, mesa.VKProbeSHA: true, mesa.OfficialArchiveSHA: true} // immutable bootstrap assets
+	keep := map[string]bool{}                                                                              // deleted only when over budget
 	// The references decide what may be deleted, so a reference that cannot
 	// be read stops this pass: nothing is deleted on an incomplete picture.
 	skip := func(what string, err error) {
@@ -164,7 +164,7 @@ func (s *Server) gcArtifacts() {
 		}
 	}
 	for _, a := range all {
-		if !keep[a.sha] && time.Since(a.mod) > 24*time.Hour {
+		if !keep[a.sha] && !pinned[a.sha] && time.Since(a.mod) > 24*time.Hour {
 			remove(a)
 		}
 	}

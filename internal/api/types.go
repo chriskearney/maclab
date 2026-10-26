@@ -410,19 +410,31 @@ type MesaPackage struct {
 
 // MesaResult is a Mesa job's verdicts. Semantics restates what the mode
 // covers, so a staged result can never be read as an installed one.
+type MesaOfficialResult struct {
+	Status            string `json:"status"`
+	NativeInvocations int    `json:"native_invocations"`
+	SignatureVerified bool   `json:"signature_verified"`
+	ReportSHA256      string `json:"report_sha256"`
+	SealSHA256        string `json:"seal_sha256"`
+	SourceCommit      string `json:"source_commit"`
+	ArchiveSHA256     string `json:"archive_sha256"`
+	ReportPath        string `json:"report_path"`
+	SealPath          string `json:"seal_path"`
+}
 type MesaResult struct {
-	Job             string            `json:"job"`
-	BootID          string            `json:"boot_id"`
-	Kernel          string            `json:"kernel"`
-	ManifestSHA256  string            `json:"manifest_sha256"`
-	CleanupVerified bool              `json:"cleanup_verified"`
-	Simulated       bool              `json:"simulated,omitempty"`
-	Evidence        map[string]any    `json:"evidence,omitempty"`
-	Mode            string            `json:"mode"`
-	Semantics       string            `json:"semantics"`
-	Packages        []MesaPackage     `json:"packages"`
-	Provider        map[string]string `json:"provider,omitempty"` // api (gl, vulkan) -> NATIVE_STAGED, SYSTEM_PROVIDER, SOFTWARE or MISSING
-	Verdict         string            `json:"verdict"`            // PASS, FAIL or INCOMPLETE
+	Official        *MesaOfficialResult `json:"official,omitempty"`
+	Job             string              `json:"job"`
+	BootID          string              `json:"boot_id"`
+	Kernel          string              `json:"kernel"`
+	ManifestSHA256  string              `json:"manifest_sha256"`
+	CleanupVerified bool                `json:"cleanup_verified"`
+	Simulated       bool                `json:"simulated,omitempty"`
+	Evidence        map[string]any      `json:"evidence,omitempty"`
+	Mode            string              `json:"mode"`
+	Semantics       string              `json:"semantics"`
+	Packages        []MesaPackage       `json:"packages"`
+	Provider        map[string]string   `json:"provider,omitempty"` // api (gl, vulkan) -> NATIVE_STAGED, SYSTEM_PROVIDER, SOFTWARE or MISSING
+	Verdict         string              `json:"verdict"`            // PASS, FAIL or INCOMPLETE
 }
 
 type JobEvent struct {

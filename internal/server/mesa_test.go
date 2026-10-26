@@ -39,6 +39,7 @@ func TestMesaValidation(t *testing.T) {
 		code int
 		want string
 	}{
+		{"official qualification fence", func(s *api.JobSpec) { s.Mesa.OfficialGPU = true }, nil, 409, "disabled pending runtime qualification"},
 		{"installed mode", func(s *api.JobSpec) { s.Mesa.Mode = api.MesaInstalled }, nil, 400, "not supported yet"},
 		{"unknown mode", func(s *api.JobSpec) { s.Mesa.Mode = "magic" }, nil, 400, "unknown Mesa mode"},
 		{"with installed manifest", func(s *api.JobSpec) { s.InstalledManifest = missing }, nil, 400, "drop --installed"},
@@ -404,5 +405,55 @@ func TestMesaSimulatedFailedBootHealthNeverStartsProvider(t *testing.T) {
 	}
 	if j.Result.Mesa == nil || j.Result.Mesa.Verdict == "PASS" || len(j.Result.Mesa.Provider) != 0 {
 		t.Fatal("GPU proof fabricated after failed boot health", j.Result.Mesa)
+	}
+}
+
+func TestOfficialEvidenceCannotFallBackToProviderOnlyPass(t *testing.T) {
+	spec := api.JobSpec{Mesa: &api.MesaSpec{OfficialGPU: true, Packages: []api.MesaPackage{{Name: "mesa-aurora", SHA256: "package"}}}}
+	r := jobRun{j: &api.Job{ID: "job", Spec: spec}, bootID: "boot", mesaManifest: "manifest", v: &dev{d: api.Device{Kernel: "kernel"}}}
+	// This control calls the exact typed evidence gate, not public admission:
+	// official capability intentionally remains disabled at submission.
+	tr := api.TestResult{Passed: true, Mesa: &api.MesaResult{Mode: api.MesaStaged, Job: "job", BootID: "boot", Kernel: "kernel", ManifestSHA256: "manifest", CleanupVerified: true, Verdict: "PASS", Provider: map[string]string{"gl": "NATIVE_STAGED", "vulkan": "NATIVE_STAGED"}, Packages: spec.Mesa.Packages}}
+	if r.acceptMesa(&tr) == "" {
+		t.Fatal("provider-only result passed an official request")
+	}
+	tr.Mesa.Official = &api.MesaOfficialResult{Status: "PASS", NativeInvocations: 65, SignatureVerified: true, SourceCommit: mesa.OfficialCommit, ArchiveSHA256: mesa.OfficialArchiveSHA, ReportSHA256: strings.Repeat("a", 64), SealSHA256: strings.Repeat("b", 64), ReportPath: "official/report.json", SealPath: "official/seal.json"}
+	if why := r.acceptMesa(&tr); why != "" {
+		t.Fatal("typed sealed-envelope dispatch refused", why)
+	}
+	tr.Mesa.Official.NativeInvocations = 64
+	if r.acceptMesa(&tr) == "" {
+		t.Fatal("partial official proof passed")
+	}
+	tr.Mesa.Official.NativeInvocations = 65
+	tr.Mesa.Official.SignatureVerified = false
+	if r.acceptMesa(&tr) == "" {
+		t.Fatal("unverified signature passed")
+	}
+}
+
+// All three immutable bootstrap assets survive before any job references them.
+// Bytes are explicit nonexecutable fixtures; this is GC, not artifact admission.
+func TestMesaBootstrapAssetsPinnedBeforeFirstJob(t *testing.T) {
+	l := newLab(t, false)
+	old := time.Now().Add(-48 * time.Hour)
+	pins := []string{mesa.GLProbeSHA, mesa.VKProbeSHA, mesa.OfficialArchiveSHA}
+	for _, sha := range pins {
+		if err := os.WriteFile(l.s.artifactPath(sha), []byte("CPU GC bootstrap fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		os.Chtimes(l.s.artifactPath(sha), old, old)
+	}
+	unused := l.artifact("unreferenced ordinary bytes")
+	os.Chtimes(l.s.artifactPath(unused), old, old)
+	l.s.cfg.ArtifactBudget = 1
+	l.s.gcArtifacts()
+	for _, sha := range pins {
+		if _, err := os.Stat(l.s.artifactPath(sha)); err != nil {
+			t.Fatal("bootstrap asset collected", sha, err)
+		}
+	}
+	if _, err := os.Stat(l.s.artifactPath(unused)); !os.IsNotExist(err) {
+		t.Fatal("ordinary old unused artifact was not collected", err)
 	}
 }

@@ -207,3 +207,38 @@ func TestSafeHashNoDataOpenForSpecialFiles(t *testing.T) {
 		t.Fatal("missing semantics")
 	}
 }
+
+func TestOfficialArchiveStagesOnlyExactReviewedCASBytes(t *testing.T) {
+	for _, bad := range []bool{false, true} {
+		t.Run(fmt.Sprint("bad=", bad), func(t *testing.T) {
+			root, spec, fetch, tools, store := fixture(t)
+			spec.OfficialGPU = true
+			data, err := os.ReadFile("testdata/official-archive.tar.gz")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if Sum(data) != OfficialArchiveSHA || int64(len(data)) != OfficialArchiveBytes {
+				t.Fatal("fixture is not the qualified archive")
+			}
+			if bad {
+				data = append([]byte(nil), data...)
+				data[0] ^= 1
+			}
+			store[OfficialArchiveSHA] = data
+			m, err := stageWith(context.Background(), root, "j1026-010203-abcd", spec, fetch, tools)
+			if bad {
+				if err == nil {
+					t.Fatal("tampered official archive admitted")
+				}
+				return
+			}
+			if err != nil || m.OfficialArchive == nil || m.OfficialArchive.SHA256 != OfficialArchiveSHA {
+				t.Fatal(m, err)
+			}
+			got, err := Hash(m.OfficialArchive.Path, OfficialArchiveBytes)
+			if err != nil || got != OfficialArchiveSHA {
+				t.Fatal(got, err)
+			}
+		})
+	}
+}

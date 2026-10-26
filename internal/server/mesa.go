@@ -36,7 +36,7 @@ func (s *Server) validateMesa(spec api.JobSpec, d api.Device) (int, error) {
 	m := spec.Mesa
 	switch {
 	case m.OfficialGPU:
-		return 409, errors.New("official GPU adapter pending independent review; staged provider mode is available")
+		return 409, errors.New("official GPU mode is disabled pending runtime qualification; staged provider mode is available")
 	case m.SigningPublicSHA256 != "" || m.SigningStateHome != "":
 		return 400, errors.New("signing public pin requires optional official GPU mode")
 	case m.Mode == api.MesaInstalled:
@@ -176,6 +176,14 @@ func (r *jobRun) acceptMesa(t *api.TestResult) string {
 	m.Semantics = mesa.Semantics
 	if m.Mode != api.MesaStaged || m.Job != r.j.ID || m.BootID != r.bootID || m.Kernel != r.v.snapshot().Kernel || m.ManifestSHA256 != r.mesaManifest || !m.CleanupVerified || m.Verdict != "PASS" || len(m.Provider) != 2 || m.Provider["gl"] != "NATIVE_STAGED" || m.Provider["vulkan"] != "NATIVE_STAGED" {
 		return "Mesa staged provider/boot/manifest/cleanup evidence incomplete"
+	}
+	if r.j.Spec.Mesa.OfficialGPU {
+		o := m.Official
+		if o == nil || o.Status != "PASS" || o.NativeInvocations != 65 || !o.SignatureVerified || o.SourceCommit != mesa.OfficialCommit || o.ArchiveSHA256 != mesa.OfficialArchiveSHA || !reSHA.MatchString(o.ReportSHA256) || !reSHA.MatchString(o.SealSHA256) || o.ReportPath != "official/report.json" || o.SealPath != "official/seal.json" {
+			return "official signed suite/export evidence incomplete"
+		}
+	} else if m.Official != nil {
+		return "unexpected official evidence in provider-only request"
 	}
 	want := map[string]string{}
 	for _, p := range r.j.Spec.Mesa.Packages {

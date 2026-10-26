@@ -509,6 +509,26 @@ func stageWith(ctx context.Context, parent, job string, spec api.MesaSpec, fetch
 		}
 		m.Probes[apiName] = Tool{dst, sha}
 	}
+
+	if spec.OfficialGPU {
+		directory := filepath.Join(prefix, "official")
+		if e := os.Mkdir(directory, 0755); e != nil {
+			return m, e
+		}
+		target := filepath.Join(directory, "archive.tar.gz")
+		if e := fetch(ctx, OfficialArchiveSHA, target); e != nil {
+			return m, e
+		}
+		h, e := Hash(target, OfficialArchiveBytes)
+		st, se := os.Lstat(target)
+		if e != nil || se != nil || st.Size() != OfficialArchiveBytes || h != OfficialArchiveSHA {
+			return m, errors.New("official archive identity/size mismatch")
+		}
+		if e = os.Chmod(target, 0644); e != nil {
+			return m, e
+		}
+		m.OfficialArchive = &Tool{Path: target, SHA256: OfficialArchiveSHA}
+	}
 	if e := writeNew(filepath.Join(prefix, "manifest.json"), JSON(m), 0600); e != nil {
 		return m, e
 	}
