@@ -198,7 +198,10 @@ def main(request):
   need(a['authorization_is_persistent'] is True and a['manual_saved_work_confirmed'] is False and a['manual_nearby_recovery_confirmed'] is False and a['does_not_lift_existing_holds'] is True,'standing authority facts mismatch')
   need(scope['packet']==p['packet'] and scope['device']==p['device'] and scope['expected_boot_id']==boot and scope['authority_sha256']==digest(authority) and request['action'] in scope['operations'] and scope['reviewed_by'],'root scope mismatch')
   need(scope['manual_saved_work_confirmed'] is False and scope['manual_nearby_recovery_confirmed'] is False,'manual confirmations must remain factual')
- deadline=time.monotonic()+min(int(request['deadline_seconds']),900);action=request['action']
+ budget=int(request['deadline_seconds']);need(1<=budget<=1900,'phase deadline ceiling');action=request['action']
+ if action=='invoke-packet':need(budget==1900,'full package-owner outer cleanup envelope required')
+ else:need(budget<=900,'cache/metadata budget ceiling')
+ deadline=time.monotonic()+budget
  if action=='inventory-cache':return {'status':'FRESH_METADATA_AND_CACHE_ONLY','boot_id':boot,'kernel':os.uname().release,'current':current_observation(p,boot,deadline),'files':inventory_cache(p,deadline),'package_changes':False,'boot_changes':False}
  if action=='stage-cache':return stage_cache(p,request,deadline)
  if action=='invoke-packet':dispatch_packet(p,request,deadline)

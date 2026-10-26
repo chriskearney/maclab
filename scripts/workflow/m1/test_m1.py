@@ -1,4 +1,4 @@
-import contextlib,hashlib,importlib.util,json,os,re,stat,tempfile,time,unittest
+import contextlib,datetime,hashlib,importlib.util,json,os,re,stat,tempfile,time,unittest
 from pathlib import Path
 from unittest.mock import patch
 HERE=Path(__file__).parent
@@ -67,7 +67,7 @@ class ContractTests(unittest.TestCase):
   for p in [{'schema':'wrong','device':'m1','board':'apple,j293'},{'schema':'maclab.m1-cohort-profile/1','device':'m3pro','board':'apple,j516s'}]:
    with self.assertRaisesRegex(RuntimeError,'wrong supported profile'):target.exact_profile(p)
  def test_controller_fresh_idle_lease_required(self):
-  p={'device':'m1','holder':'coordinator'};b={'expected_boot_id':'actual','expected_kernel':'old6'};d={'name':'m1','state':'ready','alive':True,'boot_id':'actual','kernel':'old6','lease':{'holder':'coordinator'}}
+  p={'device':'m1','holder':'coordinator'};b={'expected_boot_id':'actual','expected_kernel':'old6'};d={'name':'m1','state':'ready','alive':True,'boot_id':'actual','kernel':'old6','lease':{'holder':'coordinator','expires':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).isoformat()}}
   self.assertIs(controller.state_gate(d,p,b,True),d)
   for key,val in [('boot_id','stale'),('active_job','other'),('lease',{'holder':'other'}),('state','busy')]:
    bad={**d,key:val}
@@ -93,3 +93,9 @@ class ReviewedRegressions(unittest.TestCase):
     if body is None:return {'name':'m1','state':'ready','alive':True,'kernel':'old6','boot_id':'actual'}
     return {'exit_code':0,'stdout':'{}','stderr':'','via':'serial'}
   out=controller.run(binding,Fake());self.assertEqual(out['status'],'M1_TARGET_FAILED');self.assertEqual(out['actual_exec']['via'],'serial')
+
+class LeaseBudgetRegression(unittest.TestCase):
+ def test_same_holder_short_remaining_lease_is_not_enough(self):
+  p={'device':'m1','holder':'coordinator'};b={'expected_boot_id':'actual','expected_kernel':'old6'};d={'name':'m1','state':'ready','alive':True,'boot_id':'actual','kernel':'old6','lease':{'holder':'coordinator','expires':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=1)).isoformat()}}
+  with self.assertRaisesRegex(RuntimeError,'expire inside phase'):controller.state_gate(d,p,b,True,990)
+  d['lease']['expires']=(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=1000)).isoformat();controller.state_gate(d,p,b,True,990)

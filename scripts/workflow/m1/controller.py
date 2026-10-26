@@ -2,7 +2,7 @@
 """Reviewed fixed-protocol M1 workflow transport over existing Maclab admin API.
 No new daemon, SSH credentials, arbitrary command template, or package installer.
 """
-import argparse,base64,hashlib,json,os,shlex,stat,time,urllib.error,urllib.parse,urllib.request
+import argparse,base64,datetime,hashlib,json,os,shlex,stat,time,urllib.error,urllib.parse,urllib.request
 from pathlib import Path
 
 LIMIT=4*1024**2
@@ -28,10 +28,12 @@ class API:
   req=urllib.request.Request(self.c['url']+path,data=None if body is None else json.dumps(body,separators=(',',':')).encode(),headers={'Authorization':'Bearer '+self.c['token'],'Content-Type':'application/json'})
   with urllib.request.urlopen(req,timeout=timeout) as response:raw=response.read(LIMIT+1)
   need(len(raw)<=LIMIT,'API response exceeds bound');return json.loads(raw)
-def state_gate(d,p,binding,mutates):
+def state_gate(d,p,binding,mutates,minimum_seconds=0):
  need(d['name']==p['device'] and d['state']=='ready' and d['alive'] and not d.get('active_job') and not d.get('queued'),'Mac is not genuinely ready/idle')
  need(d['kernel']==binding['expected_kernel'] and d['boot_id']==binding['expected_boot_id'],'fresh live controller identity drift')
- if mutates:need(d.get('lease',{}).get('holder')==p['holder'],'exclusive coordinator lease required')
+ if mutates:
+  lease=d.get('lease',{});need(lease.get('holder')==p['holder'],'exclusive coordinator lease required')
+  expires=datetime.datetime.fromisoformat(lease['expires'].replace('Z','+00:00'));need(expires.tzinfo is not None and (expires-datetime.datetime.now(datetime.timezone.utc)).total_seconds()>=minimum_seconds,'lease would expire inside phase/cleanup; renew existing lease, no new user permission')
  return d
 
 def run(binding,api=None):
@@ -42,7 +44,7 @@ def run(binding,api=None):
  need(source==Path(__file__).with_name('target.py').read_bytes(),'controller/target closure mismatch')
  c=api or API(config());mutates=action!='inventory-cache';d=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe=''));binding=dict(binding)
  if not mutates and binding.get('expected_boot_id') is None:binding['expected_boot_id']=d['boot_id']
- state_gate(d,p,binding,mutates)
+ state_gate(d,p,binding,mutates,int(binding['deadline_seconds'])+90)
  payload={k:binding[k] for k in ('action','profile','expected_boot_id','expected_kernel','deadline_seconds')}
  if 'entry' in binding:payload['entry']=binding['entry']
  if mutates:
@@ -55,7 +57,9 @@ def run(binding,api=None):
  # quoted arguments; no profile data is evaluated as source or shell syntax.
  argv=['/usr/bin/python3','-E','-B','-c',source.decode(),'--request-json',json.dumps(payload,separators=(',',':'))]
  command=shlex.join(argv);need(len(command.encode())<=120000,'fixed transport ceiling exceeded')
- timeout=int(binding['deadline_seconds']);need(1<=timeout<=900,'bounded phase timeout required')
+ timeout=int(binding['deadline_seconds']);need(1<=timeout<=1900,'bounded phase timeout required')
+ if action=='invoke-packet':need(timeout==1900,'owner/PacketC requires complete1900-second outer cleanup envelope')
+ else:need(timeout<=900,'metadata/cache deadline ceiling')
  result=c.request('/api/devices/'+urllib.parse.quote(p['device'],safe='')+'/exec',{'command':command,'timeout_sec':timeout+60},timeout+90)
  if result['exit_code']!=0 or result.get('via')!='agent':return {'status':'M1_TARGET_FAILED','device':p['device'],'boot_id':d['boot_id'],'actual_exec':result,'source_sha256':pin['sha256']}
  # Preserve the authentic full API receipt in caller stdout for the workflow
