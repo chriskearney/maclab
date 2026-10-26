@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -65,6 +66,37 @@ func TestMesaSessionEnvironmentIsExplicitAdapterContract(t *testing.T) {
 	for _, k := range []string{"HOME", "USER", "XDG_SESSION_ID", "LD_PRELOAD"} {
 		if _, exists := env[k]; exists {
 			t.Fatal("leaked", k)
+		}
+	}
+}
+
+func TestMesaCleanupErrorCannotSkipIndependentKernelCleanup(t *testing.T) {
+	mesaErr := errors.New("Mesa live cgroup preserved")
+	kernelErr := errors.New("kernel entry rewrite failed")
+	for _, tc := range []struct{ mesa, kernel error }{{mesaErr, nil}, {nil, kernelErr}, {mesaErr, kernelErr}, {nil, nil}} {
+		called := false
+		marker := filepath.Join(t.TempDir(), "kernel-cleanup-ran")
+		got := cleanupAfterMesa(tc.mesa, func() error {
+			called = true
+			if err := os.WriteFile(marker, []byte("disarm/remove/rewrite fixture"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			return tc.kernel
+		})
+		if !called {
+			t.Fatal("ordinary cleanup skipped")
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Fatal(err)
+		}
+		if tc.mesa != nil && !errors.Is(got, tc.mesa) {
+			t.Fatal("Mesa error hidden", got)
+		}
+		if tc.kernel != nil && !errors.Is(got, tc.kernel) {
+			t.Fatal("kernel error hidden", got)
+		}
+		if tc.mesa == nil && tc.kernel == nil && got != nil {
+			t.Fatal(got)
 		}
 	}
 }

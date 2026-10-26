@@ -426,6 +426,10 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.Tests = append(j.Result.Tests, tr) })
 		r.ev("test %s: %s", t.Name, testVerdict(tr))
+		if j.Spec.Mesa != nil && t.Builtin == "boot-health" && !tr.Passed {
+			r.ev("boot-health did not pass; remaining Mesa GPU suites/tests were not run")
+			break
+		}
 	}
 	nTests := len(tests)
 	if omt := r.currentOMT(); omt != nil && (j.Spec.Publish || (r.s.cfg.OMTPublish && j.Spec.Baseline)) {
@@ -643,10 +647,25 @@ func testsFor(spec api.JobSpec) []api.TestSpec {
 		if spec.Mesa.OfficialGPU {
 			timeout = 2100
 		}
-		tests = append([]api.TestSpec{{Name: "mesa-provider", Builtin: "mesa-provider", TimeoutSec: timeout}}, tests...)
+		health := api.TestSpec{Name: "boot-health", Builtin: "boot-health", TimeoutSec: 180}
+		rest := make([]api.TestSpec, 0, len(tests))
+		found := false
+		for _, test := range tests {
+			if test.Builtin == "boot-health" {
+				if !found {
+					health = test
+					found = true
+					continue
+				}
+			}
+			rest = append(rest, test)
+		}
+		// Explicit caller-selected boot-health settings are preserved, but it
+		// always precedes mandatory GL/Vulkan and any future official suite.
+		return append([]api.TestSpec{health, {Name: "mesa-provider", Builtin: "mesa-provider", TimeoutSec: timeout}}, rest...)
 	}
-	for _, t := range tests {
-		if t.Builtin == "boot-health" {
+	for _, test := range tests {
+		if test.Builtin == "boot-health" {
 			return tests
 		}
 	}

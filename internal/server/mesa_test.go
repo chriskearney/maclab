@@ -351,3 +351,58 @@ func TestMesaEvidenceCannotSalvageMissingIdentityOrCleanup(t *testing.T) {
 		}
 	}
 }
+
+func TestMesaBootHealthAlwaysPrecedesEveryGPUPhase(t *testing.T) {
+	custom := api.TestSpec{Name: "explicit-health", Builtin: "boot-health", TimeoutSec: 91}
+	for _, official := range []bool{false, true} {
+		for _, supplied := range [][]api.TestSpec{nil, {{Name: "gui", Builtin: "gui-smoke"}, custom}, {custom, {Name: "extra", Builtin: "gui-smoke"}, custom}} {
+			got := testsFor(api.JobSpec{Mesa: &api.MesaSpec{OfficialGPU: official}, Tests: supplied})
+			if len(got) < 2 || got[0].Builtin != "boot-health" || got[1].Builtin != "mesa-provider" {
+				t.Fatal(got)
+			}
+			n := 0
+			for _, test := range got {
+				if test.Builtin == "boot-health" {
+					n++
+				}
+			}
+			wantHealth := 0
+			for _, test := range supplied {
+				if test.Builtin == "boot-health" {
+					wantHealth++
+				}
+			}
+			if wantHealth == 0 {
+				wantHealth = 1
+			}
+			if n != wantHealth {
+				t.Fatal("caller health tests omitted/duplicated", got)
+			}
+			if supplied != nil && got[0] != custom {
+				t.Fatal("caller health settings lost", got)
+			}
+			want := 120
+			if official {
+				want = 2100
+			}
+			if got[1].TimeoutSec != want {
+				t.Fatal("GPU budget changed", got)
+			}
+		}
+	}
+}
+
+func TestMesaSimulatedFailedBootHealthNeverStartsProvider(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	spec := mesaSpec(l)
+	spec.Tests = []api.TestSpec{{Name: "will-fail-boot-health", Builtin: "boot-health"}, {Name: "later-gui", Builtin: "gui-smoke"}}
+	j := l.run(spec)
+	l.expect(j, api.OutcomeTestsFailed)
+	if len(j.Result.Tests) != 1 || j.Result.Tests[0].Name != "will-fail-boot-health" || j.Result.Tests[0].Passed {
+		t.Fatal(j.Result.Tests)
+	}
+	if j.Result.Mesa == nil || j.Result.Mesa.Verdict == "PASS" || len(j.Result.Mesa.Provider) != 0 {
+		t.Fatal("GPU proof fabricated after failed boot health", j.Result.Mesa)
+	}
+}

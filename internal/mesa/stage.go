@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -444,6 +443,11 @@ func Stage(ctx context.Context, parent, job string, spec api.MesaSpec, fetch Fet
 }
 func stageWith(ctx context.Context, parent, job string, spec api.MesaSpec, fetch Fetch, tools map[string]string) (Manifest, error) {
 	var m Manifest
+	ctx, cancel := context.WithTimeout(ctx, stageTimeout)
+	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return m, err
+	}
 	if !jobRE.MatchString(job) || spec.Mode != api.MesaStaged || len(spec.Packages) < 1 || len(spec.Packages) > 8 {
 		return m, errors.New("invalid staged Mesa request")
 	}
@@ -480,26 +484,8 @@ func stageWith(ctx context.Context, parent, job string, spec api.MesaSpec, fetch
 		if e != nil || got != p.SHA256 {
 			return m, errors.New("downloaded package hash/size mismatch")
 		}
-		cmd := exec.CommandContext(ctx, "zstd", "-d", "--stdout", "--memory=256MB", archive)
-		out, e := cmd.StdoutPipe()
-		if e != nil {
+		if e := decodePackage(ctx, archive, &u, p); e != nil {
 			return m, e
-		}
-		var stderr strings.Builder
-		cmd.Stderr = &limitedWriter{W: &stderr, N: 8192}
-		if e = cmd.Start(); e != nil {
-			return m, e
-		}
-		e = u.unpack(out, p)
-		if e != nil {
-			cmd.Process.Kill()
-		}
-		wait := cmd.Wait()
-		if e != nil {
-			return m, e
-		}
-		if wait != nil {
-			return m, fmt.Errorf("zstd: %w: %s", wait, stderr.String())
 		}
 	}
 	if e := finalize(&m, u.links); e != nil {
@@ -533,12 +519,16 @@ func stageWith(ctx context.Context, parent, job string, spec api.MesaSpec, fetch
 }
 
 type limitedWriter struct {
-	W io.Writer
-	N int
+	W         io.Writer
+	N         int
+	Truncated bool
 }
 
 func (w *limitedWriter) Write(b []byte) (int, error) {
 	n := len(b)
+	if len(b) > w.N {
+		w.Truncated = true
+	}
 	if w.N > 0 {
 		take := min(w.N, len(b))
 		_, e := w.W.Write(b[:take])
