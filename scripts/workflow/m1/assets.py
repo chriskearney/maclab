@@ -99,7 +99,7 @@ for row in rows:
    os.fsync(out)
   finally:os.close(out)
   syncdir(P);result[name]={**verify(dest,row),'reused':False}
-print(json.dumps({'status':'EXACT_ASSETS_STAGED_ONLY','operation':q['operation'],'packet':str(P),'boot_id':q['boot_id'],'assets':result,'no_package_or_boot_changes':True}))
+print(json.dumps({'status':'EXACT_ASSETS_STAGED_ONLY','operation':q['operation'],'packet':str(P),'boot_id':q['boot_id'],'assets':result,'no_package_or_boot_changes':True,**({'root_plan_sha256':q['root_plan_sha256']} if 'root_plan_sha256' in q else {})}))
 '''
 def run(binding,api=None):
  c=sdk();p=binding['profile'];op=binding['operation'];need(op in ('reuse-assets','stage-input'),'finite asset action');need(binding['source_reviewed_by'],'root-reviewed source needed')
@@ -120,7 +120,13 @@ def run(binding,api=None):
  if op=='stage-input' and any(r['name'] in PRODUCED for r in rows):payload.update(root_plan_sha256=binding['root_plan_sha256'],producer_scope=binding['producer_scope'])
  command=shlex.join(['/usr/bin/python3','-E','-B','-c',REMOTE,json.dumps(payload,separators=(',',':'))]);need(len(command.encode())<=120000,'fixed transport ceiling; never broaden argument limit')
  r=client.request('/api/devices/m1/exec',{'command':command,'timeout_sec':240},330)
- if r['exit_code']!=0 or r.get('via')!='agent':return {'status':'M1_ASSET_STAGE_FAILED','actual_exec':r,'completion_claim':False}
- out=json.loads(r['stdout']);return {'status':'M1_ASSETS_STAGED_ONLY','target':out,'actual_exec':r,'completion_claim':False}
+ if r['exit_code']!=0 or r.get('via')!='agent' or r.get('stderr'):return {'status':'M1_ASSET_STAGE_FAILED','actual_exec':r,'completion_claim':False}
+ try:
+  out=json.loads(r['stdout']);need(type(out) is dict and out.get('status')=='EXACT_ASSETS_STAGED_ONLY' and out.get('operation')==op and out.get('packet')==p['packet'] and out.get('boot_id')==binding['expected_boot_id'] and out.get('no_package_or_boot_changes') is True,'actual asset response identity/status mismatch')
+  actual=out['assets'];need(type(actual) is dict and set(actual)=={row['name'] for row in rows},'actual asset response keyset mismatch')
+  for row in rows:need(type(actual[row['name']]) is dict and actual[row['name']].get('sha256')==row['sha256'] and type(actual[row['name']].get('bytes')) is int and actual[row['name']]['bytes']==row['bytes'],'actual staged artifact pin mismatch')
+  if 'root_plan_sha256' in payload:need(out.get('root_plan_sha256')==payload['root_plan_sha256'],'actual produced proof Plan mismatch')
+ except Exception as e:return {'status':'M1_ASSET_STAGE_FAILED','actual_exec':r,'completion_claim':False,'response_error':str(e)}
+ return {'status':'M1_ASSETS_STAGED_ONLY','target':out,'actual_exec':r,'completion_claim':False}
 if __name__=='__main__':
  a=argparse.ArgumentParser();a.add_argument('--binding',type=Path,required=True);x=a.parse_args();print(json.dumps(run(json.loads(x.binding.read_bytes())),separators=(',',':')))

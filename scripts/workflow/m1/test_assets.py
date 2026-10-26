@@ -9,7 +9,7 @@ class FiniteAssetTransport(unittest.TestCase):
   class API:
    def request(self,path,body=None,timeout=60):
     if body is None:return {'name':'m1','alive':True,'state':'ready','kernel':'7.2.11-6-1-ARCH','boot_id':'cpu-boot','lease':{'holder':'cpu-owner','expires':(datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=1)).isoformat()}}
-    args=shlex.split(body['command']);outer.assertEqual(args[:4],['/usr/bin/python3','-E','-B','-c']);compile(args[4],'<actual-asset-remote>','exec');outer.assertLess(len(body['command'].encode()),120000);q=json.loads(args[5]);outer.assertEqual(q['agent_parent']['path'],'/fixture/lab-agent');return {'exit_code':0,'via':via,'stdout':'{"status":"EXACT_ASSETS_STAGED_ONLY"}','stderr':''}
+    args=shlex.split(body['command']);outer.assertEqual(args[:4],['/usr/bin/python3','-E','-B','-c']);compile(args[4],'<actual-asset-remote>','exec');outer.assertLess(len(body['command'].encode()),120000);q=json.loads(args[5]);outer.assertEqual(q['agent_parent']['path'],'/fixture/lab-agent');out={'status':'EXACT_ASSETS_STAGED_ONLY','operation':q['operation'],'packet':q['packet'],'boot_id':q['boot_id'],'assets':{r['name']:{'sha256':r['sha256'],'bytes':r['bytes']} for r in q['assets']},'no_package_or_boot_changes':True};out.update({k:q[k] for k in ('root_plan_sha256',) if k in q});return {'exit_code':0,'via':via,'stdout':json.dumps(out),'stderr':''}
   return API()
  def test_large_immutable_asset_is_metadata_only_no_network_payload(self):
   b=self.b();out=m.run(b,self.api());self.assertEqual(out['status'],'M1_ASSETS_STAGED_ONLY');self.assertFalse(out['completion_claim']);self.assertNotIn('base64',b['assets'][0])
@@ -38,5 +38,22 @@ class FiniteAssetTransport(unittest.TestCase):
   for name in ('OWNER-BACKUP-DECISIONS.json','FALLBACK-CONFIG-CLOSURE.json'):
    b=self.b();b['assets'][0]['name']=name
    with self.subTest(name=name),self.assertRaisesRegex(RuntimeError,'unsupported named artifact'):m.run(b,self.api())
+ def test_foreign_missing_drifted_or_stderr_response_preserves_actual_failure(self):
+  for change in (lambda r,o:o.update(status='made-up'),lambda r,o:o.update(packet='old-packet'),lambda r,o:o.update(boot_id='old-boot'),lambda r,o:o.update(operation='other'),lambda r,o:o.update(assets={}),lambda r,o:next(iter(o['assets'].values())).update(sha256='f'*64),lambda r,o:r.update(stderr='unexpected diagnostic')):
+   b=self.b();base=self.api()
+   class Changed:
+    def request(self,path,body=None,timeout=60):
+     r=base.request(path,body,timeout)
+     if body is not None:o=json.loads(r['stdout']);change(r,o);r['stdout']=json.dumps(o)
+     return r
+   out=m.run(b,Changed());self.assertEqual(out['status'],'M1_ASSET_STAGE_FAILED');self.assertEqual(out['actual_exec']['exit_code'],0);self.assertFalse(out['completion_claim'])
+ def test_produced_response_plan_cannot_be_missing_or_foreign(self):
+  b=self.produced_binding();base=self.api()
+  class Changed:
+   def request(self,path,body=None,timeout=60):
+    r=base.request(path,body,timeout)
+    if body is not None:o=json.loads(r['stdout']);o.pop('root_plan_sha256');r['stdout']=json.dumps(o)
+    return r
+  self.assertEqual(m.run(b,Changed())['status'],'M1_ASSET_STAGE_FAILED')
  def test_serial_result_cannot_be_completed(self):
   out=m.run(self.b(),self.api('serial'));self.assertEqual(out['status'],'M1_ASSET_STAGE_FAILED');self.assertEqual(out['actual_exec']['via'],'serial')
