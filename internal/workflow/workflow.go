@@ -349,7 +349,9 @@ func (r *Runner) Open() (*os.File, *State, error) {
 	return l, &s, nil
 }
 func (r *Runner) save(s *State) error {
-	b, err := json.MarshalIndent(s, "", "  ")
+	// Whitespace is not evidence. Compact JSON retains every record and raw
+	// response while reserving the same hard 4MiB bound for real content.
+	b, err := json.Marshal(s)
 	if err != nil {
 		return err
 	}

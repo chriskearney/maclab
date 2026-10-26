@@ -44,7 +44,7 @@ def write_capture(path,value):
   while view:n=os.write(fd,view);need(n>0,'short capture write');view=view[n:]
   os.fsync(fd)
  finally:os.close(fd)
- need(path.read_bytes()==raw,'private capture readback mismatch');d=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ st=path.lstat();need(stat.S_ISREG(st.st_mode) and st.st_uid==os.geteuid() and stat.S_IMODE(st.st_mode)==0o600,'private capture ownership/mode');need(read_pin({'path':str(path),'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw)})==raw,'private capture readback mismatch');d=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
  try:os.fsync(d)
  finally:os.close(d)
  return {'path':str(path),'sha256':hashlib.sha256(raw).hexdigest(),'bytes':len(raw),'independent_retention_claim':False}
@@ -96,6 +96,9 @@ def run(binding,api=None):
  # Preserve the authentic full API receipt in caller stdout for the workflow
  # journal; a success status is never synthesized from missing target evidence.
  out={'status':'OWNER_EXIT_ONLY_REQUIRES_INDEPENDENT_RECEIPT_VALIDATION','exit_code':result['exit_code'],'completion_claim':False} if action=='invoke-packet' else json.loads(result['stdout']);need(isinstance(out,dict),'target result is not an object')
- return {'status':'M1_'+action.upper().replace('-','_')+'_OBSERVED','device':p['device'],'boot_id':d['boot_id'],'kernel':d['kernel'],'actual_exec':result,'target':out,'source_sha256':pin['sha256'],'controller_state':{k:d.get(k) for k in ['name','state','alive','boot_id','kernel','lease','active_job','queued']},'no_new_user_confirmation':True}
+ envelope={'status':'M1_'+action.upper().replace('-','_')+'_OBSERVED','device':p['device'],'boot_id':d['boot_id'],'kernel':d['kernel'],'actual_exec':result,'target':out,'source_sha256':pin['sha256'],'controller_state':{k:d.get(k) for k in ['name','state','alive','boot_id','kernel','lease','active_job','queued']},'no_new_user_confirmation':True}
+ if action=='collect-backup':
+  captured=write_capture(Path(__file__).parent/'collect-backup-envelope.json',envelope);envelope['envelope']={k:captured[k] for k in ('path','sha256','bytes')}
+ return envelope
 if __name__=='__main__':
  a=argparse.ArgumentParser();a.add_argument('--binding',type=Path,required=True);x=a.parse_args();print(json.dumps(run(json.loads(x.binding.read_bytes())),separators=(',',':')))

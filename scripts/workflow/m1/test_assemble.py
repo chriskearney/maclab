@@ -23,6 +23,12 @@ class FullAssembly(unittest.TestCase):
   stages=[x for x in p['phases'] if x['id'].startswith('input-') and x['kind']=='bind'];self.assertEqual(len(stages),12)
   for x in stages:self.assertNotIn('produced',x['template']);self.assertEqual(len(x['template']['assets']),1);self.assertIn('/assets/0/base64',x['bind']);self.assertIn('producer_scope',x['template'])
   job=next(x for x in p['phases'] if x['id']=='installed-job');self.assertEqual(job['m1_submission_admission']['agent_sha256'],{'from':'preflight','pointer':'/target/current/agent_parent/sha256'})
+ def test_three_large_main_consumers_use_verified_local_envelope_only(self):
+  p,r=self.compile();by={x['id']:x for x in p['phases']}
+  for name in ('package-produced-binding','capture-context-binding','rollback-context-binding'):self.assertEqual(by[name]['bind']['/main_capture'],{'from':'backup-collected','pointer':'/envelope'})
+  for name in ('main-retention-binding-input','supplement-retention-binding-input'):
+   self.assertEqual(set(by[name]['template']['main_capture']),{'receipt','receipt_base64','receipt_sha256','source_freeze_sha256'});self.assertNotIn('/main_capture',by[name]['bind'])
+  for name in ('supplement-stage-binding','supplement-capture-binding','supplement-collect-binding'):self.assertEqual(set(by[name]['template']['main_collection']),{'receipt','receipt_base64','receipt_sha256','source_freeze_sha256'})
  def test_runtime_paths_bind_actual_plan_and_current_boot_not_old_completion(self):
   p,r=self.compile();by={x['id']:x for x in p['phases']};self.assertEqual(by['package-produced-binding']['template']['plan_path'],r['plan']['path']);self.assertEqual(by['packet-c-produced-binding']['bind']['/expected_boot_id'],{'from':'normal-wait7','pointer':'/boot_id'});self.assertEqual(by['capture-context-binding']['template']['operation'],'build-capture-context');self.assertEqual(by['rollback-context-binding']['template']['operation'],'build');self.assertIn('/target/files/packet-c-clearance.json/sha256',str(by['actual-packet-c-receipt-pins']['bind']))
 if __name__=='__main__':unittest.main()
