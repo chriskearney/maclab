@@ -64,6 +64,13 @@ func run() error {
 				if err != nil {
 					return err
 				}
+				for _, phase := range r.Plan.Phases {
+					if phase.M1Admission != nil {
+						c := r.Backend.(*client.Client)
+						r.Backend = &workflow.M1Backend{Backend: c, Client: c}
+						break
+					}
+				}
 				break
 			}
 		}

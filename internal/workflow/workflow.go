@@ -55,18 +55,19 @@ type Helper struct {
 	Closure []Pin `json:"closure"`
 }
 type Phase struct {
-	ID         string           `json:"id"`
-	Kind       string           `json:"kind"` // cache, upload, bind, helper, submit, wait
-	TimeoutSec int              `json:"timeout_sec"`
-	Mutates    bool             `json:"mutates"`
-	Scope      string           `json:"scope,omitempty"`
-	File       *Pin             `json:"file,omitempty"`
-	Template   json.RawMessage  `json:"template,omitempty"`
-	Bind       map[string]Value `json:"bind,omitempty"`
-	Helper     string           `json:"helper,omitempty"`
-	InputPhase string           `json:"input_phase,omitempty"`
-	Checks     []Check          `json:"checks,omitempty"`
-	Recovery   bool             `json:"recovery,omitempty"` // explicit branch; never auto-runs
+	ID          string                 `json:"id"`
+	Kind        string                 `json:"kind"` // cache, upload, bind, helper, submit, wait
+	TimeoutSec  int                    `json:"timeout_sec"`
+	Mutates     bool                   `json:"mutates"`
+	Scope       string                 `json:"scope,omitempty"`
+	File        *Pin                   `json:"file,omitempty"`
+	Template    json.RawMessage        `json:"template,omitempty"`
+	Bind        map[string]Value       `json:"bind,omitempty"`
+	Helper      string                 `json:"helper,omitempty"`
+	InputPhase  string                 `json:"input_phase,omitempty"`
+	Checks      []Check                `json:"checks,omitempty"`
+	Recovery    bool                   `json:"recovery,omitempty"` // explicit branch; never auto-runs
+	M1Admission *M1SubmissionAdmission `json:"m1_submission_admission,omitempty"`
 }
 type Plan struct {
 	Schema  string            `json:"schema"`
@@ -226,6 +227,15 @@ func (p Plan) Validate() error {
 			}
 		default:
 			return fmt.Errorf("unknown phase kind %q", s.Kind)
+		}
+		if s.M1Admission != nil {
+			g := s.M1Admission
+			if s.Kind != "submit" || p.Device != "m1" || !known[g.BootID.From] || g.BootID.From == "inputs" || g.BootID.From == "workflow" || g.MinimumLeaseSec < 2700 || g.MinimumLeaseSec > 7200 {
+				return errors.New("M1 submission admission requires a prior genuine boot observation and 2700..7200-second lease")
+			}
+			if _, err := tokens(g.BootID.Pointer); err != nil {
+				return err
+			}
 		}
 		keys := make([]string, 0, len(s.Bind))
 		for key := range s.Bind {
@@ -580,7 +590,24 @@ func (r *Runner) execute(ctx context.Context, s *State, p Phase) ([]byte, error)
 		if err = r.save(s); err != nil {
 			return nil, err
 		}
-		j, err := r.Backend.Submit(ctx, spec)
+		var j *api.Job
+		if p.M1Admission != nil {
+			admitted, ok := r.Backend.(M1AdmittingBackend)
+			if !ok {
+				return nil, errors.New("explicit M1 admission needs the reviewed standalone backend")
+			}
+			v, e := r.value(s, p.M1Admission.BootID)
+			if e != nil {
+				return nil, e
+			}
+			boot, ok := v.(string)
+			if !ok || boot == "" {
+				return nil, errors.New("M1 admission boot observation is missing")
+			}
+			j, err = admitted.SubmitM1(ctx, spec, boot, p.M1Admission.MinimumLeaseSec)
+		} else {
+			j, err = r.Backend.Submit(ctx, spec)
+		}
 		if err != nil {
 			return nil, err
 		}
