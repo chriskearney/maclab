@@ -28,6 +28,9 @@ comment: machine-id=0123456789abcdef0123456789abcdef order-priority=50
 func testLimine(t *testing.T) *limineLayout {
 	t.Helper()
 	dir := t.TempDir()
+	priorLocks := bootPartitionLocks
+	bootPartitionLocks = []string{filepath.Join(dir, "boot-partition.lock"), filepath.Join(dir, "limine-global.lock")}
+	t.Cleanup(func() { bootPartitionLocks = priorLocks })
 	l := &limineLayout{Conf: filepath.Join(dir, "limine.conf"), Stage: filepath.Join(dir, "maclab")}
 	if err := os.WriteFile(l.Conf, []byte(omarchyLimineConf), 0o644); err != nil {
 		t.Fatal(err)

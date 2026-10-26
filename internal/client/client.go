@@ -188,7 +188,26 @@ func (c *Client) Upload(ctx context.Context, path string) (string, error) {
 
 func (c *Client) Submit(ctx context.Context, spec api.JobSpec) (*api.Job, error) {
 	var out api.Job
-	return &out, c.do(ctx, "POST", "/api/jobs", jsonBody(spec), &out)
+	if spec.Mesa != nil {
+		var caps api.MesaCapabilities
+		if err := c.do(ctx, "GET", "/api/mesa", nil, &caps); err != nil {
+			return nil, fmt.Errorf("controller does not support first-class Mesa; no job submitted: %w", err)
+		}
+		if caps.Schema != 1 || !caps.Staged || (spec.Mesa.OfficialGPU && !caps.OfficialGPU) {
+			return nil, fmt.Errorf("controller Mesa capability/mode unavailable; no job submitted")
+		}
+	}
+	route := "/api/jobs"
+	if spec.Mesa != nil {
+		route = "/api/mesa/jobs"
+	}
+	if err := c.do(ctx, "POST", route, jsonBody(spec), &out); err != nil {
+		return nil, err
+	}
+	if spec.Mesa != nil && out.Spec.Mesa == nil {
+		return nil, fmt.Errorf("controller omitted Mesa request identity; job is not valid Mesa evidence")
+	}
+	return &out, nil
 }
 
 func (c *Client) Job(ctx context.Context, id string) (*api.Job, error) {

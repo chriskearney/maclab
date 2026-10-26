@@ -442,6 +442,9 @@ func (l *Linux) removeJob(job string) error {
 }
 
 func (l *Linux) Cleanup(job string, all bool) error {
+	if err := l.cleanupMesa(job, all); err != nil {
+		return err
+	}
 	defer syncDisks()
 	g, err := detectBootloader()
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 )
 
 var gcMu sync.Mutex
@@ -58,8 +59,8 @@ func (s *Server) gcArtifacts() {
 	if budget <= 0 {
 		budget = 20 << 30
 	}
-	pinned := map[string]bool{} // never deleted: unfinished work
-	keep := map[string]bool{}   // deleted only when over budget
+	pinned := map[string]bool{mesa.GLProbeSHA: true, mesa.VKProbeSHA: true} // never deleted: unfinished work
+	keep := map[string]bool{}                                               // deleted only when over budget
 	// The references decide what may be deleted, so a reference that cannot
 	// be read stops this pass: nothing is deleted on an incomplete picture.
 	skip := func(what string, err error) {

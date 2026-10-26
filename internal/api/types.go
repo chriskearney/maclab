@@ -104,6 +104,8 @@ type Facts struct {
 	PanicTimeout  int      `json:"panic_timeout"`
 	GUIUser       string   `json:"gui_user,omitempty"`
 	AgentVersion  string   `json:"agent_version"`
+	MesaStaged    bool     `json:"mesa_staged,omitempty"`
+	MesaOfficial  bool     `json:"mesa_official,omitempty"`
 	PreflightOK   bool     `json:"preflight_ok"`
 	Problems      []string `json:"problems,omitempty"` // each one holds jobs back
 	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
@@ -161,17 +163,18 @@ type CheckinResponse struct {
 
 // Command kinds sent to the agent.
 const (
-	CmdStage    = "stage"
-	CmdBootOnce = "boot_once"
-	CmdReboot   = "reboot"
-	CmdRunTest  = "run_test"
-	CmdCollect  = "collect"
-	CmdCleanup  = "cleanup"
-	CmdCrash    = "crash"
-	CmdScreen   = "screenshot"
-	CmdLogs     = "logs"
-	CmdConfig   = "config" // the running kernel's .config
-	CmdExec     = "exec"
+	CmdMesaStage = "mesa_stage"
+	CmdStage     = "stage"
+	CmdBootOnce  = "boot_once"
+	CmdReboot    = "reboot"
+	CmdRunTest   = "run_test"
+	CmdCollect   = "collect"
+	CmdCleanup   = "cleanup"
+	CmdCrash     = "crash"
+	CmdScreen    = "screenshot"
+	CmdLogs      = "logs"
+	CmdConfig    = "config" // the running kernel's .config
+	CmdExec      = "exec"
 	// CmdRecordKnownGood makes the running kernel the agent's known-good, as
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
 	// outside a lab boot. Promotion sends it.
@@ -190,6 +193,23 @@ type CommandResult struct {
 	OK     bool            `json:"ok"`
 	Error  string          `json:"error,omitempty"`
 	Output json.RawMessage `json:"output,omitempty"`
+}
+
+type MesaCapabilities struct {
+	Schema      int    `json:"schema"`
+	Staged      bool   `json:"staged"`
+	OfficialGPU bool   `json:"official_gpu"`
+	AgentMin    string `json:"agent_min"`
+}
+type MesaStageArgs struct {
+	Spec          MesaSpec `json:"spec"`
+	BootID        string   `json:"boot_id"`
+	Kernel        string   `json:"kernel"`
+	CmdlineSHA256 string   `json:"cmdline_sha256"`
+}
+type MesaStageResult struct {
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Prefix         string `json:"prefix"`
 }
 
 type StageArgs struct {
@@ -281,11 +301,12 @@ type TestSpec struct {
 }
 
 type TestResult struct {
-	Name     string  `json:"name"`
-	Passed   bool    `json:"passed"`
-	ExitCode int     `json:"exit_code"`
-	Seconds  float64 `json:"seconds"`
-	TimedOut bool    `json:"timed_out,omitempty"`
+	Mesa     *MesaResult `json:"mesa,omitempty"`
+	Name     string      `json:"name"`
+	Passed   bool        `json:"passed"`
+	ExitCode int         `json:"exit_code"`
+	Seconds  float64     `json:"seconds"`
+	TimedOut bool        `json:"timed_out,omitempty"`
 	// Skipped: the test couldn't run on this Mac (its kernel lacks what the
 	// test needs), and Error says why. A skipped test is never Passed, so it
 	// fails the job like any other test that didn't pass.
@@ -372,9 +393,11 @@ const (
 
 // MesaSpec pins the split packages a Mesa job tests.
 type MesaSpec struct {
-	Mode     string        `json:"mode"`            // MesaStaged (MesaInstalled is refused for now)
-	Packages []MesaPackage `json:"packages"`        // the exact split packages, as uploaded artifacts
-	Build    string        `json:"build,omitempty"` // the finished package build whose files they are (checked by sha256 at submission), if any
+	OfficialGPU         bool          `json:"official_gpu,omitempty"`
+	SigningPublicSHA256 string        `json:"signing_public_sha256,omitempty"`
+	Mode                string        `json:"mode"`            // MesaStaged (MesaInstalled is refused for now)
+	Packages            []MesaPackage `json:"packages"`        // the exact split packages, as uploaded artifacts
+	Build               string        `json:"build,omitempty"` // the finished package build whose files they are (checked by sha256 at submission), if any
 }
 
 // MesaPackage is one pinned split package (for example mesa-aurora or
@@ -387,11 +410,18 @@ type MesaPackage struct {
 // MesaResult is a Mesa job's verdicts. Semantics restates what the mode
 // covers, so a staged result can never be read as an installed one.
 type MesaResult struct {
-	Mode      string            `json:"mode"`
-	Semantics string            `json:"semantics"`
-	Packages  []MesaPackage     `json:"packages"`
-	Provider  map[string]string `json:"provider,omitempty"` // api (gl, vulkan) -> NATIVE_STAGED, SYSTEM_PROVIDER, SOFTWARE or MISSING
-	Verdict   string            `json:"verdict"`            // PASS, FAIL or INCOMPLETE
+	Job             string            `json:"job"`
+	BootID          string            `json:"boot_id"`
+	Kernel          string            `json:"kernel"`
+	ManifestSHA256  string            `json:"manifest_sha256"`
+	CleanupVerified bool              `json:"cleanup_verified"`
+	Simulated       bool              `json:"simulated,omitempty"`
+	Evidence        map[string]any    `json:"evidence,omitempty"`
+	Mode            string            `json:"mode"`
+	Semantics       string            `json:"semantics"`
+	Packages        []MesaPackage     `json:"packages"`
+	Provider        map[string]string `json:"provider,omitempty"` // api (gl, vulkan) -> NATIVE_STAGED, SYSTEM_PROVIDER, SOFTWARE or MISSING
+	Verdict         string            `json:"verdict"`            // PASS, FAIL or INCOMPLETE
 }
 
 type JobEvent struct {

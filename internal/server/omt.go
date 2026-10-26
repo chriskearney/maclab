@@ -206,7 +206,10 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 	if len(changed) > 0 {
 		r.ev("omarchy-m-test: %s", strings.Join(changed, ", "))
 	}
-	if res.KnownGood {
+	if j.Spec.Mesa != nil {
+		res.Reference = "staged Mesa diagnostic: kept existing installed-desktop reference"
+		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
+	} else if res.KnownGood {
 		// A known-good kernel can't regress against itself in a way that blames
 		// the kernel, so the test isn't failed. But a pass that turned into a
 		// fail says something else changed (boot.bin, firmware, a cable), and a
@@ -380,6 +383,8 @@ func omtNodes(base *omtBaseline, status map[string]string, rep omtReport) (regre
 func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 	res := j.Result.OMT
 	switch {
+	case j.Spec.Mesa != nil:
+		return "", errors.New("staged Mesa diagnostics are private and never published")
 	case s.cfg.OMTSite == "":
 		return "", errors.New("publishing is off (labd --omt-site)")
 	case res == nil:

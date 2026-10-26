@@ -407,6 +407,9 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
+	m.HandleFunc("GET /api/mesa", s.viewer(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, api.MesaCapabilities{Schema: 1, Staged: true, OfficialGPU: false, AgentMin: mesaMinAgent})
+	}))
 	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
 	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
 	m.HandleFunc("PATCH /api/devices/{name}", s.admin(s.hPatchDevice))
@@ -430,6 +433,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
 	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
 	m.HandleFunc("POST /api/artifacts", s.admin(s.hPutArtifact))
+	m.HandleFunc("POST /api/mesa/jobs", s.admin(s.hSubmit))
 	m.HandleFunc("POST /api/jobs", s.admin(s.hSubmit))
 	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
 	m.HandleFunc("GET /api/jobs/{id}", s.viewer(s.hJob))
@@ -1183,6 +1187,10 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
+	if r.URL.Path == "/api/mesa/jobs" && spec.Mesa == nil {
+		httpErr(w, 400, "Mesa endpoint requires an explicit Mesa package request")
+		return
+	}
 	j, code, err := s.Submit(spec)
 	if err != nil {
 		httpErr(w, code, "%v", err)
@@ -1328,6 +1336,9 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 		}
 	}
 	for _, t := range spec.Tests {
+		if spec.Mesa == nil && t.Builtin == "mesa-provider" {
+			return nil, 400, errors.New("mesa-provider requires a first-class Mesa package request")
+		}
 		if t.Script != "" {
 			if _, err := os.Stat(s.artifactPath(t.Script)); err != nil {
 				return nil, 400, fmt.Errorf("test %s: script artifact %s not uploaded", t.Name, t.Script)

@@ -1,0 +1,45 @@
+package agent
+
+import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+)
+
+// The runtime's adversarial tests use temporary files, simulated unit metadata
+// and CPU-only subprocesses. They do not initialize a GPU or systemd service.
+func TestMesaRuntimeHostControls(t *testing.T) {
+	if _, e := exec.LookPath("python3"); e != nil {
+		t.Skip("python3 unavailable")
+	}
+	cmd := exec.Command("python3", "-B", "-m", "unittest", "discover", "-s", filepath.Clean("."), "-p", "test_mesa_runtime.py")
+	if out, e := cmd.CombinedOutput(); e != nil {
+		t.Fatalf("Mesa runtime host controls: %v\n%s", e, out)
+	}
+}
+
+func TestMesaCleanupPreservesNestedOrUnreadableCgroup(t *testing.T) {
+	root := t.TempDir()
+	group := filepath.Join(root, "maclab-mesa-j-test-gl.service")
+	child := filepath.Join(group, "child")
+	if e := os.MkdirAll(child, 0700); e != nil {
+		t.Fatal(e)
+	}
+	for _, p := range []string{group, child} {
+		if e := os.WriteFile(filepath.Join(p, "cgroup.procs"), nil, 0600); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if e := mesaGroupsEmpty(root, "j-test"); e != nil {
+		t.Fatal(e)
+	}
+	os.WriteFile(filepath.Join(child, "cgroup.procs"), []byte("123\n"), 0600)
+	if e := mesaGroupsEmpty(root, "j-test"); e == nil {
+		t.Fatal("live nested member accepted")
+	}
+	os.Remove(filepath.Join(child, "cgroup.procs"))
+	if e := mesaGroupsEmpty(root, "j-test"); e == nil {
+		t.Fatal("missing nested membership accepted")
+	}
+}

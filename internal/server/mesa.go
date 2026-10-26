@@ -8,14 +8,14 @@ import (
 	"strings"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 )
 
 // First-class Mesa jobs test pinned split packages (see api.MesaSpec).
 //
-// This first increment defines and validates the request, keeps its package
-// artifacts out of the GC while the job is unfinished, and refuses every job
-// until an agent that implements the staged mode reports mesaMinAgent: no
-// labd dispatches a Mesa job to an agent that cannot honour it.
+// Staged jobs keep their packages pinned while unfinished and require explicit
+// staged-execution capability as well as mesaMinAgent. Installed/official modes
+// remain refused until their separate recovery/runtime contracts are reviewed.
 
 // mesaMinAgent is the first lab-agent with the staged Mesa command and probe.
 const mesaMinAgent = "0.8.0"
@@ -30,15 +30,15 @@ var rePkgName = regexp.MustCompile(`^(?:mesa|mesa-[a-z0-9+_.-]{1,60}|vulkan-[a-z
 // reBuildID is a lab build id, as EnsureBuild makes them (b0102-150405-ab12).
 var reBuildID = regexp.MustCompile(`^b[0-9]{4}-[0-9]{6}-[0-9a-f]{4}$`)
 
-// mesaStagedSemantics is recorded with every result, so a staged run is never
-// mistaken for the installed desktop's Mesa.
-const mesaStagedSemantics = "staged diagnostic: the pinned packages ran from a private per-job prefix for the job's probe processes only; the desktop kept the installed Mesa, so this says nothing about the installed desktop"
-
 // validateMesa refuses a Mesa request the lab cannot honour exactly. It runs
 // for every job that carries a MesaSpec, before the job is queued.
 func (s *Server) validateMesa(spec api.JobSpec, d api.Device) (int, error) {
 	m := spec.Mesa
 	switch {
+	case m.OfficialGPU:
+		return 409, errors.New("official GPU adapter pending independent review; staged provider mode is available")
+	case m.SigningPublicSHA256 != "":
+		return 400, errors.New("signing public pin requires optional official GPU mode")
 	case m.Mode == api.MesaInstalled:
 		return 400, errors.New("installed Mesa mode is not supported yet: it needs a package transaction with a recovery contract, judged through the installed manifest")
 	case m.Mode != api.MesaStaged:
@@ -56,18 +56,27 @@ func (s *Server) validateMesa(spec api.JobSpec, d api.Device) (int, error) {
 	case m.Build != "" && !reBuildID.MatchString(m.Build):
 		return 400, fmt.Errorf("mesa build %q is not a build id", m.Build)
 	}
+	for _, t := range spec.Tests {
+		if t.Name == "mesa-provider" || t.Builtin == "mesa-provider" {
+			return 400, errors.New("mesa-provider is managed by the Mesa job; do not override it")
+		}
+	}
 	names := map[string]bool{}
+	hashes := map[string]bool{}
 	for _, p := range m.Packages {
 		switch {
 		case !rePkgName.MatchString(p.Name):
 			return 400, fmt.Errorf("package %q is not a Mesa split package name (mesa, mesa-*, vulkan-*, opencl-*)", p.Name)
 		case names[p.Name]:
 			return 400, fmt.Errorf("package %s is pinned twice", p.Name)
+		case hashes[p.SHA256]:
+			return 400, errors.New("one archive cannot stand for two split packages")
 		case !reSHA.MatchString(p.SHA256):
 			return 400, fmt.Errorf("package %s must be an artifact sha256 (upload it first)", p.Name)
 		}
 		names[p.Name] = true
-		if _, err := os.Stat(s.artifactPath(p.SHA256)); err != nil {
+		hashes[p.SHA256] = true
+		if st, err := os.Lstat(s.artifactPath(p.SHA256)); err != nil || !st.Mode().IsRegular() || st.Size() <= 0 || st.Size() > mesa.MaxCompressed {
 			return 400, fmt.Errorf("package %s artifact %s not uploaded", p.Name, p.SHA256)
 		}
 	}
@@ -76,7 +85,15 @@ func (s *Server) validateMesa(spec api.JobSpec, d api.Device) (int, error) {
 			return 400, err
 		}
 	}
+	for _, sha := range []string{mesa.GLProbeSHA, mesa.VKProbeSHA} {
+		st, e := os.Lstat(s.artifactPath(sha))
+		if e != nil || !st.Mode().IsRegular() || st.Size() <= 0 || st.Size() > mesa.MaxFile {
+			return 409, fmt.Errorf("approved render-check helper %s not uploaded; use lab upload for the qualified helper artifact", sha)
+		}
+	}
 	switch {
+	case !d.Facts.MesaStaged:
+		return 409, fmt.Errorf("%s does not advertise staged Mesa capability", d.Name)
 	case d.Facts.GUIUser == "":
 		return 409, fmt.Errorf("%s has no GUI user: the Mesa provider probe runs in the desktop session", d.Name)
 	case !versionAtLeast(d.Facts.AgentVersion, mesaMinAgent):
@@ -139,9 +156,42 @@ func mesaRefs(spec api.JobSpec) []string {
 	if spec.Mesa == nil {
 		return nil
 	}
-	refs := make([]string, 0, len(spec.Mesa.Packages))
+	refs := []string{mesa.GLProbeSHA, mesa.VKProbeSHA}
+	if spec.Mesa.OfficialGPU {
+		refs = append(refs, mesa.OfficialArchiveSHA)
+	}
 	for _, p := range spec.Mesa.Packages {
 		refs = append(refs, p.SHA256)
 	}
 	return refs
+}
+
+// acceptMesa binds typed provider evidence to this staged job, never just an
+// exit code or a caller-supplied native flag. Overall recovery still gates PASS.
+func (r *jobRun) acceptMesa(t *api.TestResult) string {
+	m := t.Mesa
+	if m == nil {
+		return "Mesa provider omitted typed evidence"
+	}
+	m.Semantics = mesa.Semantics
+	if m.Mode != api.MesaStaged || m.Job != r.j.ID || m.BootID != r.bootID || m.Kernel != r.v.snapshot().Kernel || m.ManifestSHA256 != r.mesaManifest || !m.CleanupVerified || m.Verdict != "PASS" || len(m.Provider) != 2 || m.Provider["gl"] != "NATIVE_STAGED" || m.Provider["vulkan"] != "NATIVE_STAGED" {
+		return "Mesa staged provider/boot/manifest/cleanup evidence incomplete"
+	}
+	want := map[string]string{}
+	for _, p := range r.j.Spec.Mesa.Packages {
+		want[p.Name] = p.SHA256
+	}
+	if len(m.Packages) != len(want) {
+		return "Mesa package evidence count mismatch"
+	}
+	for _, p := range m.Packages {
+		if want[p.Name] != p.SHA256 {
+			return "Mesa package evidence pin mismatch"
+		}
+		delete(want, p.Name)
+	}
+	if len(want) != 0 {
+		return "Mesa package evidence missing"
+	}
+	return ""
 }

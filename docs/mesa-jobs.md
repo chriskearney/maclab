@@ -1,69 +1,42 @@
-# First-class Mesa jobs (design and increments)
+# First-class Mesa jobs
 
-A Mesa job tests exact, pinned Mesa split packages (for example `mesa-aurora` and `vulkan-aurora`) on a lab Mac, with a stated meaning and a standard result. It is not an ad hoc shell framework: packages are artifacts like kernels, results land in the job record, and the existing fault, OMT and installed-acceptance machinery stays in charge of what it already judges.
+A staged Mesa job runs exact uploaded split packages in its own private prefix on the selected Mac and test kernel. The compositor and other desktop processes continue using installed Mesa. Results are private diagnostics about the staged providers on that boot; they do not qualify the installed desktop or promote an OMT reference.
 
-## Two meanings, never mixed
-- **Staged (diagnostic).** The packages are unpacked into a private per-job prefix on the Mac. Only the job's own probe processes are pointed at that prefix. The desktop, the compositor and every other process keep the installed Mesa. A staged result is evidence about the packages on this Mac and kernel, **not about the installed desktop**. Every result restates this (`MesaResult.Semantics`), and staged runs are never published.
-- **Installed (desktop).** A real package transaction makes the packages the system's Mesa. That needs a recovery contract: the previous package files pinned for rollback, identity before and after through the installed manifest/acceptance collector, and an explicit session-restart step. It is **not supported yet**, and the server refuses it. No labd ever runs `pacman` on a Mac without that contract.
+## Admission and operator inputs
 
-## Increment 1a (this change): the request, its validation, and safety rails
-- **API:** `JobSpec.Mesa` (`MesaSpec`: mode, pinned packages by artifact sha256, optional producing build) and `JobResult.Mesa` (`MesaResult`: mode, semantics, packages, per-API provider verdicts, overall verdict).
-- **CLI:** `lab run <mac> --mesa-package mesa-aurora=FILE|SHA256 [--mesa-package …] [--mesa-mode staged] [--mesa-build <id>]`. Files are uploaded as artifacts.
-- **Validation at submission** (`internal/server/mesa.go`):
-  - installed mode is refused;
-  - unknown modes, combination with `--installed`, baseline, crash or publish are refused;
-  - 1 to 8 packages, Mesa-family names only (`mesa`, `mesa-*`, `vulkan-*`, `opencl-*`), no duplicates, and each sha uploaded;
-  - the Mac needs a GUI user and lab-agent `0.8.0` or later.
+The controller exposes schema-1 capabilities at `GET /api/mesa`. Mesa submissions use the dedicated `POST /api/mesa/jobs` route. The client never falls back to the older ordinary-job route: an old controller cannot silently discard the Mesa request and boot a kernel-only job. The selected agent must advertise `mesa_staged` capability and version 0.8.0 or newer, and have an existing nonroot GUI account. Stored jobs repeat admission before any device command and after waiting for a build/device.
 
-  **No agent implements the staged mode yet, so every Mesa job is refused today** (409). A defensive runner check refuses any stored Mesa job too.
-- **GC:** a Mesa job's package artifacts are pinned while the job is unfinished, so an over-budget store cannot delete them mid-job. That is what happened to unpinned kernel artifacts on 2026-10-25.
-- **Tests** (`internal/server/mesa_test.go`):
-  - a validation table with 16 refusals and 2 accepts;
-  - the refusal on the current agent through `Submit`;
-  - GC pinning while unfinished and release once done, plus a mutant check that reverting the GC change fails the test.
+Upload the two approved render-check helpers with `lab upload` before the first job. Their hashes are fixed in `internal/mesa/types.go`, and their retained source/provenance is described in `tools/mesa-probes/README.md`. The small helpers remain GC-pinned. The controller must also retain each exact package artifact; unfinished jobs pin every package regardless of job age. Reference-query failures stop artifact GC.
 
-### Hardening after independent review (second commit)
-- **GC:** every unfinished job is pinned however old, not just jobs in the latest-300 window. If any reference query (jobs, unfinished jobs, builds, recipes, configs) fails to query, scan or iterate, the pass stops and deletes nothing.
-- **Runner:** a stored Mesa job is refused at `runJob` entry, before any build, device wait, restore, cleanup or command.
-- **Build provenance:** a given `--mesa-build` must be a finished package build whose files contain each package by sha256 **and** exact package name. The name comes from `<name>-<pkgver>-<pkgrel>-<arch>.pkg.tar.zst`, so `mesa` never matches `mesa-aurora`.
-- **No waivers:** `--omt-allow` is refused on Mesa jobs.
-- **Controls:** each fix has its own test plus a mutant run proving the test fails without it.
+Use the existing kernel selection and recovery options with:
 
-## Admission prerequisites for 1b/1c (from the independent review)
-None of these may be skipped before a provider PASS is reported.
-- **Split coherence from the archives themselves**, not from names. Every package's `.PKGINFO` must agree on `pkgbase`, `pkgver`, `pkgrel` and `arch`, and be consistent with the named build. There must be no path collisions between packages, and every archive must be regular: no absolute paths or `..`, only regular files and in-prefix links, no device nodes, FIFOs, setuid or setgid, and bounded sizes.
-- **API coverage:** each requested API must be provided by the staged set itself (GL by the staged `libEGL_mesa` + `libgallium`, Vulkan by the staged `libvulkan_asahi` ICD). A job never passes with mixed providers, such as staged GL with system Vulkan: the overall PASS needs every requested API `NATIVE_STAGED`.
-- **Faults:** reuse the reviewed per-phase fresh journal cursor and same-boot fault supervisor. Reject any new GPU, DART, timeout or reset event, **whatever the baseline holds**. The generic gates are not enough here: `detect.Classify` deliberately ignores apple-dart DART faults, and `detect.NewLines` normalizes repeats against the baseline. A native PASS is never inferred from ordinary baseline new-lines.
-- **OMT stays honest:** in a staged job OMT judges the installed desktop, is reported as such, and takes no allowlist.
+```
+lab run <mac> --mesa-package mesa-aurora=FILE_OR_SHA256 \
+  --mesa-package vulkan-aurora=FILE_OR_SHA256 --mesa-mode staged
+```
 
-## Increment 1b (next): agent 0.8.0 runs a staged job
-- **Agent command `mesa_stage`:**
-  - fetch each package with the existing authenticated artifact fetch and verify its sha256;
-  - unpack it into `/var/lib/maclab/mesa/<job>/root` with a bounded, path-checked extraction: no absolute paths, no `..`, regular files and in-prefix links only, and no `.INSTALL` scripts run;
-  - record a per-file sha256 manifest;
-  - write an environment file pointing the loaders at the prefix (Vulkan ICD JSON rewritten to the prefix library, EGL vendor file, `LD_LIBRARY_PATH`, DRI and GBM paths).
+An optional `--mesa-build` must name a completed package build containing every requested artifact by exact package name and SHA. Archive contents are checked independently on the agent. Installed mode, `--installed`, baseline, crash, publication, OMT allowlists and replacement of the mandatory provider test are refused. Normal recovery readiness and kernel/ESP admission still apply.
 
-  It makes no system file changes and needs no pacman.
-- **Builtin GUI test `mesa-provider`:** runs the frozen GL and Vulkan render-check probes under that environment and records:
-  - the renderer and device strings;
-  - the probe processes' mapped provider files. These are hashed with regular-file-only, bounded reads; device nodes are never read.
+## Agent staging and provider proof
 
-  A per-API verdict follows:
-  - **`NATIVE_STAGED`** only if the mapped `libgallium`/`libEGL_mesa` (GL) or `libvulkan_asahi` (Vulkan) are the staged files (under the prefix, with sha256 in the staged manifest) **and** the renderer is the native Apple GPU;
-  - **`SYSTEM_PROVIDER`** if the installed system libraries were used instead;
-  - **`SOFTWARE`** for llvmpipe, lavapipe or softpipe;
-  - **`MISSING`** otherwise.
-- **Cleanup:** the job's cleanup removes the prefix, and the agent also removes leftovers at startup. The installed packages and the working kernel are never touched.
-- **Gates:** standard kernel-event and new-error-line gates, OMT as usual (judging the installed desktop, unchanged meaning), job files under `test-mesa-provider/`, and `JobResult.Mesa` filled in.
+`mesa_stage` binds the actual job tag, boot ID, running kernel and command-line digest. It downloads through the authenticated artifact channel and rehashes every archive and helper. It never runs package install scripts or pacman.
 
-## Increment 1c: the official GPU suite as an option
-Optionally run the reviewed official GPU CLI (source `e81d8093`) under the staged environment. Its provider pins are the staged files, its supervisor is unchanged, and its counts and signed-report validation are the official ones. This is the measured workload; the 1b probe stays the cheap provider check.
+The bounded extractor admits regular files, directories and deferred in-prefix relative symlinks. Traversal, absolute paths, path collisions, hardlinks, devices, FIFOs, privilege bits and escaping/cyclic aliases are refused. Every package's actual `.PKGINFO` must name the requested package, use a coherent Mesa-family pkgbase/full pkgver/aarch64 cohort, and have a distinct archive hash. Original EGL/Vulkan JSON descriptors must name the extracted native providers. Generated private descriptors preserve their fields and point only at canonical staged files.
 
-## Increment 2: the installed desktop mode
-Extend the installed manifest with Mesa package artifacts **and the previous package artifacts** (both GC-pinned). Then:
-- the transaction is `pacman -U` of the exact pinned files under the boot-partition locks;
-- identity is checked before and after with the installed collector (packages and mtree);
-- the session restart is explicit;
-- rollback is `pacman -U` of the pinned previous files, verified equal to the pre-transaction identity.
+The root-owned prefix is private to root and the existing GUI group (0750); its library tree is read-only to the child. The GUI-owned HOME/cache/tmp/state subtree is separate. Runtime inputs and staged per-file manifests stay root-owned 0600. The prefix must be on a non-FAT filesystem and cannot consume the ESP.
 
-It is promoted only through installed acceptance, and is never automatic without a reviewed recovery contract.
+The mandatory `mesa-provider` test runs the fixed GL and Vulkan correctness probes for three seconds each in owned transient systemd cgroups, with an explicit clean environment and staged loader paths. Each API needs a native Apple renderer, a zero-wrong-pixels oracle, the actual expected staged implementations and an observed native render descriptor. Loader-only, mixed system providers, software renderers, unknown/deleted graphics mappings and incomplete witnesses cannot pass.
+
+Provider identity uses retained O_PATH descriptors for the actual `/proc/<pid>/map_files/<range>` reference and canonical live file, equal complete inode metadata, SHA pins and repeated exact mapping/PID-birth checks. It does not equate Btrfs textual maps-device numbers with filesystem fstat device numbers. Cached byte hashes retain their descriptors and repeat all identity checks. Only disappearance of a previously complete exact mapping of the same departed PID birth is provisional; actual exit zero, the correctness oracle and verified empty owned-cgroup cleanup are still required.
+
+Before and after each phase the root supervisor checks actual boot identity, GUI displays, connected Wi-Fi, CPU/memory/thermal admission, installed package identity and trusted system graphics bytes. Fresh same-boot journal cursors reject new GPU/DART/reset/timeout/kernel faults without baseline normalization or fault waivers. Cancellation, partial output and cleanup failure never produce a staged PASS.
+
+## Results, cleanup and current limits
+
+`JobResult.Mesa` records exact package hashes, boot/kernel/manifest identity, `NATIVE_STAGED` for both APIs, cleanup, verdict and explicit staged semantics. Ordinary uploaded test artifacts retain the staged manifest, runtime/source pins, actual provider witnesses, probe output, journal and genuine terminal/cleanup receipts. Existing boot-health and OMT tests remain required; OMT describes the installed desktop and is neither promoted nor published by this job.
+
+After normal return, existing agent cleanup removes only a matching schema/job/kind-owned prefix. The currently running job prefix and any unit with unreadable or live recursive cgroup membership are preserved. This is not a disk-wide cleanup or package rollback mechanism.
+
+`--mesa-official-gpu` and its signing-public pin are reserved for the separately reviewed official 65-invocation adapter. This source increment refuses official execution explicitly and advertises `official_gpu=false`; its stub cannot run a partial suite. Installed desktop mode also remains refused until a package rollback, session restart and installed acceptance contract exists.
+
+Host extraction/admission, lifetime, cancellation and simulator controls validate source behavior. They are not a physical Mac or staged-driver qualification. Deployment must retain the actual controller's version-metadata and artifact-durability fixes; this source branch alone does not authorize replacing that deployed provenance.

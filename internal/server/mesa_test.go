@@ -9,9 +9,16 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 )
 
 func mesaSpec(l *lab) api.JobSpec {
+	// Protocol/simulator fixtures only; real agent staging rehashes actual tools.
+	for _, sha := range []string{mesa.GLProbeSHA, mesa.VKProbeSHA} {
+		if err := os.WriteFile(l.s.artifactPath(sha), []byte("SIMULATED helper fixture, not an executable or GPU evidence"), 0600); err != nil {
+			l.t.Fatal(err)
+		}
+	}
 	return api.JobSpec{Device: l.name, Mesa: &api.MesaSpec{Mode: api.MesaStaged, Packages: []api.MesaPackage{
 		{Name: "mesa-aurora", SHA256: l.artifact("mesa-aurora package bytes")},
 		{Name: "vulkan-aurora", SHA256: l.artifact("vulkan-aurora package bytes")},
@@ -20,7 +27,7 @@ func mesaSpec(l *lab) api.JobSpec {
 
 func TestMesaValidation(t *testing.T) {
 	l := newLab(t, false)
-	able := api.Device{Name: "mac", Facts: api.Facts{GUIUser: "user", AgentVersion: mesaMinAgent}}
+	able := api.Device{Name: "mac", Facts: api.Facts{GUIUser: "user", AgentVersion: mesaMinAgent, MesaStaged: true}}
 	if code, err := l.s.validateMesa(mesaSpec(l), able); err != nil {
 		t.Fatalf("a well-formed staged request is refused: %d %v", code, err)
 	}
@@ -189,7 +196,9 @@ func TestMesaStoredJobReachesNothing(t *testing.T) {
 	v.d.Health.JobTag = "j0101-000000-dead" // a leftover lab entry: the normal path would restore first
 	v.mu.Unlock()
 	now := time.Now()
-	j := &api.Job{ID: "j1026-000001-ab12", Spec: mesaSpec(l), State: api.JobQueued, Created: now, Updated: now,
+	blocked := mesaSpec(l)
+	blocked.Mesa.Mode = api.MesaInstalled
+	j := &api.Job{ID: "j1026-000001-ab12", Spec: blocked, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: "queued"}}}
 	if err := l.s.store.saveJob(j); err != nil {
 		t.Fatal(err)
@@ -214,7 +223,12 @@ func TestMesaStoredJobReachesNothing(t *testing.T) {
 func TestMesaRefusedOnCurrentAgents(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
-	j, code, err := l.s.Submit(mesaSpec(l))
+	spec := mesaSpec(l)
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	v.d.Facts.AgentVersion = "0.7.5"
+	v.mu.Unlock()
+	j, code, err := l.s.Submit(spec)
 	if err == nil || j != nil || code != 409 || !strings.Contains(err.Error(), "Mesa") {
 		t.Fatalf("a Mesa job was accepted or refused for the wrong reason: %v %d %v", j, code, err)
 	}
@@ -250,6 +264,90 @@ func TestMesaPackagesPinnedWhileUnfinished(t *testing.T) {
 	for _, p := range spec.Mesa.Packages {
 		if _, err := os.Stat(l.s.artifactPath(p.SHA256)); err == nil {
 			t.Fatalf("%s is still pinned after its job finished", p.Name)
+		}
+	}
+}
+
+func TestMesaStagedJobLifecycleIsExplicitlySimulatedPrivateAndNonPromoting(t *testing.T) {
+	l := newLab(t, false)
+	l.s.cfg.OMT = true
+	l.baseline()
+	path := l.s.omtBaselinePath(l.name)
+	before, e := os.ReadFile(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	j := l.run(mesaSpec(l))
+	if j.Outcome != api.OutcomePass {
+		t.Fatalf("simulated staged lifecycle failed: %s %s events%v", j.Outcome, j.Summary, j.Events)
+	}
+	m := j.Result.Mesa
+	if m == nil || !m.Simulated || m.Mode != api.MesaStaged || m.Verdict != "PASS" || m.Provider["gl"] != "NATIVE_STAGED" || m.Provider["vulkan"] != "NATIVE_STAGED" || !m.CleanupVerified || m.Kernel != j.Result.BootKernel || m.BootID == "" {
+		t.Fatalf("missing explicit simulated result: %+v", m)
+	}
+	if j.Result.OMT != nil && strings.Contains(j.Result.OMT.Reference, "became") {
+		t.Fatal("staged job promoted OMT")
+	}
+	after, e := os.ReadFile(path)
+	if e != nil || string(after) != string(before) {
+		t.Fatal("Mesa job rewrote installed-desktop reference", e)
+	}
+	if _, e = l.s.publishOMT(context.Background(), j); e == nil || !strings.Contains(e.Error(), "never published") {
+		t.Fatal("Mesa report publication admitted", e)
+	}
+}
+func TestMesaMandatoryProbeAndReservedOverride(t *testing.T) {
+	l := newLab(t, false)
+	s := mesaSpec(l)
+	n := 0
+	for _, test := range testsFor(s) {
+		if test.Builtin == "mesa-provider" {
+			n++
+			if test.TimeoutSec < 120 {
+				t.Fatal("probe budget missing")
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatal("mandatory provider omitted/duplicated")
+	}
+	s.Tests = []api.TestSpec{{Name: "mesa-provider", Builtin: "boot-health"}}
+	d := api.Device{Name: "sim", Facts: api.Facts{GUIUser: "user", AgentVersion: mesaMinAgent, MesaStaged: true}}
+	if _, e := l.s.validateMesa(s, d); e == nil {
+		t.Fatal("overrode reserved probe")
+	}
+}
+func TestMesaEvidenceCannotSalvageMissingIdentityOrCleanup(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	v := l.s.dev(l.name)
+	d := v.snapshot()
+	spec := mesaSpec(l)
+	r := &jobRun{s: l.s, v: v, j: &api.Job{ID: "j1026-010203-abcd", Spec: spec}, bootID: d.BootID, mesaManifest: strings.Repeat("a", 64)}
+	valid := func() *api.TestResult {
+		return &api.TestResult{Name: "mesa-provider", Passed: true, Mesa: &api.MesaResult{Mode: api.MesaStaged, Job: r.j.ID, BootID: d.BootID, Kernel: d.Kernel, ManifestSHA256: r.mesaManifest, CleanupVerified: true, Provider: map[string]string{"gl": "NATIVE_STAGED", "vulkan": "NATIVE_STAGED"}, Verdict: "PASS", Packages: append([]api.MesaPackage{}, spec.Mesa.Packages...)}}
+	}
+	if e := r.acceptMesa(valid()); e != "" {
+		t.Fatal(e)
+	}
+	for _, which := range []string{"missing", "boot", "manifest", "system-provider", "cleanup", "packages"} {
+		tr := valid()
+		switch which {
+		case "missing":
+			tr.Mesa = nil
+		case "boot":
+			tr.Mesa.BootID = "foreign"
+		case "manifest":
+			tr.Mesa.ManifestSHA256 = strings.Repeat("b", 64)
+		case "system-provider":
+			tr.Mesa.Provider["vulkan"] = "SYSTEM_PROVIDER"
+		case "cleanup":
+			tr.Mesa.CleanupVerified = false
+		case "packages":
+			tr.Mesa.Packages[0].SHA256 = strings.Repeat("c", 64)
+		}
+		if e := r.acceptMesa(tr); e == "" {
+			t.Fatal("accepted invalid evidence", which)
 		}
 	}
 }

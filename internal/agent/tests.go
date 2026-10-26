@@ -26,7 +26,7 @@ func Builtins() []string {
 	for _, e := range ents {
 		names = append(names, e.Name()[:len(e.Name())-3])
 	}
-	return append(names, suspendDevicesTest)
+	return append(names, suspendDevicesTest, "mesa-provider")
 }
 
 // guiSessionWait is how long a GUI test waits for the desktop session. The
@@ -43,6 +43,9 @@ func testTimeout(t api.TestSpec) time.Duration {
 }
 
 func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
+	if t.Builtin == "mesa-provider" {
+		return l.runMesaProvider(ctx, job, t, outDir)
+	}
 	if t.Builtin == suspendDevicesTest {
 		return suspendDevices(ctx, t, outDir, l.GUIUser, quiet)
 	}

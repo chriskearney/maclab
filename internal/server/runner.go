@@ -13,6 +13,7 @@ import (
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
 	"github.com/iconidentify/maclab/internal/installed"
+	"github.com/iconidentify/maclab/internal/mesa"
 )
 
 type jobRun struct {
@@ -29,7 +30,8 @@ type jobRun struct {
 	armedBoot string    // the boot that was running when this job armed its one-shot and rebooted
 	armedAt   time.Time // when it did
 
-	ir *installedRun // installed-kernel jobs only
+	mesaManifest string
+	ir           *installedRun // installed-kernel jobs only
 
 	omtRef []byte // a known-good run's omarchy-m-test reference, written only if the job passes
 
@@ -92,12 +94,14 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		r.boot = time.Duration(j.Spec.BootTimeoutSec) * time.Second
 	}
 
-	// Submission refuses Mesa jobs until an agent implements them. A stored
-	// one (an older labd's, or a retry) is refused here, before any build,
-	// device wait, restore, cleanup or other command reaches the Mac.
 	if j.Spec.Mesa != nil {
-		r.finish(api.OutcomeInfra, "Mesa jobs are not dispatched by this labd yet (no agent command for the staged mode); nothing was sent to "+j.Spec.Device)
-		return
+		if _, err := s.validateMesa(j.Spec, v.snapshot()); err != nil {
+			r.finish(api.OutcomeInfra, "stored Mesa job refused before device commands: "+err.Error())
+			return
+		}
+		s.updateJob(j, func(j *api.Job) {
+			j.Result.Mesa = &api.MesaResult{Mode: api.MesaStaged, Semantics: mesa.Semantics, Packages: append([]api.MesaPackage{}, j.Spec.Mesa.Packages...), Verdict: "INCOMPLETE"}
+		})
 	}
 
 	// A source is built (or an identical earlier build reused) before the Mac is needed.
@@ -131,6 +135,12 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		}
 	}
 
+	if j.Spec.Mesa != nil {
+		if _, err := s.validateMesa(j.Spec, v.snapshot()); err != nil {
+			r.finish(api.OutcomeInfra, "Mesa admission changed before device commands: "+err.Error())
+			return
+		}
+	}
 	v.mu.Lock()
 	v.d.ActiveJob = j.ID
 	v.setStateLocked(api.StateBusy, "job "+j.ID)
@@ -238,6 +248,12 @@ func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, 
 func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 	r.s.updateJob(r.j, func(j *api.Job) {
 		j.State, j.Outcome, j.Summary = api.JobDone, outcome, summary
+		if j.Result.Mesa != nil && outcome != api.OutcomePass {
+			j.Result.Mesa.Verdict = "FAIL"
+			if outcome == api.OutcomeCanceled {
+				j.Result.Mesa.Verdict = "INCOMPLETE"
+			}
+		}
 		j.Events = append(j.Events, api.JobEvent{Time: at, Msg: "done: " + outcome + ": " + summary})
 	})
 	r.s.log.Printf("job %s done: %s: %s", r.j.ID, outcome, summary)
@@ -339,6 +355,18 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		return r.crashTest(ctx)
 	}
 
+	if j.Spec.Mesa != nil {
+		var mr api.MesaStageResult
+		args := api.MesaStageArgs{Spec: *j.Spec.Mesa, BootID: r.bootID, Kernel: d.Kernel, CmdlineSHA256: mesa.Sum([]byte(d.Cmdline + "\n"))}
+		if err := v.call(ctx, api.CmdMesaStage, j.ID, args, 4*time.Minute, &mr); err != nil {
+			return api.OutcomeStageFailed, "staged Mesa: " + err.Error()
+		}
+		if !reSHA.MatchString(mr.ManifestSHA256) {
+			return api.OutcomeInfra, "Mesa stage returned no manifest pin"
+		}
+		r.mesaManifest = mr.ManifestSHA256
+		r.ev("staged Mesa packages in job-owned prefix; installed desktop unchanged")
+	}
 	r.state(api.JobTesting)
 	failed := 0
 	tests := testsFor(j.Spec)
@@ -377,6 +405,18 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 				r.ir.identity(installed.PhaseAfter, &tr)
 			}
 			r.s.updateJob(j, func(j *api.Job) { j.Result.Installed = &r.ir.res })
+		}
+		if t.Builtin == "mesa-provider" {
+			if why := r.acceptMesa(&tr); why != "" {
+				tr.Passed = false
+				tr.Error = why
+				tr.ExitCode = -1
+			}
+			r.s.updateJob(j, func(j *api.Job) {
+				if tr.Mesa != nil {
+					j.Result.Mesa = tr.Mesa
+				}
+			})
 		}
 		if !tr.Passed {
 			failed++
@@ -597,7 +637,14 @@ func realSleepNote(d api.Device, t api.TestSpec) string {
 }
 
 func testsFor(spec api.JobSpec) []api.TestSpec {
-	tests := spec.Tests
+	tests := append([]api.TestSpec{}, spec.Tests...)
+	if spec.Mesa != nil {
+		timeout := 120
+		if spec.Mesa.OfficialGPU {
+			timeout = 2100
+		}
+		tests = append([]api.TestSpec{{Name: "mesa-provider", Builtin: "mesa-provider", TimeoutSec: timeout}}, tests...)
+	}
 	for _, t := range tests {
 		if t.Builtin == "boot-health" {
 			return tests
