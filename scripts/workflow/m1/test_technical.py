@@ -25,6 +25,11 @@ class Technical(unittest.TestCase):
   ticks=iter([100,100,108,119,120]);out=m.observe(self.binding(),Timed(),monotonic=lambda:next(ticks));self.assertEqual(timeouts,[10,10,1]);self.assertEqual(out['status'],'FRESH_M1_TECHNICAL_READINESS_OBSERVED')
   ticks=iter([100,121])
   with self.assertRaisesRegex(RuntimeError,'request deadline exceeded'):m.observe(self.binding(),Timed(),monotonic=lambda:next(ticks))
+ def test_network_exception_does_not_export_configured_url_or_token(self):
+  class Failed:
+   def request(self,*a,**k):raise OSError('http://private.invalid/?token=SENTINEL-CREDENTIAL')
+  with self.assertRaisesRegex(RuntimeError,'technical metadata request failed: OSError') as raised:m.observe(self.binding(),Failed())
+  self.assertNotIn('SENTINEL',str(raised.exception));self.assertTrue(raised.exception.__suppress_context__)
  def test_slow_observation_or_too_short_phase_lease_refused(self):
   t=datetime.datetime.now(datetime.timezone.utc);times=iter([t,t+datetime.timedelta(seconds=21),t+datetime.timedelta(seconds=21)])
   with self.assertRaisesRegex(RuntimeError,'freshness bound'):m.observe(self.binding(),self.api(),lambda:next(times))

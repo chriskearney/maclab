@@ -16,7 +16,9 @@ def observe(b,api=None,now=None,monotonic=None):
  c=sdk();p=b['profile'];need(p['device']=='m1' and p['board']=='apple,j293' and re.fullmatch('/var/lib/maclab/rc7-m1-[a-z0-9-]{8,96}',p['packet']),'finite M1 packet/model');need(re.fullmatch('[0-9a-f]{64}',b['root_plan_sha256']),'actual root plan');need(b['expected_kernel'] in ('7.2.11-6-1-ARCH','7.2.11-7-1-ARCH'),'normal cohort kernel only');minimum=b['minimum_lease_seconds'];need(type(minimum) is int and 1990<=minimum<=7200,'package/cleanup lease budget')
  client=api or c.API(c.config());clock=now or (lambda:datetime.datetime.now(datetime.timezone.utc));mono=monotonic or time.monotonic;deadline=mono()+20
  def request(path):
-  remaining=deadline-mono();need(remaining>0,'technical request deadline exceeded');return client.request(path,timeout=min(10,remaining))
+  remaining=deadline-mono();need(remaining>0,'technical request deadline exceeded')
+  try:return client.request(path,timeout=min(10,remaining))
+  except Exception as e:raise RuntimeError('technical metadata request failed: '+type(e).__name__) from None
  start=clock();d=request('/api/devices/m1');c.state_gate(d,p,b,True,minimum)
  need(d.get('tier',0)>=2 and d['facts']['machine']=='aarch64' and d['facts']['compatible'][0]=='apple,j293' and 'maclab.job=' not in d['cmdline'],'actual normal M1 recovery model')
  o=request('/api/devices/m1/oob');oob_time=clock();need(not o.get('error') and isinstance(o.get('controller'),str) and o['controller'].startswith('oobd ') and isinstance(o.get('status'),str) and o['status'].strip(),'M1 live OOB route unhealthy; no mutation or job submitted')
