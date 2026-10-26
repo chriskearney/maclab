@@ -32,6 +32,10 @@ def main():
  for parent in [P,*P.parents]:
   st=parent.lstat();assert stat.S_ISDIR(st.st_mode) and st.st_uid==0 and not st.st_mode&0o022
  assert Path('/proc/sys/kernel/random/boot_id').read_text().strip()==BOOT
+ assert guarded(P/'BACKUP-SOURCE-FREEZE.json',1048576)[0]==V1_FREEZE,'fresh backup freeze claim not grounded'
+ authority_pin=scope['standing_authority_sha256'];assert isinstance(authority_pin,str) and len(authority_pin)==64 and set(authority_pin)<=set('0123456789abcdef')
+ authority_hash,authority_raw=guarded(P/'STANDING-BOOT-AUTHORITY.json',65536);assert authority_hash==authority_pin,'standing authority claim not grounded'
+ authority=json.loads(authority_raw);assert authority['authorization_is_persistent'] is True and authority['manual_saved_work_confirmed'] is False and authority['manual_nearby_recovery_confirmed'] is False and authority['does_not_lift_existing_holds'] is True
  os.umask(0o077);sh,source=guarded(P/'backup-m1.py',32768);assert sh==V1_SOURCE
  rh,data=guarded(P/'original-backup/BACKUP-RECEIPT.json',1048576);assert rh==V1_RECEIPT
  r=json.loads(data);assert r['status']=='LOCAL_BACKUP_VERIFIED_ONLY' and r['packet']==str(P) and r['boot_id']==BOOT and r['script_sha256']==V1_SOURCE
