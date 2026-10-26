@@ -230,8 +230,11 @@ func (p Plan) Validate() error {
 		}
 		if s.M1Admission != nil {
 			g := s.M1Admission
-			if s.Kind != "submit" || p.Device != "m1" || !known[g.BootID.From] || g.BootID.From == "inputs" || g.BootID.From == "workflow" || g.MinimumLeaseSec < 2700 || g.MinimumLeaseSec > 7200 {
+			if s.Kind != "submit" || p.Device != "m1" || !known[g.BootID.From] || g.BootID.From == "inputs" || g.BootID.From == "workflow" || !known[g.AgentSHA256.From] || g.AgentSHA256.From == "inputs" || g.AgentSHA256.From == "workflow" || g.MinimumLeaseSec < 2700 || g.MinimumLeaseSec > 7200 {
 				return errors.New("M1 submission admission requires a prior genuine boot observation and 2700..7200-second lease")
+			}
+			if _, err := tokens(g.AgentSHA256.Pointer); err != nil {
+				return err
 			}
 			if _, err := tokens(g.BootID.Pointer); err != nil {
 				return err
@@ -604,7 +607,15 @@ func (r *Runner) execute(ctx context.Context, s *State, p Phase) ([]byte, error)
 			if !ok || boot == "" {
 				return nil, errors.New("M1 admission boot observation is missing")
 			}
-			j, err = admitted.SubmitM1(ctx, spec, boot, p.M1Admission.MinimumLeaseSec)
+			pin, e := r.value(s, p.M1Admission.AgentSHA256)
+			if e != nil {
+				return nil, e
+			}
+			agentSHA, ok := pin.(string)
+			if !ok || !shaRE.MatchString(agentSHA) {
+				return nil, errors.New("M1 admission agent pin observation is missing")
+			}
+			j, err = admitted.SubmitM1(ctx, spec, boot, p.M1Admission.MinimumLeaseSec, agentSHA)
 		} else {
 			j, err = r.Backend.Submit(ctx, spec)
 		}
