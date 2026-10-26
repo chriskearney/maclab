@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -409,26 +410,74 @@ func TestMesaSimulatedFailedBootHealthNeverStartsProvider(t *testing.T) {
 }
 
 func TestOfficialEvidenceCannotFallBackToProviderOnlyPass(t *testing.T) {
+	l := newLab(t, false)
 	spec := api.JobSpec{Mesa: &api.MesaSpec{OfficialGPU: true, Packages: []api.MesaPackage{{Name: "mesa-aurora", SHA256: "package"}}}}
-	r := jobRun{j: &api.Job{ID: "job", Spec: spec}, bootID: "boot", mesaManifest: "manifest", v: &dev{d: api.Device{Kernel: "kernel"}}}
-	// This control calls the exact typed evidence gate, not public admission:
-	// official capability intentionally remains disabled at submission.
-	tr := api.TestResult{Passed: true, Mesa: &api.MesaResult{Mode: api.MesaStaged, Job: "job", BootID: "boot", Kernel: "kernel", ManifestSHA256: "manifest", CleanupVerified: true, Verdict: "PASS", Provider: map[string]string{"gl": "NATIVE_STAGED", "vulkan": "NATIVE_STAGED"}, Packages: spec.Mesa.Packages}}
+	manifest := []byte("CPU collection fixture manifest")
+	r := jobRun{s: l.s, j: &api.Job{ID: "job", Spec: spec}, bootID: "boot", mesaManifest: mesa.Sum(manifest), v: &dev{d: api.Device{Kernel: "kernel"}}}
+	tr := api.TestResult{Passed: true, Mesa: &api.MesaResult{Mode: api.MesaStaged, Job: "job", BootID: "boot", Kernel: "kernel", ManifestSHA256: r.mesaManifest, CleanupVerified: true, Verdict: "PASS", Provider: map[string]string{"gl": "NATIVE_STAGED", "vulkan": "NATIVE_STAGED"}, Packages: spec.Mesa.Packages}}
 	if r.acceptMesa(&tr) == "" {
-		t.Fatal("provider-only result passed an official request")
+		t.Fatal("provider-only result passed official request")
 	}
-	tr.Mesa.Official = &api.MesaOfficialResult{Status: "PASS", NativeInvocations: 65, SignatureVerified: true, SourceCommit: mesa.OfficialCommit, ArchiveSHA256: mesa.OfficialArchiveSHA, ReportSHA256: strings.Repeat("a", 64), SealSHA256: strings.Repeat("b", 64), ReportPath: "official/report.json", SealPath: "official/seal.json"}
+	tr.Mesa.Official = &api.MesaOfficialResult{Status: "PASS", NativeInvocations: 65, SignatureVerified: true, SourceCommit: mesa.OfficialCommit, ArchiveSHA256: mesa.OfficialArchiveSHA, ReportPath: "official/report.json", SealPath: "official/seal.json"}
+	out := filepath.Join(l.s.jobDir("job"), "test-mesa-provider")
+	dir := filepath.Join(out, "official")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "staged-manifest.json"), manifest, 0600); err != nil {
+		t.Fatal(err)
+	}
+	tr.Files = append(tr.Files, "test-mesa-provider/staged-manifest.json")
+	files := map[string]map[string]any{}
+	for _, name := range mesa.OfficialExportNames() {
+		body := []byte("CPU export fixture:" + name)
+		if err := os.WriteFile(filepath.Join(dir, name), body, 0600); err != nil {
+			t.Fatal(err)
+		}
+		files[name] = map[string]any{"sha256": mesa.Sum(body), "bytes": len(body)}
+		tr.Files = append(tr.Files, "test-mesa-provider/official/"+name)
+	}
+	tr.Mesa.Official.ReportSHA256 = files["report.json"]["sha256"].(string)
+	seal := mesa.JSON(map[string]any{"schema": 1, "status": "PASS", "job": "job", "boot_id": "boot", "kernel": "kernel", "manifest_sha256": r.mesaManifest, "source_commit": mesa.OfficialCommit, "archive_sha256": mesa.OfficialArchiveSHA, "native_invocations": 65, "signature_verified": true, "report_sha256": tr.Mesa.Official.ReportSHA256, "files": files})
+	if err := os.WriteFile(filepath.Join(dir, "seal.json"), seal, 0600); err != nil {
+		t.Fatal(err)
+	}
+	tr.Mesa.Official.SealSHA256 = mesa.Sum(seal)
+	tr.Files = append(tr.Files, "test-mesa-provider/official/seal.json")
+	// CPU transport-envelope test only; Python controls verify real crypto.
 	if why := r.acceptMesa(&tr); why != "" {
-		t.Fatal("typed sealed-envelope dispatch refused", why)
+		t.Fatal("complete collected envelope refused", why)
 	}
-	tr.Mesa.Official.NativeInvocations = 64
-	if r.acceptMesa(&tr) == "" {
-		t.Fatal("partial official proof passed")
-	}
-	tr.Mesa.Official.NativeInvocations = 65
-	tr.Mesa.Official.SignatureVerified = false
-	if r.acceptMesa(&tr) == "" {
-		t.Fatal("unverified signature passed")
+	original := append([]string(nil), tr.Files...)
+	for _, bad := range []string{"missing-ack", "duplicate-ack", "missing-file", "file-drift", "manifest-drift", "partial", "unsigned"} {
+		t.Run(bad, func(t *testing.T) {
+			tr.Files = append([]string(nil), original...)
+			path := filepath.Join(dir, "identity.json")
+			body, _ := os.ReadFile(path)
+			switch bad {
+			case "missing-ack":
+				tr.Files = tr.Files[1:]
+			case "duplicate-ack":
+				tr.Files = append(tr.Files, tr.Files[0])
+			case "missing-file":
+				os.Remove(path)
+			case "file-drift":
+				os.WriteFile(path, []byte("drift"), 0600)
+			case "manifest-drift":
+				os.WriteFile(filepath.Join(out, "staged-manifest.json"), []byte("drift"), 0600)
+			case "partial":
+				tr.Mesa.Official.NativeInvocations = 64
+			case "unsigned":
+				tr.Mesa.Official.SignatureVerified = false
+			}
+			if r.acceptMesa(&tr) == "" {
+				t.Fatal("incomplete collected evidence passed", bad)
+			}
+			os.WriteFile(path, body, 0600)
+			os.WriteFile(filepath.Join(out, "staged-manifest.json"), manifest, 0600)
+			tr.Mesa.Official.NativeInvocations = 65
+			tr.Mesa.Official.SignatureVerified = true
+		})
 	}
 }
 

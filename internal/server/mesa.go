@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -181,6 +182,31 @@ func (r *jobRun) acceptMesa(t *api.TestResult) string {
 		o := m.Official
 		if o == nil || o.Status != "PASS" || o.NativeInvocations != 65 || !o.SignatureVerified || o.SourceCommit != mesa.OfficialCommit || o.ArchiveSHA256 != mesa.OfficialArchiveSHA || !reSHA.MatchString(o.ReportSHA256) || !reSHA.MatchString(o.SealSHA256) || o.ReportPath != "official/report.json" || o.SealPath != "official/seal.json" {
 			return "official signed suite/export evidence incomplete"
+		}
+
+		// uploadDir can omit a failed upload; check both acknowledgement and
+		// independently reopened controller bytes before accepting the suite.
+		files := map[string]int{}
+		for _, name := range t.Files {
+			files[name]++
+		}
+		names := append(mesa.OfficialExportNames(), "seal.json")
+
+		for _, name := range names {
+			path := "test-mesa-provider/official/" + name
+			if files[path] != 1 {
+				return "official collected artifact missing or duplicated"
+			}
+		}
+		if files["test-mesa-provider/staged-manifest.json"] != 1 {
+			return "official collected manifest acknowledgement missing or duplicated"
+		}
+		out := filepath.Join(r.s.jobDir(r.j.ID), "test-mesa-provider")
+		if err := mesa.ValidateOfficialExport(out, r.j.ID, r.bootID, m.Kernel, r.mesaManifest, o); err != nil {
+			return "official collected export invalid: " + err.Error()
+		}
+		if hash, err := mesa.Hash(filepath.Join(out, "staged-manifest.json"), 8<<20); err != nil || hash != r.mesaManifest {
+			return "official collected manifest missing or drifted"
 		}
 	} else if m.Official != nil {
 		return "unexpected official evidence in provider-only request"
