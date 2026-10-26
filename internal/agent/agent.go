@@ -36,6 +36,8 @@ type Config struct {
 	Secret   string `json:"secret"`
 	GUIUser  string `json:"gui_user,omitempty"`
 	WorkDir  string `json:"work_dir,omitempty"`
+	// Enrollment is what labd said the Mac is, at setup.
+	Enrollment api.AgentEnrollment `json:"enrollment"`
 	// HTTPTimeoutSec bounds a check-in or report request, TransferTimeoutSec an
 	// upload; a Mac far from labd needs both longer. Zero is the default.
 	HTTPTimeoutSec     int `json:"http_timeout_sec,omitempty"`
@@ -353,7 +355,8 @@ func (a *Agent) poke() {
 
 func (a *Agent) poll(ctx context.Context) error {
 	bootID, kernel, cmdline := a.sys.Identity()
-	ci := api.Checkin{BootID: bootID, Kernel: kernel, Cmdline: cmdline, Health: a.sys.Health()}
+	ci := api.Checkin{BootID: bootID, Kernel: kernel, Cmdline: cmdline, Health: a.sys.Health(),
+		SnapshotEligible: a.sys.SnapshotEligible() == nil}
 	a.mu.Lock()
 	factsRevision := a.factsRevision
 	refreshFacts := a.lastFacts.IsZero() || a.sentFactsRevision != factsRevision || a.clock().Now().Sub(a.lastFacts) >= time.Minute
@@ -956,6 +959,15 @@ func postJSON(ctx context.Context, c *http.Client, u, secret string, in, out any
 	b, _ := json.Marshal(in)
 	req, _ := http.NewRequestWithContext(ctx, "POST", u, bytes.NewReader(b))
 	req.Header.Set("Content-Type", "application/json")
+	return doJSON(c, req, secret, out)
+}
+
+func getJSON(ctx context.Context, c *http.Client, u, secret string, out any) error {
+	req, _ := http.NewRequestWithContext(ctx, "GET", u, nil)
+	return doJSON(c, req, secret, out)
+}
+
+func doJSON(c *http.Client, req *http.Request, secret string, out any) error {
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}

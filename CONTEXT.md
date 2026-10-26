@@ -17,6 +17,10 @@ _Avoid_: Admin, operator
 **Lab-owned Mac**:
 A Mac the Maintainers keep for the lab, with no Volunteer. A Mac is lab-owned or a Volunteer's for as long as it stays enrolled.
 
+**Kind**:
+Whether a Mac is a Volunteer's or Lab-owned, fixed by its enrollment for as long as it stays enrolled; changing it means enrolling the Mac again.
+_Avoid_: Type, class
+
 **Known-good kernel**:
 The kernel a Mac returns to after every lab boot, recorded on both labd and the Mac. On a Volunteer's Mac, it is the kernel the Volunteer's own system boots by default.
 
@@ -56,6 +60,9 @@ _Avoid_: Certification, sign-off
 
 **Installed run**:
 A run of a Release as the Omarchy installer installs it on a Mac. On a Volunteer's Mac it fits inside one Availability window and ends in a Rollback; it can end incomplete (the window closed first) or aborted by the Volunteer, neither of which is a failure.
+
+**Eligible**:
+A Mac is eligible for Installed runs when its own system (`@`) can be snapshotted, so that a Rollback can return it exactly as it was.
 
 **Boot method**:
 How a run's kernel was started: a cold boot through the Mac's firmware, or kexec from the running system. Every run records it.

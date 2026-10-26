@@ -253,6 +253,7 @@ sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-us
   `/etc/systemd/journald.conf.d/90-maclab.conf` (`Storage=persistent`), and
   moves this boot's journal there, so labd can read a failed lab boot's journal.
   `--volatile-journal` leaves journald alone.
+- With `--autologin`, logs the GUI user into the desktop on boot; with `--autologin` or `--stay-awake`, turns their idle lock and screensaver off (Lab-owned Macs only).
 - Installs and starts `lab-agent.service`.
 
 `setup` refuses, before changing anything, a Mac that can't reboot unattended:
@@ -307,7 +308,7 @@ out-of-band resets and all, and ends in a call for hands. Use `lab forget` for i
 agent is stopped, uninstall removes it
 and its config (with the device secret), clears a lab one-shot, removes the
 maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
-the modules the lab installed, and the panic, watchdog, serial-getty and autologin settings, and
+the modules the lab installed, and the panic, watchdog, serial-getty, autologin and stay-awake settings, and
 maclab's journald drop-in, if a newer setup wrote one. U-Boot's `ubootefi.var.pre-maclab` is kept,
 not restored: it would drop any EFI variable set since. It refuses on a lab kernel. While the maclab
 block is in `limine.conf`, it also refuses while Limine config enrollment is on, and says how to turn
@@ -321,6 +322,27 @@ same name. It refuses a Mac with a job running or queued, and, unless given `--f
 someone else holds a lease on (forgetting it would end their lease and cut their `lab shell`) or
 whose agent still checks in and never said it was leaving. Forgetting a Mac labd doesn't know is done
 already: `lab forget` says so and exits 0.
+
+### A Volunteer's Mac
+
+A Mac is Lab-owned or a Volunteer's for as long as it stays enrolled; the
+enrollment token decides which, and changing it means enrolling again.
+
+```sh
+lab enroll ada-mbp --volunteer "Ada Lovelace" --contact ada@example.org
+```
+
+Either flag without the other is refused. labd gives the Mac its own
+unguessable ntfy topic when it enrolls (on the server `--ntfy` posts to), and
+`setup` prints it with a QR code to subscribe from a phone. On a Volunteer's
+Mac `setup` refuses `--autologin` and `--stay-awake`. Setup and every
+check-in report whether `@` can be snapshotted (`/` is the btrfs subvolume
+`@` and snapper has a root config for it); a Mac whose `@` can't is shown as
+not eligible for Installed runs. On the Mac, `sudo lab-agent status` shows
+what it is enrolled as, its topic and its eligibility.
+
+A Mac enrolled with `./volunteer` (see [Volunteer a Mac](#volunteer-a-mac)) is a
+Volunteer's too, named and reached by the tailnet login that ran it.
 
 ### Out-of-band control from a macOS host
 

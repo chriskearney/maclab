@@ -179,7 +179,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 			v.s.log.Printf("spend enrollment tokens for %s: %v", v.d.Name, err)
 		}
 	}
-	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel
+	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel || v.d.SnapshotEligible != ci.SnapshotEligible
 	if rebooted {
 		v.endedBoot, v.endedHeard, v.nextSeen = v.d.BootID, v.heard, now
 	}
@@ -189,6 +189,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		v.asleep = time.Time{}
 	}
 	v.d.BootID, v.d.Kernel, v.d.Cmdline, v.d.Health = ci.BootID, ci.Kernel, ci.Cmdline, ci.Health
+	v.d.SnapshotEligible = ci.SnapshotEligible
 	if ci.Facts != nil {
 		v.d.Facts = *ci.Facts
 	}

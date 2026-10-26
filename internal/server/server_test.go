@@ -209,10 +209,12 @@ func (st *store) addTokenForTest(name string) (string, error) {
 	return tok, st.addToken(hashSecret(tok), api.EnrollTokenRequest{Name: name, Model: api.ModelLaptop}, time.Now().Add(time.Hour))
 }
 
-// addVolunteerTokenForTest is the token a Volunteer's Mac enrolls with. Until
-// Volunteer enrollment tokens exist (#25), it is an ordinary one.
+// addVolunteerTokenForTest is the token a Volunteer's Mac enrolls with: a
+// Volunteer's enrollment token, as `lab enroll --volunteer` makes.
 func (st *store) addVolunteerTokenForTest(name string) (string, error) {
-	return st.addTokenForTest(name)
+	tok := "enr_test_" + name
+	return tok, st.addToken(hashSecret(tok), api.EnrollTokenRequest{Name: name, Model: api.ModelLaptop,
+		Volunteer: true, VolunteerName: "Ada Lovelace", Contact: "ada@example.org"}, time.Now().Add(time.Hour))
 }
 
 // volunteer runs a Volunteer command on the simulated Mac, as

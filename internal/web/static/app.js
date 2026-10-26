@@ -415,6 +415,8 @@ function macCard(d) {
       <div class="fact"><div class="k">known-good</div><div class="v">${d.known_good ? (kgMatch ? `<span class="good">${ic('check')} running it</span>` : esc(d.known_good)) : '<span class="muted">no baseline yet</span>'}</div></div>
       <div class="fact"><div class="k">heartbeat</div><div class="v"><span class="heart ${fresh ? 'beat' : 'stale'}"></span>${ago(d.last_seen)}</div></div>
       <div class="fact"><div class="k">uptime · systemd</div><div class="v">${d.health?.uptime ? dur(d.health.uptime) : '—'} · ${esc(d.health?.system_state || '—')}</div></div>
+      <div class="fact"><div class="k">kind</div><div class="v">${d.kind === 'volunteer' ? `Volunteer: ${esc(d.volunteer_name)} · ${esc(d.contact)}` : 'Lab-owned'}</div></div>
+      <div class="fact"><div class="k">Installed runs</div><div class="v">${d.snapshot_eligible ? 'eligible' : '<span class="muted">not eligible: @ can\'t be snapshotted</span>'}</div></div>
     </div>
     <div class="tier" style="--c:${tierColor}">
       <span class="segs">${[0, 1, 2].map(i => `<i class="${i <= tier ? 'on' : ''}"></i>`).join('')}</span>

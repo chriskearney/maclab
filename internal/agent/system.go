@@ -60,4 +60,7 @@ type System interface {
 
 	// Alive is false while a simulated machine is hung. Always true on Linux.
 	Alive() bool
+
+	// SnapshotEligible is nil when @ can be snapshotted, else why not.
+	SnapshotEligible() error
 }

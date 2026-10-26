@@ -57,7 +57,7 @@ type Device struct {
 	Name        string       `json:"name"`
 	Label       string       `json:"label"` // physical description for humans
 	Model       string       `json:"model"`
-	Volunteer   bool         `json:"volunteer,omitempty"` // enrolled with ./volunteer: an agent the lab doesn't control, so lab gate leaves it out
+	Volunteer   bool         `json:"volunteer,omitempty"` // a Volunteer's Mac (Kind volunteer): an agent the lab doesn't control, so lab gate leaves it out
 	OOB         *OOBConfig   `json:"oob,omitempty"`
 	State       DeviceState  `json:"state"`
 	StateReason string       `json:"state_reason,omitempty"`
@@ -76,7 +76,31 @@ type Device struct {
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward
 	// that login's limit of Macs (see POST /api/volunteer).
 	VolunteeredBy string `json:"volunteered_by,omitempty"`
+	Enrollment
+	// SnapshotEligible is whether the Mac's @ can be snapshotted, as its
+	// latest check-in said: a Mac that can't is not eligible for Installed runs.
+	SnapshotEligible bool `json:"snapshot_eligible"`
 }
+
+// Kinds of Mac. A Mac keeps its kind for as long as it is enrolled.
+const (
+	KindLabOwned  = "lab-owned"
+	KindVolunteer = "volunteer"
+)
+
+// Enrollment is what a Mac's enrollment token made it: its kind and, on a
+// Volunteer's Mac, who the Volunteer is and the Mac's own ntfy topic.
+type Enrollment struct {
+	Kind string `json:"kind"`
+	// VolunteerName is the Volunteer's name: from a Maintainer's token, or
+	// the tailnet login that ran ./volunteer. Device.Volunteer is true
+	// exactly when Kind is KindVolunteer.
+	VolunteerName string `json:"volunteer_name,omitempty"`
+	Contact       string `json:"contact,omitempty"`
+	NtfyTopic     string `json:"ntfy_topic,omitempty"`
+}
+
+func (e Enrollment) IsVolunteer() bool { return e.Kind == KindVolunteer }
 
 // Tier is how much of the recovery ladder a device supports: 0 panic reboot only,
 // 1 plus an armed hardware watchdog, 2 plus out-of-band reset and serial.
@@ -135,6 +159,8 @@ type Checkin struct {
 	Events  []KernelEvent   `json:"events,omitempty"`
 	Results []CommandResult `json:"results,omitempty"`
 	Running []string        `json:"running,omitempty"` // command IDs still executing
+	// SnapshotEligible is whether @ can be snapshotted right now.
+	SnapshotEligible bool `json:"snapshot_eligible"`
 }
 
 // Report carries command results and kernel events as soon as they exist.
@@ -476,6 +502,23 @@ type EnrollResponse struct {
 	DeviceID string `json:"device_id"`
 	Name     string `json:"name"`
 	Secret   string `json:"secret"`
+	AgentEnrollment
+}
+
+// AgentEnrollment is a Mac's Enrollment as labd tells the Mac itself, with
+// its topic's URL on the lab's ntfy server when labd has one.
+type AgentEnrollment struct {
+	Enrollment
+	NtfyURL string `json:"ntfy_url,omitempty"`
+}
+
+// Subscribe is what a Volunteer subscribes to: the topic's URL, or the bare
+// topic when labd has no ntfy server.
+func (e AgentEnrollment) Subscribe() string {
+	if e.NtfyURL != "" {
+		return e.NtfyURL
+	}
+	return e.NtfyTopic
 }
 
 type EnrollTokenRequest struct {
@@ -488,6 +531,10 @@ type EnrollTokenRequest struct {
 	// VolunteeredBy is the login that asked for a volunteer token, set by
 	// labd only (see Device.VolunteeredBy).
 	VolunteeredBy string `json:"-"`
+	// VolunteerName and Contact make the token a Volunteer's: both or
+	// neither. Either makes Volunteer true too.
+	VolunteerName string `json:"volunteer_name,omitempty"`
+	Contact       string `json:"contact,omitempty"`
 }
 
 type EnrollTokenResponse struct {

@@ -27,6 +27,9 @@ const (
 	// What setup found already on, in workDir, so uninstall leaves it on.
 	gettyWasEnabled = "serial-getty.pre-maclab"
 	stayAwakeWasOn  = "stay-awake.pre-maclab"
+	// Whom setup turned stay-awake on for, in workDir, so uninstall turns it
+	// off with or without autologin.
+	stayAwakeUser = "stay-awake.maclab"
 )
 
 const unit = `[Unit]
@@ -47,7 +50,8 @@ type SetupOptions struct {
 	Server    string
 	Token     string
 	GUIUser   string
-	Autologin bool // log GUIUser into the desktop on boot, with idle lock off
+	Autologin bool // log GUIUser into the desktop on boot; implies StayAwake
+	StayAwake bool // turn GUIUser's idle lock and screensaver off
 	// VolatileJournal leaves journald alone; preflight then warns that a
 	// failed lab boot's journal is lost.
 	VolatileJournal bool
@@ -86,6 +90,36 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		}
 	} else if o.TailscaleHostname != "" {
 		return fmt.Errorf("--tailscale-hostname needs --tailscale-authkey-file or --tailscale-authkey -")
+	}
+
+	// Enroll first: the token says what kind of Mac this is, and a Volunteer's
+	// Mac refuses some of the changes below before any of them is made. Until
+	// its first check-in the Mac can enroll again with the same token.
+	if o.Token != "" {
+		if o.Server == "" {
+			return fmt.Errorf("--token needs --server")
+		}
+		facts := l.Facts()
+		facts.AgentVersion = Version
+		resp, err := Enroll(ctx, o.Server, o.Token, facts)
+		if err != nil {
+			return fmt.Errorf("enroll: %w", err)
+		}
+		cfg = &Config{Server: o.Server, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, Enrollment: resp.AgentEnrollment}
+		say("enrolled as %s: %s", resp.Name, kindName(resp.Enrollment))
+	}
+	if cfg == nil {
+		return fmt.Errorf("not enrolled: pass --server and --token")
+	}
+	if cfg.Enrollment.IsVolunteer() {
+		if err := refuseOnVolunteer(o.Autologin, o.StayAwake); err != nil {
+			return err
+		}
+	}
+	if err := l.SnapshotEligible(); err != nil {
+		say("NOT ELIGIBLE for Installed runs: @ cannot be snapshotted, so it could not be rolled back (%v)", err)
+	} else {
+		say("@ can be snapshotted: eligible for Installed runs")
 	}
 
 	b, err := detectBootloader()
@@ -160,32 +194,22 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	} else {
 		say("serial console shell on ttySAC0 (lab shell reaches it through the controller Mac)")
 	}
-	if o.Autologin {
+	if o.StayAwake || o.Autologin {
 		if o.GUIUser == "" {
-			return fmt.Errorf("--autologin needs --gui-user")
+			return fmt.Errorf("--stay-awake and --autologin need --gui-user")
 		}
+		if err := keepAwake(o.GUIUser); err != nil {
+			return fmt.Errorf("stay-awake: %w", err)
+		}
+		say("idle lock and screensaver off for %s (Omarchy stay-awake)", o.GUIUser)
+	}
+	if o.Autologin {
 		if err := autologin(o.GUIUser); err != nil {
 			return fmt.Errorf("autologin: %w", err)
 		}
-		say("desktop autologin for %s, idle lock and screensaver off (Omarchy stay-awake)", o.GUIUser)
+		say("desktop autologin for %s", o.GUIUser)
 	}
 
-	if o.Token != "" {
-		if o.Server == "" {
-			return fmt.Errorf("--token needs --server")
-		}
-		facts := l.Facts()
-		facts.AgentVersion = Version
-		resp, err := Enroll(ctx, o.Server, o.Token, facts)
-		if err != nil {
-			return fmt.Errorf("enroll: %w", err)
-		}
-		cfg = &Config{Server: o.Server, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret}
-		say("enrolled as %s", resp.Name)
-	}
-	if cfg == nil {
-		return fmt.Errorf("not enrolled: pass --server and --token")
-	}
 	if o.GUIUser != "" {
 		cfg.GUIUser = o.GUIUser
 	}
@@ -205,6 +229,14 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		}
 	}
 	say("lab-agent.service enabled and running")
+
+	if e := cfg.Enrollment; e.IsVolunteer() {
+		var code strings.Builder
+		if err := printTopicQR(&code, e.Subscribe()); err != nil {
+			return err
+		}
+		say("%s", code.String())
+	}
 
 	p, w := l.Preflight()
 	if len(p) > 0 {
@@ -518,12 +550,22 @@ func serialGetty(user string) error {
 	return exec.Command("systemctl", "restart", "serial-getty@ttySAC0.service").Run()
 }
 
-// autologin logs the GUI user into their last desktop session on boot and
-// turns Omarchy's idle lock and screensaver off, so GUI tests always find an
-// unlocked session.
+// refuseOnVolunteer is the check setup runs, on a Volunteer Mac, of the flags
+// it was given: the lab never removes a Volunteer's lock screen for good.
+func refuseOnVolunteer(autologin, stayAwake bool) error {
+	switch {
+	case autologin:
+		return fmt.Errorf("--autologin is refused on a Volunteer's Mac: it would remove the lock screen for good")
+	case stayAwake:
+		return fmt.Errorf("--stay-awake is refused on a Volunteer's Mac: it would turn the idle lock off for good")
+	}
+	return nil
+}
+
+// autologin logs the GUI user into their last desktop session on boot, so
+// GUI tests always find a session.
 func autologin(user string) error {
-	u, err := osuser.Lookup(user)
-	if err != nil {
+	if _, err := osuser.Lookup(user); err != nil {
 		return err
 	}
 	session := "hyprland-uwsm.desktop"
@@ -535,14 +577,25 @@ func autologin(user string) error {
 		}
 	}
 	conf := fmt.Sprintf("# maclab: log straight into the desktop so GUI tests have a session after every lab reboot.\n[Autologin]\nUser=%s\nSession=%s\nRelogin=false\n", user, session)
-	// Uninstall turns stay-awake off again, unless the user had it on before the lab's first setup.
-	if _, err := os.Stat(sddmConf); os.IsNotExist(err) {
-		if _, err := os.Stat(filepath.Join(u.HomeDir, stayAwake)); err == nil {
+	os.MkdirAll(filepath.Dir(sddmConf), 0o755)
+	return os.WriteFile(sddmConf, []byte(conf), 0o644)
+}
+
+// keepAwake turns Omarchy's idle lock and screensaver off for user, so GUI
+// tests find the session unlocked. Uninstall turns it off again, unless the
+// user had it on before the lab first turned it on.
+func keepAwake(user string) error {
+	u, err := osuser.Lookup(user)
+	if err != nil {
+		return err
+	}
+	// A Mac the lab set up before stayAwakeUser existed has sddmConf instead.
+	if !exists(filepath.Join(workDir, stayAwakeUser)) && !exists(sddmConf) {
+		if exists(filepath.Join(u.HomeDir, stayAwake)) {
 			os.WriteFile(filepath.Join(workDir, stayAwakeWasOn), []byte(user+"\n"), 0o644)
 		}
 	}
-	os.MkdirAll(filepath.Dir(sddmConf), 0o755)
-	if err := os.WriteFile(sddmConf, []byte(conf), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(workDir, stayAwakeUser), []byte(user+"\n"), 0o644); err != nil {
 		return err
 	}
 	// Omarchy's stay-awake state file: the same thing `omarchy toggle idle stay-awake` sets.

@@ -31,6 +31,7 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab maintainer add <name> | remove <name> | list   the people with their own labd token
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
+             [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one
   lab device <name> [--label ..] [--model ..] [--oob-url http://m3:7780 --oob-token ..] [--no-oob]
   lab baseline <device>               prove the one-shot boot works; required once per Mac
   lab build <github-url> --device <mac> | --config <file>   build a kernel from a repo, branch, commit or PR URL (reused if built before)
@@ -149,15 +150,24 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 	case "enroll":
 		label := fs.String("label", "", "where the Mac physically is, for power-cycle instructions")
 		model := fs.String("model", api.ModelLaptop, "laptop or desktop")
+		volunteer := fs.String("volunteer", "", "the Volunteer whose Mac this is (with --contact); none makes a Lab-owned Mac")
+		contact := fs.String("contact", "", "how to reach the Volunteer")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab enroll <name>"); err != nil {
+		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact>]`); err != nil {
 			return err
 		}
-		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model})
+		if (strings.TrimSpace(*volunteer) == "") != (strings.TrimSpace(*contact) == "") {
+			return fmt.Errorf("a Volunteer's Mac needs both --volunteer and --contact")
+		}
+		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model, VolunteerName: *volunteer, Contact: *contact})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Enrollment token for %s (one use, expires %s):\n\n  %s\n\n", pos[0], t.Expires.Format(time.DateTime), t.Token)
+		kind := "a Lab-owned Mac"
+		if v := strings.TrimSpace(*volunteer); v != "" {
+			kind = "the Volunteer " + v + "'s Mac"
+		}
+		fmt.Printf("Enrollment token for %s, %s (one use, expires %s):\n\n  %s\n\n", pos[0], kind, t.Expires.Format(time.DateTime), t.Token)
 		fmt.Printf("On the Mac, copy lab-agent over and run:\n\n  sudo ./lab-agent setup --server %s --token %s [--gui-user <you>]\n\n", c.URL, t.Token)
 		fmt.Printf("Then: lab baseline %s\n", pos[0])
 		return nil
@@ -940,8 +950,16 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 		fmt.Printf("\n>>> %s\n%s\n\n", strings.ToUpper(d.Action.Title), indent(d.Action.Text()))
 	}
 	fmt.Printf("  model:       %s, %s\n", d.Facts.DTModel, orDash(d.Label, "no label"))
+	if d.IsVolunteer() {
+		fmt.Printf("  kind:        Volunteer's Mac: %s, %s\n", d.VolunteerName, d.Contact)
+	} else {
+		fmt.Printf("  kind:        Lab-owned Mac\n")
+	}
+	if !d.SnapshotEligible {
+		fmt.Printf("  installed:   not eligible for Installed runs: @ can't be snapshotted\n")
+	}
 	if d.Volunteer {
-		fmt.Printf("  volunteer:   enrolled with ./volunteer; lab gate counts it only with --volunteers\n")
+		fmt.Printf("  gate:        a Volunteer's Mac: lab gate counts it only with --volunteers\n")
 	}
 	fmt.Printf("  kernel:      %s (known-good: %s)\n", d.Kernel, orDash(d.KnownGood, "no baseline yet"))
 	fmt.Printf("  last seen:   %s, uptime %.0fs, systemd %s\n", ago(d.LastSeen), d.Health.Uptime, d.Health.SystemState)

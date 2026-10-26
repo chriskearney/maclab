@@ -87,6 +87,8 @@ type Sim struct {
 	KexecPass bool
 	// OnBattery is a Mac unplugged from AC power.
 	OnBattery bool
+	// noSnapshot is a Mac whose @ can't be snapshotted; see SetSnapshotable.
+	noSnapshot bool
 
 	unlock   func() // the boot waiting at the disk password prompt
 	snapshot *simDisk
@@ -154,6 +156,23 @@ func (s *Sim) Facts() api.Facts {
 	}
 	return api.Facts{Hostname: "sim", Machine: "aarch64", DTModel: model, Bootloader: "grub",
 		Initramfs: "mkinitcpio", GUIUser: "sim", Watchdog: true, WatchdogArmed: true, PanicTimeout: 10, PreflightOK: true}
+}
+
+// SetSnapshotable says whether the simulated Mac's @ can be snapshotted
+// (true by default).
+func (s *Sim) SetSnapshotable(ok bool) {
+	s.mu.Lock()
+	s.noSnapshot = !ok
+	s.mu.Unlock()
+}
+
+func (s *Sim) SnapshotEligible() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.noSnapshot {
+		return fmt.Errorf("the simulated @ cannot be snapshotted")
+	}
+	return nil
 }
 
 func (s *Sim) Health() api.Health {

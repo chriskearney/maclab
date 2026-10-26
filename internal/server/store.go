@@ -38,6 +38,12 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 	if err := addColumn(db, "tokens", "requester", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
+	// A labd from before Volunteer enrollment has tokens without these.
+	for _, col := range []string{"volunteer_name", "contact"} {
+		if err := addColumn(db, "tokens", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return nil, err
+		}
+	}
 	return &store{db}, nil
 }
 
@@ -90,10 +96,10 @@ func (s *store) devices() ([]deviceRow, error) {
 	return out, rows.Err()
 }
 
-const insertToken = `INSERT INTO tokens(token_hash,name,label,model,volunteer,requester,expires) VALUES(?,?,?,?,?,?,?)`
+const insertToken = `INSERT INTO tokens(token_hash,name,label,model,volunteer,requester,volunteer_name,contact,expires) VALUES(?,?,?,?,?,?,?,?,?)`
 
 func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time) error {
-	_, err := s.db.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, "", exp.Unix())
+	_, err := s.db.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, "", req.VolunteerName, req.Contact, exp.Unix())
 	return err
 }
 
@@ -122,7 +128,7 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 	if n >= max {
 		return errVolunteerTokens
 	}
-	if _, err := tx.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, who, exp.Unix()); err != nil {
+	if _, err := tx.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, who, req.VolunteerName, req.Contact, exp.Unix()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -133,8 +139,8 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`SELECT name,label,model,volunteer,requester,expires FROM tokens WHERE token_hash=?`, hash).
-		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &exp)
+	err := s.db.QueryRow(`SELECT name,label,model,volunteer,requester,volunteer_name,contact,expires FROM tokens WHERE token_hash=?`, hash).
+		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &r.VolunteerName, &r.Contact, &exp)
 	if err != nil {
 		return nil, err
 	}
