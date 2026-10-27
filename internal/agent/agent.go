@@ -188,10 +188,12 @@ func (a *Agent) Run(ctx context.Context) error {
 	go a.watchLeft(ctx)
 	var pollMu sync.Mutex
 	var pollCancel context.CancelFunc
+	var pollRebooted bool // the reboot, not a failure, cancelled the poll
 	if s, ok := a.sys.(*Sim); ok {
 		s.OnBoot = func() {
 			pollMu.Lock()
 			if pollCancel != nil {
+				pollRebooted = true
 				pollCancel()
 			}
 			pollMu.Unlock()
@@ -214,14 +216,18 @@ func (a *Agent) Run(ctx context.Context) error {
 		pctx, cancel := context.WithCancel(ctx)
 		pollMu.Lock()
 		pollCancel = cancel
+		pollRebooted = false
 		pollMu.Unlock()
 		err := a.poll(pctx)
+		pollMu.Lock()
+		rebooted := pollRebooted
+		pollMu.Unlock()
 		cancel()
 		if by, ok := endedBy(err); ok {
 			a.enrollmentEnded(by)
 			continue
 		}
-		if pctx.Err() != nil && ctx.Err() == nil {
+		if rebooted && ctx.Err() == nil {
 			continue // the machine rebooted under the long poll
 		}
 		if err != nil && ctx.Err() == nil {
