@@ -779,6 +779,16 @@ func TestSuspendDuringTestIsNotACrash(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
 	l.sim.SuspendFor = 6 * time.Second // well past quietGrace: only the announcement keeps it waiting
+	// The test carries on after the resume, as one that checks the Mac after
+	// waking does, until labd has seen it back: a result that came with the
+	// wake would end the wait before labd saw a check-in.
+	l.sim.TestFiles = func(test, kernel string) map[string][]byte {
+		for end := time.Now().Add(10 * time.Second); test == "suspend-then-resume" && time.Now().Before(end) &&
+			!strings.Contains(l.logs.String(), "back on the same boot"); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	}
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"),
 		Tests: []api.TestSpec{{Name: "suspend-then-resume", Builtin: "x"}, {Name: "after-resume", Builtin: "x"}}})
 	l.expect(j, api.OutcomePass)

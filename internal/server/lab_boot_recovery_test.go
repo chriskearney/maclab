@@ -10,6 +10,7 @@ import (
 
 	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/detect"
 )
 
 // submitJob submits a job for the lab's Mac through labd's API.
@@ -62,6 +63,26 @@ func (l *lab) journalOf(j *api.Job, boot string) string {
 		}
 	}
 	return ""
+}
+
+// consoleAtLogin waits for labd to have read a login prompt on the Mac's
+// serial console that came after since: the console lines of a boot reach
+// labd a little after the Sim is up on it, and a clock jump before then reads
+// as a console gone silent mid-boot.
+func (l *lab) consoleAtLogin(since time.Time) {
+	l.t.Helper()
+	v := l.s.dev(l.name)
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		v.mu.Lock()
+		at := v.marker == detect.MarkUserspace && v.markerTime.After(since)
+		v.mu.Unlock()
+		if at {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	l.t.Fatalf("labd never read a login prompt on the console after %s", since.Format(time.TimeOnly))
 }
 
 // bootIDs records every boot ID the Mac goes through until stop.
@@ -148,8 +169,10 @@ func TestLostContactIsAFailure(t *testing.T) {
 
 func TestLabOwnedMacComesBackThroughItsDeadlineBeforeAnOOBHardReset(t *testing.T) {
 	l, clock := lostContactLab(t, labConfig{oob: true})
+	submitted := clock.Now()
 	id := l.submitJob(api.JobSpec{Kernel: l.artifact("krel=7.2-offline behavior=no-network")})
 	l.lostBoot("7.2-offline")
+	l.consoleAtLogin(submitted) // the boot reached userspace, as the console shows: no stall to reset it for
 	clock.Advance(2 * 4 * time.Second)
 	j := l.jobAPI(id, 60*time.Second)
 	l.expect(j, api.OutcomeLostContact)
