@@ -60,7 +60,7 @@ func (l *lab) addMaintainer(token, name string) api.NewMaintainer {
 	}
 	var raw struct{ Added string }
 	json.Unmarshal([]byte(body), &raw)
-	if at, err := time.Parse(time.RFC3339, raw.Added); err != nil || time.Since(at) > time.Hour {
+	if at, err := time.Parse(time.RFC3339, raw.Added); err != nil || l.s.now().Sub(at) > time.Hour {
 		l.t.Fatalf("add Maintainer %s: added %q: %v", name, raw.Added, err)
 	}
 	return m
@@ -115,7 +115,7 @@ func TestFirstMaintainerIsListedButNotTheirToken(t *testing.T) {
 	var raw []map[string]any
 	json.Unmarshal([]byte(body), &raw)
 	added, _ := raw[0]["added"].(string)
-	if at, err := time.Parse(time.RFC3339, added); err != nil || time.Since(at) > time.Hour {
+	if at, err := time.Parse(time.RFC3339, added); err != nil || l.s.now().Sub(at) > time.Hour {
 		t.Fatalf("added %q: %v", added, err)
 	}
 	if _, ok := raw[0]["token"]; ok || strings.Contains(body, `"`+harnessToken+`"`) || strings.Contains(body, sha256Hex(harnessToken)) {
