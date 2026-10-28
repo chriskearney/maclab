@@ -28,6 +28,7 @@ comment: machine-id=0123456789abcdef0123456789abcdef order-priority=50
 func testLimine(t *testing.T) *limineLayout {
 	t.Helper()
 	dir := t.TempDir()
+	// Tests must not open the controller host boot-partition locks.
 	priorLocks := bootPartitionLocks
 	bootPartitionLocks = []string{filepath.Join(dir, "boot-partition.lock"), filepath.Join(dir, "limine-global.lock")}
 	t.Cleanup(func() { bootPartitionLocks = priorLocks })
