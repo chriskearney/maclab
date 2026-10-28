@@ -507,7 +507,7 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
-	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.admin(s.hRecoveryMode))
+	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.maintainer(s.hRecoveryMode))
 	m.HandleFunc("GET /api/recovery", s.viewer(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
 	}))
@@ -1017,21 +1017,7 @@ func (s *Server) hPutArtifact(w http.ResponseWriter, r *http.Request) {
 
 // storeArtifact saves content under its sha256.
 func (s *Server) storeArtifact(r io.Reader) (string, int64, error) {
-	tmp, err := os.CreateTemp(filepath.Join(s.cfg.DataDir, "artifacts"), ".upload-*")
-	if err != nil {
-		return "", 0, err
-	}
-	defer os.Remove(tmp.Name())
-	h := sha256.New()
-	n, err := io.Copy(io.MultiWriter(tmp, h), r)
-	tmp.Close()
-	if err != nil {
-		return "", 0, err
-	}
-	sha := hex.EncodeToString(h.Sum(nil))
-	now := s.now()
-	os.Chtimes(tmp.Name(), now, now)
-	return sha, n, os.Rename(tmp.Name(), s.artifactPath(sha))
+	return storeArtifactIn(filepath.Join(s.cfg.DataDir, "artifacts"), r, artifactDiskOps())
 }
 
 // cleanName keeps uploaded file names inside the job directory.

@@ -133,11 +133,11 @@ var errAccessLevel = errors.New("refused")
 // own session), and a Lab boot for a job that runs one.
 func needsFull(c api.Command) bool {
 	switch c.Kind {
-	case api.CmdExec:
+	case api.CmdExec, api.CmdMesaStage:
 		return true
 	case api.CmdRunTest:
 		var t api.TestSpec
-		return json.Unmarshal(c.Args, &t) != nil || t.MaintainerScript()
+		return json.Unmarshal(c.Args, &t) != nil || t.MaintainerScript() || t.Builtin == "mesa-provider"
 	case api.CmdBootOnce:
 		var b api.BootOnceArgs
 		return json.Unmarshal(c.Args, &b) != nil || testsNeedFull(b.Tests)
@@ -147,7 +147,7 @@ func needsFull(c api.Command) bool {
 
 // testsNeedFull is whether any of a job's tests is a Maintainer's script.
 func testsNeedFull(tests []api.TestSpec) bool {
-	return slices.ContainsFunc(tests, api.TestSpec.MaintainerScript)
+	return slices.ContainsFunc(tests, func(t api.TestSpec) bool { return t.MaintainerScript() || t.Builtin == "mesa-provider" })
 }
 
 // watches is whether a command reads the Mac's screen or its live journal.

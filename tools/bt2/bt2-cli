@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+"""bt2 entry point: bt2-cli run|restore|status ... (same as python3 -m bt2.controller)."""
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from bt2 import controller  # noqa: E402
+
+sys.exit(controller.main())

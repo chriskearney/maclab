@@ -53,6 +53,9 @@ func (v *dev) syncAccessLocked(ci api.Checkin) bool {
 // needsFull is why a job spec needs a Volunteer's Mac at Full, or "": a
 // Maintainer's script, as root or in the Volunteer's session.
 func needsFull(spec api.JobSpec) string {
+	if spec.Mesa != nil {
+		return "staged Mesa packages"
+	}
 	for _, t := range spec.Tests {
 		switch {
 		case t.MaintainerScript() && t.GUI:

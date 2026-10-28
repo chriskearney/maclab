@@ -144,6 +144,8 @@ func (s *Server) transitionRecoveryMode(ctx context.Context, v *dev, requested, 
 		v.oobCallCancel()
 	}
 	if err := v.s.store.saveDevice(&v.d, v.secretHash); err != nil {
+		v.d.EffectiveRecoveryMode = previous
+		v.d.RecoveryTransaction, v.d.RecoveryHolder, v.d.RecoveryModeJob = previousTransaction, previousHolder, previousJob
 		v.mu.Unlock()
 		if mode == api.RecoveryNetworkOnly {
 			s.attachOOB(v)
@@ -182,6 +184,10 @@ var recoveryTransactionID = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}
 func (s *Server) hRecoveryMode(w http.ResponseWriter, r *http.Request) {
 	v := s.devOr404(w, r)
 	if v == nil {
+		return
+	}
+	if err := refuseAtAccessLevel(v.snapshot(), "recovery-policy overrides"); err != nil {
+		httpErr(w, 403, "%v", err)
 		return
 	}
 	var q api.RecoveryModeRequest

@@ -84,7 +84,8 @@ func (l *lab) removeWindow(w []string) {
 // matter to the tests that use it.
 func windowLab(t *testing.T, c labConfig) (l *lab, clock *agent.FakeClock, parked []string) {
 	t.Helper()
-	clock = agent.NewFakeClock(time.Now())
+	// Keep schedule tests away from DST transitions; DST itself is covered in internal/window.
+	clock = agent.NewFakeClock(time.Date(2026, time.October, 19, 12, 0, 0, 0, time.Local))
 	c.clock, c.volunteer = clock, true
 	l = newLabWith(t, c)
 	t.Cleanup(pumpClock(clock))

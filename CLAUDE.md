@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues on malik-na/maclab, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues on chriskearney/maclab, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

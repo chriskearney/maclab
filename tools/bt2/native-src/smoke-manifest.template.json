@@ -1,0 +1,62 @@
+{
+  "suite": "rc-normal-installed-session-smoke-v1",
+  "source_review": "pending-root",
+  "approved": false,
+  "device": "REQUIRED",
+  "board": "REQUIRED",
+  "expected_kernel": "7.2.11-7-1-ARCH",
+  "expected_boot_id": "REQUIRED",
+  "token": "REQUIRED",
+  "gui_user": "REQUIRED",
+  "gui_uid": 0,
+  "wifi_interface": "REQUIRED",
+  "wifi_mac": "REQUIRED",
+  "output_dir": "REQUIRED",
+  "minimum_runs": 3,
+  "tool_seconds": 3,
+  "case_seconds": 30,
+  "total_seconds": 90,
+  "tools": {
+    "gl_pixels": {
+      "path": "/var/lib/sf-mesa-trueup-20261024/probes-r2/gl-render-check-aarch64",
+      "sha256": "24007754c92e05220edc4645702853ac86c0ff5d98c084da126955ccdd4d6e82"
+    },
+    "vk_pixels": {
+      "path": "/var/lib/sf-mesa-trueup-20261024/probes-r2/vk-render-check-aarch64",
+      "sha256": "e4a7b8d50c10d1cc3bf40c1dcaf9e74cd566ebb1901857e84b06256bbdf0d40d"
+    }
+  },
+  "providers": {
+    "gallium": {
+      "path": "/usr/lib/libgallium-26.3.0-devel.so",
+      "sha256": "f1c4a87bf69c0468d40295fab2183ec219e2e3d91f1df700db9ea9e3b8588676",
+      "bytes": 32409208
+    },
+    "egl": {
+      "path": "/usr/lib/libEGL_mesa.so.0.0.0",
+      "sha256": "19f5a8d8249b894c0fd4fe97c557d67a10f604aa099a25a765492fbc963c6b9e",
+      "bytes": 396392,
+      "note": "unchanged wrapper; insufficient alone"
+    },
+    "vulkan": {
+      "path": "/usr/lib/libvulkan_asahi.so",
+      "sha256": "86cef05867f62be3f6aa967b69ff18f81bd107cbafd27a74aff2031892ceee75",
+      "bytes": 28083280
+    },
+    "dril": {
+      "path": "/usr/lib/dri/libdril_dri.so",
+      "sha256": "a6ae89538c276a053bd88c985b8b3f966ed163822b86bc639629dc525ba20455",
+      "bytes": 133272
+    },
+    "glx": {
+      "path": "/usr/lib/libGLX_mesa.so.0.0.0",
+      "sha256": "ef6e93257fb7b79dd750dfd10f232f11d2d6c1661624d6c7e10cc0b70d25594e",
+      "bytes": 395984
+    },
+    "gbm": {
+      "path": "/usr/lib/libgbm.so.1.0.0",
+      "sha256": "01acc4059e9d8d326a0deec1548c08d009acfeb11710adc56592adf85a42b4be",
+      "bytes": 67632
+    }
+  }
+}

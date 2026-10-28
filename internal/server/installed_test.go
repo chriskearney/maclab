@@ -131,6 +131,18 @@ func installedLab(t *testing.T, tamper func(phase string, o map[string]any)) (*l
 	return l, installed.SHA256(mb), entry
 }
 
+// Build metadata describes the installed agent binary without lowering its
+// release version. Exercise the real admission path using the simulator only.
+func TestInstalledJobBuildMetadata(t *testing.T) {
+	l, msha, _ := installedLab(t, nil)
+	v := l.s.dev("sim-mac")
+	v.mu.Lock()
+	v.d.Facts.AgentVersion = installedMinAgent + "+gui-workspace"
+	v.mu.Unlock()
+	j := l.run(api.JobSpec{InstalledManifest: msha, Holder: "tester"})
+	l.expect(j, api.OutcomePass)
+}
+
 func TestInstalledJob(t *testing.T) {
 	l, msha, entry := installedLab(t, nil)
 	kg := l.s.dev("sim-mac").snapshot().KnownGood

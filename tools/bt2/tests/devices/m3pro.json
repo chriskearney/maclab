@@ -1,0 +1,45 @@
+{
+  "schema": "bt2.device/1",
+  "name": "m3pro",
+  "board": "apple,j516s",
+  "board_dtb": "t6030-j516s.dtb",
+  "dt_model": "Apple MacBook Pro (16-inch, M3 Pro, Nov 2023)",
+  "known_good_kernel": "7.2.11-lab7876c8e8-cc71",
+  "gui_user": "chrisk",
+  "gui_uid": 1000,
+  "esp": "/boot/efi",
+  "recovery_modes": [
+    "network-only",
+    "serial-assisted"
+  ],
+  "writer_units": [
+    "limine-snapper-sync.service",
+    "limine-snapper-watcher.service",
+    "snapper-timeline.timer",
+    "snapper-cleanup.timer"
+  ],
+  "parkable": [
+    "m1n1/boot.bin.pre-omacom-50fb",
+    "EFI/Linux/siliconforest-mixtape-77648eb77168.efi"
+  ],
+  "baseline_release": "rc7-m3pro-trifecta-20261026",
+  "manifest_source_release": "rc7-m3pro-trifecta-20261026",
+  "boot_chain_packages": [
+    "m1n1-aurora",
+    "uboot-asahi"
+  ],
+  "etc_capture": [
+    "/etc/pacman.conf",
+    "/etc/default/limine",
+    "/etc/limine-entry-tool.conf",
+    "/etc/limine-entry-tool.d",
+    "/etc/default/update-m1n1",
+    "/etc/m1n1.conf",
+    "/etc/mkinitcpio.conf",
+    "/etc/mkinitcpio.conf.d",
+    "/etc/mkinitcpio.d",
+    "/etc/systemd/system",
+    "/etc/pacman.d/hooks",
+    "/etc/initcpio/install"
+  ]
+}

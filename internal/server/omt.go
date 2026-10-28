@@ -415,6 +415,9 @@ func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if err := packagedOMTReport(body, res.Kernel); err != nil {
+		return "", fmt.Errorf("report remains private: %w", err)
+	}
 	site := strings.TrimRight(s.cfg.OMTSite, "/")
 	req, _ := http.NewRequestWithContext(ctx, "POST", site+"/api/v1/reports", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -515,7 +518,7 @@ func (s *Server) omtScheduler() {
 
 // versionAtLeast compares dotted version numbers.
 func versionAtLeast(have, want string) bool {
-	h, w := strings.Split(have, "."), strings.Split(want, ".")
+	h, w := strings.Split(versionWithoutBuild(have), "."), strings.Split(versionWithoutBuild(want), ".")
 	for i := range w {
 		var a, b int
 		if i < len(h) {
@@ -576,4 +579,62 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return syncDir(filepath.Dir(path))
+}
+
+// Build identifiers do not affect version precedence. Strip only a valid
+// metadata suffix, so malformed versions do not newly satisfy an agent gate.
+func versionWithoutBuild(version string) string {
+	core, build, found := strings.Cut(version, "+")
+	if !found {
+		return version
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return version
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return version
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return version
+			}
+		}
+	}
+	for _, identifier := range strings.Split(build, ".") {
+		if identifier == "" {
+			return version
+		}
+		for _, c := range identifier {
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-') {
+				return version
+			}
+		}
+	}
+	return core
+}
+
+// packagedOMTReport uses the tester's pacman ownership result, not a release
+// name heuristic. Missing, skipped, duplicate or malformed identity fails
+// closed without altering the local report or qualification reference.
+func packagedOMTReport(body []byte, kernel string) error {
+	var report omtReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return fmt.Errorf("invalid omarchy-m-test report: %w", err)
+	}
+	if kernel == "" || report.Machine.Kernel != kernel {
+		return errors.New("report kernel does not match the tested kernel")
+	}
+	count, pass := 0, false
+	for _, check := range report.Checks {
+		if check.ID == "boot.kernel-package" {
+			count++
+			pass = check.Status == "pass"
+		}
+	}
+	if count != 1 || !pass {
+		return errors.New("running kernel has no unique passing boot.kernel-package ownership check")
+	}
+	return nil
 }

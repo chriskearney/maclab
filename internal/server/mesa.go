@@ -35,6 +35,9 @@ var reBuildID = regexp.MustCompile(`^b[0-9]{4}-[0-9]{6}-[0-9a-f]{4}$`)
 // for every job that carries a MesaSpec, before the job is queued.
 func (s *Server) validateMesa(spec api.JobSpec, d api.Device) (int, error) {
 	m := spec.Mesa
+	if err := refuseAtAccessLevel(d, "staged Mesa packages"); err != nil {
+		return 403, err
+	}
 	switch {
 	case m.OfficialGPU:
 		return 409, errors.New("official GPU mode is disabled pending runtime qualification; staged provider mode is available")
