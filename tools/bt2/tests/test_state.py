@@ -436,6 +436,34 @@ class TestAuditM1(Base):
         self.assertIn('cts', out['removed'])
         self.assertFalse(os.path.exists(self.fx.run_dir + '/cts'))
 
+    def test_cleanup_removes_both_carriers_only_after_final_audit(self):
+        self.call('capture')
+        names = ('bt2-capture.tar', 'bt2-capture.tar.gz')
+        for name in names:
+            self.fx.write(B.RUN_SYS + '/' + name, b'redundant retained carrier')
+        self.call('cleanup', rc=3)
+        for name in names:
+            self.assertTrue(os.path.isfile(self.fx.run_dir + '/' + name))
+        self.assertEqual(self.call('audit')['differences'], [])
+        out = self.call('cleanup')
+        for name in names:
+            self.assertIn(name, out['removed'])
+            self.assertFalse(os.path.lexists(self.fx.run_dir + '/' + name))
+        for name in ('capture/state.json', 'receipts/capture.0.json'):
+            self.assertTrue(os.path.isfile(self.fx.run_dir + '/' + name))
+
+    def test_cleanup_keeps_symlink_carrier_and_its_target(self):
+        self.call('capture')
+        carrier = self.fx.run_dir + '/bt2-capture.tar.gz'
+        target = self.fx.run_dir + '/capture/state.json'
+        before = B.rd(target)
+        os.symlink('capture/state.json', carrier)
+        self.assertEqual(self.call('audit')['differences'], [])
+        out = self.call('cleanup')
+        self.assertNotIn('bt2-capture.tar.gz', out['removed'])
+        self.assertTrue(os.path.islink(carrier))
+        self.assertEqual(B.rd(target), before)
+
     def test_cleanup_keeps_unknown_hold_content(self):
         self.call('capture')
         self.call('audit')

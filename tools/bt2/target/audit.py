@@ -492,11 +492,13 @@ def cleanup(ctx):
             ctx.changed = True
             shutil.rmtree(hold)
             removed.append('hold')
-    # The controller pulled this tarball (and retained it on the M5); it is ESP-sized, so drop the Mac copy.
-    tarball = ctx.run_dir / 'bt2-capture.tar'
-    if os.path.lexists(tarball) and stat.S_ISREG(os.lstat(tarball).st_mode):
-        ctx.changed = True
-        os.unlink(tarball)
-        removed.append('bt2-capture.tar')
+    # The controller retained the full carrier on the M5. Drop only this
+    # redundant carrier; preserve capture/ and receipts/ for recovery.
+    for name in ('bt2-capture.tar', 'bt2-capture.tar.gz'):
+        tarball = ctx.run_dir / name
+        if os.path.lexists(tarball) and stat.S_ISREG(os.lstat(tarball).st_mode):
+            ctx.changed = True
+            os.unlink(tarball)
+            removed.append(name)
     c.fsync_dir(ctx.run_dir)
     return {'removed': removed, 'kept': kept, 'hold_unknown': unknown[:200], 'audit_receipt': last_name}
