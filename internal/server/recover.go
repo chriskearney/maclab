@@ -17,15 +17,20 @@ var (
 )
 
 // waitBack waits for the Mac to come up on a new boot after `since`. When it
-// doesn't, it walks the recovery ladder. It returns the ladder steps used and
-// whether the Mac is back.
-func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout time.Duration) ([]string, bool, error) {
+// doesn't, it gives the Mac selfRecovery more to come back by itself (a Lab
+// boot's deadlines reboot it), then walks the recovery ladder. It returns the
+// ladder steps used and whether the Mac is back.
+func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout, selfRecovery time.Duration) ([]string, bool, error) {
 	var reason string
-	err := v.waitFor(ctx, timeout, func() bool {
+	err := v.waitFor(ctx, timeout+selfRecovery, func() bool {
 		if v.d.BootID != oldBoot && v.d.LastSeen.After(since) {
 			return true
 		}
-		now := time.Now()
+		now := v.s.now()
+		if v.d.IsVolunteer() {
+			// A Volunteer's Mac gets to recover by itself until its Hard ceiling plus a boot timeout.
+			return false
+		}
 		for _, e := range v.events {
 			if e.Time.After(since) && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
 				reason = "kernel panicked and did not reboot within " + panicGrace.String()
@@ -52,9 +57,12 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 		return nil, true, nil
 	}
 	if reason == "" {
-		if stillUp {
-			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout)
-		} else {
+		switch {
+		case stillUp:
+			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout+selfRecovery)
+		case selfRecovery > 0:
+			reason = fmt.Sprintf("did not check in within %s, nor come back by itself %s after that", timeout, selfRecovery)
+		default:
 			reason = fmt.Sprintf("did not check in within %s", timeout)
 		}
 	}
@@ -91,7 +99,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 
 	if alive {
 		steps = append(steps, "soft reboot via agent")
-		t0 := time.Now()
+		t0 := v.s.now()
 		v.send(api.CmdReboot, "", nil)
 		v.rearmSerial(3 * time.Minute)
 		if v.waitFor(ctx, bootTimeout, backSince(t0)) == nil {
@@ -107,7 +115,7 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 			if why := v.leaving(); why != "" {
 				return append(steps, "stopped: "+why), false
 			}
-			t0 := time.Now()
+			t0 := v.s.now()
 			steps = append(steps, fmt.Sprintf("hard reset %d via %s", i, ctl.Name()))
 			rctx, cancel := context.WithTimeout(ctx, time.Minute)
 			err := ctl.Reset(rctx)
@@ -129,14 +137,18 @@ func (v *dev) ladder(ctx context.Context, reason string, bootTimeout time.Durati
 		return append(steps, "stopped: "+why), false
 	}
 	v.mu.Lock()
-	act := humanAction(v.d, reason, v.lastLogLocked())
+	act := humanAction(v.d, reason, v.lastLogLocked(), v.s.now())
+	n := Notification{Device: v.d.Name, Title: act.Title, Body: act.Text(), Priority: "urgent"}
+	if v.d.IsVolunteer() {
+		n.Volunteer, n.MacTopic = true, v.s.macTopicURL(v.d.Enrollment)
+	}
 	v.d.Action = act
 	v.restore = ""
 	v.setStateLocked(api.StateNeedsHands, reason)
 	v.dirty = true
 	v.mu.Unlock()
 	steps = append(steps, "asked a human to power cycle it")
-	v.s.notify(Notification{Device: v.d.Name, Title: act.Title, Body: act.Text(), Priority: "urgent"})
+	v.s.notify(n)
 	return steps, false
 }
 
@@ -154,12 +166,12 @@ func (v *dev) lastLogLocked() string {
 
 // humanAction writes the instruction for the person at the desk: which
 // machine, exactly what to press, and that nothing else is needed.
-func humanAction(d api.Device, reason, lastLog string) *api.HumanAction {
+func humanAction(d api.Device, reason, lastLog string, now time.Time) *api.HumanAction {
 	where := d.Name
 	if d.Label != "" {
 		where = fmt.Sprintf("%s (%s)", d.Name, d.Label)
 	}
-	a := &api.HumanAction{Title: d.Name + " needs a power cycle", LastLog: lastLog, Since: time.Now()}
+	a := &api.HumanAction{Title: d.Name + " needs a power cycle", LastLog: lastLog, Since: now}
 	switch d.Model {
 	case api.ModelDesktop:
 		a.Steps = []string{

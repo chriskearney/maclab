@@ -43,15 +43,27 @@ func testTimeout(t api.TestSpec) time.Duration {
 }
 
 func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
+	res := api.TestResult{Name: t.Name}
+	fail := func(err error) api.TestResult { res.Error = err.Error(); res.ExitCode = -1; return res }
+	if err := l.awaitLabBootLock(ctx); err != nil {
+		return fail(err)
+	}
 	if t.Builtin == suspendDevicesTest {
 		return suspendDevices(ctx, t, outDir, l.GUIUser, quiet)
 	}
-	res := api.TestResult{Name: t.Name}
-	fail := func(err error) api.TestResult { res.Error = err.Error(); res.ExitCode = -1; return res }
 
 	script := filepath.Join(l.jobDir(job), "test-"+t.Name+".sh")
 	os.MkdirAll(filepath.Dir(script), 0o755)
 	switch {
+	case t.Identity != nil && (t.Builtin != "" || t.Script != ""):
+		return fail(errors.New("an identity check runs lab-agent's own collector, not a builtin or a script"))
+	case t.Identity != nil:
+		if err := checkIdentity(*t.Identity); err != nil {
+			return fail(err)
+		}
+		if err := os.WriteFile(script, []byte(IdentityScript(*t.Identity, true)), 0o755); err != nil {
+			return fail(err)
+		}
 	case t.Builtin != "":
 		b, err := builtinTests.ReadFile("tests/" + t.Builtin + ".sh")
 		if err != nil {
@@ -73,6 +85,11 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	defer cancel()
 
 	env := append(os.Environ(), "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name)
+	skip := "MACLAB_SKIP_ON_SCREEN="
+	if t.SkipOnScreen {
+		skip += "1"
+	}
+	env = append(env, skip)
 	var cmd *exec.Cmd
 	if t.GUI {
 		if l.GUIUser == "" {
@@ -84,7 +101,7 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		}
 		chownTree(outDir, u)
 		os.Chmod(script, 0o755)
-		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, "bash", script)...)
+		args := append([]string{"-u", u.Username, "--", "env"}, append(genv, "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, skip, "bash", script)...)
 		cmd = exec.CommandContext(tctx, "runuser", args...)
 	} else {
 		cmd = exec.CommandContext(tctx, "bash", script)

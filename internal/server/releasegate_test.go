@@ -869,12 +869,12 @@ func TestGateEndpoint(t *testing.T) {
 	}
 	stale, _ := l.s.store.job(j.ID) // a copy from before the exclusion
 	xj, err := c.Exclude(ctx, j.ID, "the access point went down mid-test", "chris@i9beef")
-	if x := xj.GateExclusion; err != nil || x == nil || x.By != "chris@i9beef" || x.Reason != "the access point went down mid-test" || time.Since(x.Time) > time.Minute || !xj.Updated.Equal(stale.Updated) {
+	if x := xj.GateExclusion; err != nil || x == nil || x.By != harnessMaintainer || x.Reason != "the access point went down mid-test" || time.Since(x.Time) > time.Minute || !xj.Updated.Equal(stale.Updated) {
 		t.Fatalf("lab exclude: %+v %v", xj, err)
 	}
 	for _, q := range []string{"?families=m1", "?families=m1&exclude=" + first.ID} {
 		r = gate("/api/gate/"+k[:12]+q, 200)
-		if len(r.Exclusions) != 1 || r.Exclusions[0].Job != j.ID || r.Exclusions[0].By != "chris@i9beef" || !strings.Contains(r.Summary, "set aside with lab exclude: "+j.ID) {
+		if len(r.Exclusions) != 1 || r.Exclusions[0].Job != j.ID || r.Exclusions[0].By != harnessMaintainer || !strings.Contains(r.Summary, "set aside with lab exclude: "+j.ID) {
 			t.Fatalf("gate %s after lab exclude: %+v", q, r)
 		}
 		if c := r.Families[0].NotCounted; !slices.ContainsFunc(c, func(run api.GateRun) bool { return run.Job == j.ID && run.Exclusion != nil }) {

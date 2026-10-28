@@ -30,10 +30,19 @@ type System interface {
 
 	Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetcher) (api.StageResult, error)
 	BootOnce(entry string) error
+	// Install installs a Release's packages as its installer does, fetching
+	// them from labd by sha256.
+	Install(ctx context.Context, job string, a api.InstallArgs, fetch Fetcher) error
 	// RunTest runs a test; a test that takes the network down (suspend-devices)
 	// tells labd first with quiet.
 	RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult
 	Collect(ctx context.Context, boot, outDir string) error
+	// PreviousBoot is the ID of the boot before this one, if the journal saw
+	// it start after since; "" if not.
+	PreviousBoot(since time.Time) string
+	// CollectPstore copies the pstore/ramoops records of crashes since since
+	// into outDir and returns their names.
+	CollectPstore(since time.Time, outDir string) ([]string, error)
 	Cleanup(job string, all bool) error
 	// Screenshot captures the GUI session as JPEG to path.
 	Screenshot(ctx context.Context, path string, wait time.Duration) (w, h int, err error)
@@ -57,7 +66,19 @@ type System interface {
 	// an error if it doesn't before ctx ends. The agent feeds the watchdog
 	// only while it answers.
 	PingInit(ctx context.Context) error
+	// InhibitSuspend keeps the machine from suspending, for the reason why,
+	// until release; a boot ends it too. It never inhibits idle, so the idle
+	// lock and screensaver carry on.
+	InhibitSuspend(why string) (release func(), err error)
 
 	// Alive is false while a simulated machine is hung. Always true on Linux.
 	Alive() bool
+
+	// LeaveLab removes the lab from the Mac: its boot entries, units, autologin
+	// drop-in and device secret. keepAgent keeps lab-agent itself until labd
+	// has been told the Mac left.
+	LeaveLab(keepAgent bool) error
+
+	// SnapshotEligible is nil when @ can be snapshotted, else why not.
+	SnapshotEligible() error
 }

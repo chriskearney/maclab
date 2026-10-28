@@ -209,7 +209,7 @@ func serveMCP(ctx context.Context) error {
 		Reason string `json:"reason,omitempty" jsonschema:"why the job says nothing about its kernel, e.g. the access point went down mid-test; required unless clear"`
 		Clear  bool   `json:"clear,omitempty" jsonschema:"count the job in lab_gate again"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_exclude", Description: "Set a finished job aside in every lab_gate report until cleared, say a failure the lab caused (an access point outage reads as crashed_or_hung, which would keep its family flaky for good). Needs a lab admin and a reason; the gate lists the job in exclusions with who set it aside, why and when. Only for a failure that isn't the kernel's: never to make a gate pass. clear counts the job again. Returns the job."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_exclude", Description: "Set a finished job aside in every lab_gate report until cleared, say a failure the lab caused (an access point outage reads as crashed_or_hung, which would keep its family flaky for good). Needs a Maintainer's token and a reason; the gate lists the job in exclusions with who set it aside, why and when. Only for a failure that isn't the kernel's: never to make a gate pass. clear counts the job again. Returns the job."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a excludeArg) (*mcp.CallToolResult, any, error) {
 			if a.Clear {
 				j, err := c.ClearExclusion(ctx, a.JobID)

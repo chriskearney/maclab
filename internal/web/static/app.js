@@ -70,8 +70,8 @@ function dur(s) {
 const since = t => (Date.now() - new Date(t)) / 1000;
 
 // ——— API ———————————————————————————————————————————————————————————————
-// On a trusted network labd needs no token; otherwise the saved one is sent.
-// A tailnet viewer may look without one, and unlocks changes with one.
+// Every change carries the saved Maintainer token. A tailnet viewer may look
+// without one, and unlocks changes with one.
 const lockable = () => !S.open || S.viewer;
 const authH = () => S.token ? { Authorization: 'Bearer ' + S.token } : {};
 async function api(path, opt = {}) {
@@ -304,7 +304,7 @@ function bar() {
     `<button class="stat" onclick="go('#/jobs')" title="jobs running or queued">${ic('pulse')}<b>${running}</b></button>`,
     `<button class="stat hide-sm" id="theme-btn" title="theme: ${esc(t?.title || '')}">${ic('palette')}</button>`,
     `<button class="stat" title="${!S.online ? 'labd unreachable' : S.stream === 'up' ? 'connected · live stream' : 'connected · polling'}"><span class="live ${S.online ? '' : 'down'}"></span></button>`,
-    lockable() ? `<button class="stat" onclick="lock()" title="${S.viewer && !S.token ? 'view only: unlock with an admin token' : 'lock'}">${ic('lock')}</button>` : '',
+    lockable() ? `<button class="stat" onclick="lock()" title="${S.viewer && !S.token ? 'view only: unlock with a Maintainer token' : 'lock'}">${ic('lock')}</button>` : '',
   ].join(''));
   const tb = $('#theme-btn');
   if (tb) tb.onclick = e => themeMenu(e.currentTarget);
@@ -415,6 +415,8 @@ function macCard(d) {
       <div class="fact"><div class="k">known-good</div><div class="v">${d.known_good ? (kgMatch ? `<span class="good">${ic('check')} running it</span>` : esc(d.known_good)) : '<span class="muted">no baseline yet</span>'}</div></div>
       <div class="fact"><div class="k">heartbeat</div><div class="v"><span class="heart ${fresh ? 'beat' : 'stale'}"></span>${ago(d.last_seen)}</div></div>
       <div class="fact"><div class="k">uptime · systemd</div><div class="v">${d.health?.uptime ? dur(d.health.uptime) : '—'} · ${esc(d.health?.system_state || '—')}</div></div>
+      <div class="fact"><div class="k">kind</div><div class="v">${d.kind === 'volunteer' ? `Volunteer: ${esc(d.volunteer_name)} · ${esc(d.contact)}` : 'Lab-owned'}</div></div>
+      <div class="fact"><div class="k">Installed runs</div><div class="v">${d.snapshot_eligible ? 'eligible' : '<span class="muted">not eligible: @ can\'t be snapshotted</span>'}</div></div>
     </div>
     <div class="tier" style="--c:${tierColor}">
       <span class="segs">${[0, 1, 2].map(i => `<i class="${i <= tier ? 'on' : ''}"></i>`).join('')}</span>
@@ -1478,9 +1480,9 @@ async function liveTick(devices) {
 
 // ——— server-sent events ———
 // labd streams device, job, serial, kernel-event and screen events. EventSource
-// cannot send the admin token, so this reads the stream with fetch.
+// cannot send the Maintainer token, so this reads the stream with fetch.
 async function stream() {
-  if (S.streamCtl || S.locked || (!S.token && !S.open)) return;
+  if (S.streamCtl || S.locked || !S.token) return;
   const ctl = new AbortController();
   S.streamCtl = ctl;
   let retry = 3000;
@@ -1683,9 +1685,9 @@ async function lock(msg = '') {
   l.innerHTML = `<div class="inner">
     <div class="logo">${logo}</div>
     <div class="time" id="lock-time"></div><div class="date" id="lock-date"></div>
-    <form id="lock-form"><input type="password" id="lock-token" placeholder="labd admin token" autocomplete="current-password" autofocus>
+    <form id="lock-form"><input type="password" id="lock-token" placeholder="your Maintainer token" autocomplete="current-password" autofocus>
       <div class="msg ${msg ? 'bad' : ''}" id="lock-msg">${esc(msg)}</div></form>
-    <div class="hint">cat ~/.local/share/maclab/admin.token</div></div>`;
+    <div class="hint">from lab maintainer add; the first Maintainer's is in ~/.local/share/maclab/admin.token</div></div>`;
   clock();
   $('#lock-token').focus();
   $('#lock-form').onsubmit = async e => {
@@ -1715,7 +1717,7 @@ async function logoSVG() {
 // ——— polling ———————————————————————————————————————————————————————————————
 let ticking = false;
 async function tick() {
-  if (ticking || S.locked || (!S.token && !S.open)) return;
+  if (ticking || S.locked || !S.token) return;
   ticking = true;
   S.lastTick = Date.now();
   try {

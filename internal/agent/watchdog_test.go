@@ -488,7 +488,7 @@ func (h *wdHarness) finished(id string) {
 	h.t.Helper()
 	for start := time.Now(); ; time.Sleep(time.Millisecond) {
 		h.a.mu.Lock()
-		running := h.a.running[id]
+		_, running := h.a.running[id]
 		h.a.mu.Unlock()
 		if !running {
 			return

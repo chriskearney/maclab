@@ -23,7 +23,16 @@ if [ -z "$have" ] || { [ -n "$want" ] && [ "$want" != "$have" ]; }; then
 fi
 echo "omarchy-m-test $(omarchy-m-test --version | awk '{print $2}') on $(uname -r)"
 
-printf '\n' | omarchy-m-test --dry-run --output "$out/omt-report.json" > "$out/omt-run.txt" 2>&1
+# A Volunteer's Mac is locked while this runs (MACLAB_SKIP_ON_SCREEN=1): the
+# video section (a full-screen test card checked by screenshot) would only
+# capture the lock surface, so it is left out of the reference and the test run alike.
+skip=()
+if [ -n "${MACLAB_SKIP_ON_SCREEN:-}" ]; then
+    skip=(--skip video)
+    echo "locked screen: on-screen checks left out"
+fi
+
+printf '\n' | omarchy-m-test --dry-run "${skip[@]}" --output "$out/omt-report.json" > "$out/omt-run.txt" 2>&1
 rc=$?
 grep -E '^\s*(PASS|FAIL|SKIP)\b' "$out/omt-run.txt" | sed 's/^\s*//' | head -200
 if [ ! -s "$out/omt-report.json" ]; then

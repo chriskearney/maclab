@@ -215,7 +215,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		switch {
 		case j.Spec.Baseline:
 			// lab baseline is how a person sets the references on purpose
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
 				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
 			res.Reference = "a baseline: becomes the reference if it passes"
 		case len(res.Regressions) > 0:
@@ -225,7 +225,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		case j.Spec.Cmdline != "" || len(j.Spec.CmdlineStrip) > 0 || (j.Spec.CmdlineBase != "" && j.Spec.CmdlineBase != "known-good"):
 			res.Reference = "not a reference: the job changed the known-good cmdline"
 		default:
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
 				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
 			res.Reference = "becomes the reference if the job passes"
 		}
@@ -389,6 +389,11 @@ func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 	case !res.KnownGood:
 		return "", fmt.Errorf("ran on lab kernel %s, which the installed packages don't describe; only known-good runs are published", res.Kernel)
 	}
+	if v := s.dev(j.Spec.Device); v != nil {
+		if d := v.snapshot(); d.IsVolunteer() && !d.Publish {
+			return "", fmt.Errorf("publishing is off on %s, a Volunteer's Mac: only its Volunteer turns it on (sudo lab-agent publish on)", d.Name)
+		}
+	}
 	// A baseline makes the kernel it booted the known-good one, but only once it
 	// finishes, after this upload; until then compare with what it booted.
 	if j.Spec.Baseline {
@@ -453,6 +458,9 @@ func (s *Server) omtPublish(ctx context.Context, j *api.Job) (string, error) {
 	return url, err
 }
 
+// omtHolder holds the jobs omtScheduler queues.
+const omtHolder = "maclab-omt"
+
 // omtScheduler re-runs omarchy-m-test on each Mac's known-good kernel once
 // every OMTEvery, publishing the result if that's on: the reference that lab
 // kernels are compared with stays fresh, and so does the site.
@@ -460,29 +468,37 @@ func (s *Server) omtScheduler() {
 	if s.cfg.OMTEvery <= 0 {
 		return
 	}
-	t := time.NewTicker(10 * time.Minute)
+	t := s.clock().NewTicker(10 * time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		for _, v := range s.allDevs() {
 			d := v.snapshot()
 			if d.State != api.StateReady || d.ActiveJob != "" || !s.omtWanted(d, api.JobSpec{}) {
 				continue
 			}
-			if l := d.Lease; l != nil && time.Now().Before(l.Expires) {
+			if l := d.Lease; l != nil && s.now().Before(l.Expires) {
 				continue
 			}
-			if base := s.omtBaseline(d.Name); base != nil && time.Since(base.Time) < s.cfg.OMTEvery {
+			spec := api.JobSpec{Device: d.Name, Holder: omtHolder, Publish: s.cfg.OMTPublish}
+			length := (&jobRun{s: s, v: v, j: &api.Job{Spec: spec}, boot: s.cfg.BootTimeout}).expectedLength()
+			v.mu.Lock()
+			held := v.windowHoldLocked(length) != ""
+			v.mu.Unlock()
+			if held {
+				continue // a Volunteer's Mac is refreshed only when it fits in a window
+			}
+			if base := s.omtBaseline(d.Name); base != nil && s.since(base.Time) < s.cfg.OMTEvery {
 				continue
 			}
 			if open, _ := s.store.jobs(d.Name, 1, true); len(open) > 0 {
 				continue
 			}
-			j, _, err := s.Submit(api.JobSpec{Device: d.Name, Holder: "maclab-omt", Publish: s.cfg.OMTPublish})
+			j, _, err := s.Submit(spec)
 			if err != nil {
 				s.log.Printf("%s: scheduled omarchy-m-test: %v", d.Name, err)
 				continue

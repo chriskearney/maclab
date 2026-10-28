@@ -21,12 +21,37 @@ import (
 
 const usage = `lab-agent: the Mac side of the test lab
 
-  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin] [--volatile-journal]
+  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin|--stay-awake] [--volatile-journal]
         [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
+                                  (a Volunteer's Mac refuses --autologin and --stay-awake)
+  sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, its Availability window,
+                                  Access level, Installed-run eligibility and latest Audit log entries
+  sudo lab-agent window show|add|remove [<days> <HH:MM-HH:MM>]
+                                  when the lab may use a Volunteer's Mac, e.g. window add mon-fri 19:00-07:00
+  sudo lab-agent pause [--until YYYY-MM-DD]
+                                  end the current window now, or stay closed until that date
+  sudo lab-agent open --until HH:MM
+                                  open the Mac to the lab now, until HH:MM
+  sudo lab-agent notify --topic URL
+                                  send this Mac's notices to your own ntfy topic
+  sudo lab-agent access qualification|full
+                                  what Maintainers may do: Qualification (the default) allows no lab exec,
+                                  --script or --gui-script; lowering it stops what it no longer allows
+  sudo lab-agent publish on|off   whether this Mac's omarchy-m-test reports may be published (off until
+                                  you turn it on); on lists the deletion links of those published
+  sudo lab-agent log              every Maintainer action on this Mac, from its own Audit log (works offline)
+  sudo lab-agent jobs             the lab's jobs on this Mac
+  sudo lab-agent leave            leave the lab now (asks first; --yes skips the question): stops any job, returns
+                                  to your own kernel, removes the lab's boot entries, units and device secret,
+                                  tells labd, and lists what is left to remove by hand
   sudo lab-agent uninstall [--dry-run] [--force]   tell labd the Mac is leaving, then undo everything setup did
   sudo lab-agent preflight        what makes this Mac unsafe to test on
   sudo lab-agent known-good       the kernel setup would record as known-good (read-only)
   lab-agent run                   the daemon (started by lab-agent.service)
+  lab-agent lab-boot-session      on a Lab boot of a Volunteer's Mac, log the GUI user in (before SDDM)
+  lab-agent lab-boot-lock         lock that session at once
+  lab-agent lab-boot-deadlines    reboot a Lab boot that misses its deadline (started early in boot by
+                                  maclab-lab-boot-deadlines.service)
   lab-agent sim --server .. --token ..   a simulated Mac, to try the lab without hardware
   lab-agent version
 `
@@ -46,6 +71,7 @@ func main() {
 		token := fs.String("token", "", "one-time enrollment token from `lab enroll`")
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
+		stay := fs.Bool("stay-awake", false, "turn the GUI user's idle lock and screensaver off")
 		volatile := fs.Bool("volatile-journal", false, "leave journald alone: a failed lab boot's journal is lost")
 		tsKeyFile := fs.String("tailscale-authkey-file", "", "join the lab's tailnet first with the one-off auth key in this file (tagged tag:maclab, Tailscale SSH on); never stored")
 		tsKey := fs.String("tailscale-authkey", "", "- to read the one-off auth key from stdin; the key itself is refused here, since the process list and sudo's journal show it")
@@ -66,7 +92,7 @@ func main() {
 			err = e
 			break
 		}
-		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, VolatileJournal: *volatile,
+		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, StayAwake: *stay, VolatileJournal: *volatile,
 			TailscaleAuthKey: key, TailscaleHostname: *tsHost,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "uninstall":
@@ -98,9 +124,24 @@ func main() {
 		cfgPath := fs.String("config", agent.ConfigPath, "")
 		fs.Parse(os.Args[2:])
 		var cfg *agent.Config
-		if cfg, err = agent.LoadConfig(*cfgPath); err == nil {
+		if agent.HasLeft("/var/lib/maclab") {
+			// This Mac left the lab; all that remains is to tell labd.
+			err = agent.Farewell(ctx, "/var/lib/maclab", &agent.Linux{WorkDir: "/var/lib/maclab"}, log.Printf)
+		} else if cfg, err = agent.LoadConfig(*cfgPath); err == nil {
 			sys := &agent.Linux{WorkDir: "/var/lib/maclab", GUIUser: cfg.GUIUser}
 			err = agent.New(cfg, sys, nil).Run(ctx)
+		}
+	case "lab-boot-deadlines":
+		err = agent.EnforceLabBootDeadlines(ctx, "/var/lib/maclab")
+	case "lab-boot-session", "lab-boot-lock":
+		var cfg *agent.Config
+		if cfg, err = agent.LoadConfig(agent.ConfigPath); err == nil {
+			say := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
+			if os.Args[1] == "lab-boot-session" {
+				err = agent.WriteLabBootAutologin(cfg, say)
+			} else {
+				err = agent.LockLabBootSession(cfg, say)
+			}
 		}
 	case "sim":
 		server := fs.String("server", "", "labd URL")
@@ -120,6 +161,22 @@ func main() {
 	case "version":
 		fmt.Println(agent.Version)
 	default:
+		if agent.IsVolunteerCommand(os.Args[1]) {
+			var cfg *agent.Config
+			cfg, err = agent.LoadConfig(agent.ConfigPath)
+			if err != nil && os.Args[1] == "log" && agent.HasLeft("/var/lib/maclab") {
+				cfg, err = &agent.Config{}, nil // a Mac that left still reads its own Audit log
+			}
+			if err == nil {
+				args := os.Args[1:]
+				if args[0] == "leave" && len(args) == 1 && confirmLeaving() {
+					args = append(args, "--yes")
+				}
+				sys := &agent.Linux{WorkDir: "/var/lib/maclab", GUIUser: cfg.GUIUser}
+				err = agent.Volunteer(ctx, cfg, sys, args, os.Stdout)
+			}
+			break
+		}
 		fmt.Print(usage)
 		os.Exit(2)
 	}
@@ -135,4 +192,16 @@ func main() {
 // to undo, such as the Tailscale key file, gets undone.
 func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+}
+
+// confirmLeaving asks the Volunteer, on their terminal, whether to leave the
+// lab. Without a terminal it says no, and leave asks for --yes.
+func confirmLeaving() bool {
+	if st, err := os.Stdin.Stat(); err != nil || st.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	fmt.Print("Leave the lab now? Any job stops, your Mac returns to its own kernel, and the lab is removed from it. [y/N] ")
+	var answer string
+	fmt.Scanln(&answer)
+	return strings.EqualFold(strings.TrimSpace(answer), "y") || strings.EqualFold(strings.TrimSpace(answer), "yes")
 }

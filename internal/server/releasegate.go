@@ -596,8 +596,8 @@ const exclusionBodyMax = 8 << 10
 // exclude), say a failure the lab caused (an access point that went down
 // mid-test reads as crashed_or_hung): every gate report then lists it, with
 // who set it aside, why and when, and doesn't count it. It needs a reason.
-// The asker names themselves in by, but a tailnet admin is named by their
-// login. DELETE clears it. Both answer with the job.
+// The Maintainer is named by their token; by, which older clients send, is
+// kept only for a request without one. DELETE clears it. Both answer with the job.
 func (s *Server) hExclude(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var x *api.GateExclusion

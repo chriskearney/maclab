@@ -38,9 +38,8 @@ func TestTailnetRoles(t *testing.T) {
 		}
 		return nil, fmt.Errorf("no match for IP")
 	}
-	trust, _ := ParseTrust("10.1.1.0/24")
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", Trust: trust,
-		Tailscale: true, Admins: ParseAdmins("admin@github, other@github"), WhoIs: whois}, log.New(io.Discard, "", 0))
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret",
+		Tailscale: true, WhoIs: whois}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,8 +65,8 @@ func TestTailnetRoles(t *testing.T) {
 		name, method, path, remote, token string
 		want                              int
 	}{
-		{"admin lists Macs", "GET", "/api/devices", admin, "", 200},
-		{"admin submits a job", "POST", "/api/jobs", admin, "", past},
+		{"admin lists Macs", "GET", "/api/devices", admin, "adm_secret", 200},
+		{"admin submits a job", "POST", "/api/jobs", admin, "adm_secret", past},
 		{"viewer lists Macs", "GET", "/api/devices", viewer, "", 200},
 		{"viewer over IPv6", "GET", "/api/jobs", "[fd7a:115c:a1e0::10]:1", "", 200},
 		{"viewer reads builds", "GET", "/api/builds", viewer, "", 200},
@@ -84,12 +83,12 @@ func TestTailnetRoles(t *testing.T) {
 		{"tagged device can't change", "POST", "/api/jobs", tagged, "", 403},
 		{"unknown tailnet address", "GET", "/api/devices", unknown, "", 401},
 		{"off the tailnet", "GET", "/api/devices", "192.168.7.3:5000", "", 401},
-		{"trusted network still admin", "POST", "/api/jobs", "10.1.1.42:1", "", past},
+		{"trusted network still admin", "POST", "/api/jobs", "10.1.1.42:1", "adm_secret", past},
 		{"token from anywhere", "POST", "/api/jobs", "192.168.7.3:5000", "adm_secret", past},
 		{"agents keep device secrets", "POST", "/api/agent/checkin", admin, "", 401},
 		{"viewer reads a release", "GET", "/api/installed/aurora-1", viewer, "", 200},
 		{"viewer can't leave the frozen stores", "GET", "/api/installed/..%2F..%2F..%2Fetc", viewer, "", 404},
-		{"nor can an admin", "GET", "/api/installed/..%2F..%2F..%2Fetc", admin, "", 404},
+		{"nor can an admin", "GET", "/api/installed/..%2F..%2F..%2Fetc", admin, "adm_secret", 404},
 	}
 	for _, c := range cases {
 		if got := try(c.method, c.path, c.remote, c.token); got != c.want {
@@ -126,7 +125,7 @@ func TestTailnetRoles(t *testing.T) {
 	if a := auth(viewer, "nope"); a.Role != "viewer" {
 		t.Errorf("viewer's /api/auth with a wrong token: %+v", a)
 	}
-	if a := auth(admin); a.TokenRequired || a.Role != "admin" {
+	if a := auth(admin, "adm_secret"); a.TokenRequired || a.Role != "admin" {
 		t.Errorf("admin's /api/auth: %+v", a)
 	}
 	if a := auth("192.168.7.3:5000"); !a.TokenRequired || a.Role != "" {
@@ -135,9 +134,12 @@ func TestTailnetRoles(t *testing.T) {
 
 	// The live stream leaves serial lines out for viewers: they carry the
 	// console, which only admins may see.
-	stream := func(remote string) string {
+	stream := func(remote string, token ...string) string {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr = remote
+			for _, tok := range token {
+				r.Header.Set("Authorization", "Bearer "+tok)
+			}
 			h.ServeHTTP(w, r)
 		}))
 		defer srv.Close()
@@ -165,7 +167,7 @@ func TestTailnetRoles(t *testing.T) {
 	if got := stream(viewer); strings.Contains(got, "event: serial") || strings.Contains(got, "secret") {
 		t.Errorf("a viewer's stream carried a serial line:\n%s", got)
 	}
-	if got := stream(admin); !strings.Contains(got, "event: serial") {
+	if got := stream(admin, "adm_secret"); !strings.Contains(got, "event: serial") {
 		t.Errorf("an admin's stream lost the serial line:\n%s", got)
 	}
 }
@@ -182,7 +184,7 @@ func TestVolunteer(t *testing.T) {
 		return nil, fmt.Errorf("no match for IP")
 	}
 	bin := filepath.Join(t.TempDir(), "lab-agent-linux-arm64")
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", Tailscale: true, WhoIs: whois, AgentBinary: bin},
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", Tailscale: true, WhoIs: whois, AgentBinary: bin},
 		log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -257,11 +259,16 @@ func TestDeviceViewHidesOOBToken(t *testing.T) {
 }
 
 func TestTailscaleOffByDefault(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	asked := false
-	s := &Server{cfg: Config{AdminToken: "adm_secret", WhoIs: func(context.Context, string) (*TailnetPeer, error) {
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", WhoIs: func(context.Context, string) (*TailnetPeer, error) {
 		asked = true
 		return &TailnetPeer{Login: "admin@github"}, nil
-	}, Admins: []string{"admin@github"}}}
+	}}, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
 	r := httptest.NewRequest("GET", "/", nil)
 	r.RemoteAddr = "100.64.0.1:1"
 	if a, _ := s.access(r); a != noAccess || asked {
@@ -283,110 +290,6 @@ func TestParseWhoIs(t *testing.T) {
 	}
 	if _, err := parseWhoIs([]byte(`{}`)); err == nil {
 		t.Error("an answer naming no one accepted")
-	}
-}
-
-// With --tailscale, tailnet traffic gets no admin through --trust when labd
-// can tell it may be tailnet traffic: tailscale serve and Funnel proxy from
-// 127.0.0.1 with their own headers and X-Forwarded-For, any other proxy's
-// headers count the same, and tailnet peers are judged by identity. Without
-// --tailscale, trust is by address only, whatever the headers say.
-func TestTrustYieldsToTailnet(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	whois := func(ctx context.Context, ip string) (*TailnetPeer, error) {
-		if ip == "100.64.0.3" {
-			return &TailnetPeer{Login: "tagged-devices", Node: "maclab-m1air", Tags: []string{"tag:maclab"}}, nil
-		}
-		return nil, fmt.Errorf("no match for IP")
-	}
-	trust, _ := ParseTrust("10.1.1.0/24,127.0.0.1,100.64.0.3")
-	newServer := func(tailscale bool) (http.Handler, string) {
-		var logs strings.Builder
-		s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", Trust: trust,
-			Tailscale: tailscale, Admins: ParseAdmins("admin@github"), WhoIs: whois}, log.New(&logs, "", 0))
-		if err != nil {
-			t.Fatal(err)
-		}
-		return s.Handler(), logs.String()
-	}
-	type hdr = map[string]string
-	try := func(h http.Handler, method, path, remote, token string, headers hdr) int {
-		r := httptest.NewRequest(method, labdAt+path, strings.NewReader("{}"))
-		r.RemoteAddr = remote
-		if token != "" {
-			r.Header.Set("Authorization", "Bearer "+token)
-		}
-		for k, v := range headers {
-			r.Header[k] = []string{v} // as given: net/http's own parsing leaves some names alone
-		}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		return w.Code
-	}
-	const (
-		loop = "127.0.0.1:50000"
-		lan  = "10.1.1.42:50000"
-		past = 404 // through auth, then no such Mac
-	)
-	serveUser := hdr{"Tailscale-User-Login": "visitor@github", "Tailscale-User-Name": "Visitor",
-		"Tailscale-Headers-Info": "https://tailscale.com/s/serve-headers", "X-Forwarded-For": "100.64.0.2"}
-	cases := []struct {
-		name, method, path, remote, token string
-		headers                           hdr
-		want, without                     int // with --tailscale, without it
-	}{
-		{"loopback", "POST", "/api/jobs", loop, "", nil, past, past},
-		{"the LAN", "POST", "/api/jobs", lan, "", nil, past, past},
-		{"a tailnet user through tailscale serve", "POST", "/api/jobs", loop, "", serveUser, 401, past},
-		{"nor may it look", "GET", "/api/devices", loop, "", serveUser, 401, 200},
-		{"only the login header", "POST", "/api/jobs", loop, "", hdr{"Tailscale-User-Login": "admin@github"}, 401, past},
-		{"Funnel", "POST", "/api/jobs", loop, "", hdr{"Tailscale-Funnel-Request": "?1", "X-Forwarded-For": "203.0.113.7"}, 401, past},
-		{"a tagged node through serve", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "100.64.0.3"}, 401, past},
-		{"serve on a LAN address", "POST", "/api/jobs", lan, "", hdr{"Tailscale-User-Name": "Visitor"}, 401, past},
-		{"a proxy forwarding a LAN client", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, 401, past},
-		{"only X-Forwarded-Host", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded-Host": "labd.tail1234.ts.net"}, 401, past},
-		{"only X-Forwarded-Proto, from the LAN", "POST", "/api/jobs", lan, "", hdr{"X-Forwarded-Proto": "https"}, 401, past},
-		{"a lowercase header", "POST", "/api/jobs", loop, "", hdr{"x-forwarded-for": "127.0.0.1"}, 401, past},
-		{"RFC 7239 Forwarded", "POST", "/api/jobs", loop, "", hdr{"Forwarded": "for=192.0.2.60;proto=https"}, 401, past},
-		{"nor may a proxied request look", "GET", "/api/devices", loop, "", hdr{"X-Forwarded-For": "10.1.1.9"}, 401, 200},
-		{"a header that only looks like one", "POST", "/api/jobs", loop, "", hdr{"X-Forwarded": "1", "Forwarded-For": "1"}, past, past},
-		{"serve with the token", "POST", "/api/jobs", loop, "adm_secret", serveUser, past, past},
-		{"a proxy with the token", "POST", "/api/jobs", loop, "adm_secret", hdr{"X-Forwarded-Host": "labd"}, past, past},
-		{"a trusted tailnet peer is judged by identity", "POST", "/api/jobs", "100.64.0.3:1", "", nil, 403, past},
-	}
-	with, logs := newServer(true)
-	without, quiet := newServer(false)
-	for _, c := range cases {
-		if got := try(with, c.method, c.path, c.remote, c.token, c.headers); got != c.want {
-			t.Errorf("%s with --tailscale: %s %s got %d, want %d", c.name, c.method, c.path, got, c.want)
-		}
-		if got := try(without, c.method, c.path, c.remote, c.token, c.headers); got != c.without {
-			t.Errorf("%s without --tailscale: %s %s got %d, want %d", c.name, c.method, c.path, got, c.without)
-		}
-	}
-
-	r := httptest.NewRequest("GET", labdAt+"/api/auth", nil)
-	r.RemoteAddr = loop
-	r.Header.Set("Tailscale-User-Login", "admin@github")
-	w := httptest.NewRecorder()
-	with.ServeHTTP(w, r)
-	var a struct {
-		Trusted       bool `json:"trusted"`
-		TokenRequired bool `json:"token_required"`
-	}
-	json.Unmarshal(w.Body.Bytes(), &a)
-	if a.Trusted || !a.TokenRequired {
-		t.Errorf("/api/auth through tailscale serve: %s", w.Body)
-	}
-
-	for _, n := range []string{"10.1.1.0/24", "127.0.0.1/32", "100.64.0.3/32"} {
-		if !strings.Contains(logs, "warning: --trust "+n+" with --tailscale: tailnet traffic") {
-			t.Errorf("no startup warning for trusted network %s in:\n%s", n, logs)
-		}
-	}
-	if strings.Contains(quiet, "warning") {
-		t.Errorf("warned without --tailscale:\n%s", quiet)
 	}
 }
 

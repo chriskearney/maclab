@@ -20,8 +20,9 @@ var errDeviceLost = errors.New("device stopped responding or rebooted")
 
 // dev is labd's live view of one Mac.
 type dev struct {
-	s          *Server
-	secretHash string
+	s            *Server
+	secretHash   string
+	enrolledWith string // hash of the enrollment token that made this Mac, until it first checks in
 	// volunteeredBy is d.VolunteeredBy, which never changes: labd counts a
 	// volunteer's Macs under s.mu alone, without each Mac's mu.
 	volunteeredBy string
@@ -39,6 +40,8 @@ type dev struct {
 	restore  api.DeviceState
 	queue    chan string
 	gone     chan struct{} // closed when the device is forgotten: ends deviceLoop
+	stop     chan struct{} // closed when the Mac's enrollment ends
+	goneWhy  string        // why it ended, once it has
 	oob      oob.Controller
 	oobStop  context.CancelFunc
 
@@ -74,11 +77,14 @@ type dev struct {
 	// from it, and the first check-in of the boot after it.
 	endedBoot            string
 	endedHeard, nextSeen time.Time
+
+	auditMu   sync.Mutex
+	auditHave int64 // how much of the Mac's Audit log labd's copy holds; -1 until read
 }
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{})}
+		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), stop: make(chan struct{}), auditHave: -1}
 	return v
 }
 
@@ -113,6 +119,13 @@ func (v *dev) saveLocked() {
 	}
 }
 
+// checkedIn is whether the Mac has ever reached labd since it enrolled.
+func (v *dev) checkedIn() bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.d.BootID != ""
+}
+
 // leaving says that lab-agent uninstall took the Mac out of the lab, and
 // how, or "" while it is still in the lab.
 func (v *dev) leaving() string {
@@ -125,7 +138,7 @@ func (v *dev) leaving() string {
 }
 
 func (v *dev) aliveLocked() bool {
-	return !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) < aliveWindow
+	return !v.d.LastSeen.IsZero() && v.s.since(v.d.LastSeen) < v.s.aliveWindow()
 }
 
 func (v *dev) setState(st api.DeviceState, reason string) {
@@ -164,9 +177,14 @@ func (v *dev) idleStateLocked() api.DeviceState {
 func (v *dev) heartbeat(ci api.Checkin) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	now := time.Now()
+	now := v.s.now()
 	rebooted := v.d.BootID != "" && ci.BootID != v.d.BootID
-	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel
+	if v.d.BootID == "" {
+		if err := v.s.store.spendTokens(v.d.Name); err != nil {
+			v.s.log.Printf("spend enrollment tokens for %s: %v", v.d.Name, err)
+		}
+	}
+	persist := rebooted || v.d.BootID == "" || ci.Facts != nil || v.d.Kernel != ci.Kernel || v.d.SnapshotEligible != ci.SnapshotEligible
 	if rebooted {
 		v.endedBoot, v.endedHeard, v.nextSeen = v.d.BootID, v.heard, now
 	}
@@ -176,6 +194,20 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		v.asleep = time.Time{}
 	}
 	v.d.BootID, v.d.Kernel, v.d.Cmdline, v.d.Health = ci.BootID, ci.Kernel, ci.Cmdline, ci.Health
+	v.d.SnapshotEligible = ci.SnapshotEligible
+	if v.syncWindowLocked(ci.Window) {
+		persist = true
+	}
+	if v.syncAccessLocked(ci) {
+		persist = true
+	}
+	if v.capLeaseLocked() {
+		persist = true
+	}
+	if v.d.IsVolunteer() && ci.NtfyOwnURL != "" && v.d.NtfyOwnURL != ci.NtfyOwnURL { // a check-in without it (file unreadable) keeps the stored one
+		v.d.NtfyOwnURL = ci.NtfyOwnURL
+		persist = true
+	}
 	if ci.Facts != nil {
 		v.d.Facts = *ci.Facts
 	}
@@ -239,11 +271,11 @@ func (v *dev) heartbeat(ci api.Checkin) {
 func (v *dev) deliver(bootID string) api.CheckinResponse {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	resp := api.CheckinResponse{IntervalMS: int(v.s.cfg.Interval / time.Millisecond)}
+	resp := api.CheckinResponse{IntervalMS: int(v.s.cfg.Interval / time.Millisecond), Kind: v.d.Kind, Held: v.heldLocked()}
 	if bootID != v.d.BootID {
 		return resp
 	}
-	now := time.Now()
+	now := v.s.now()
 	v.d.LastSeen = now
 	for _, c := range v.pending {
 		// A command is for the boot it was issued against. A reboot aimed at a
@@ -268,7 +300,7 @@ func (v *dev) report(rep api.Report) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID {
-		switch now := time.Now(); {
+		switch now := v.s.now(); {
 		case q.Seconds > 0:
 			d := min(time.Duration(q.Seconds)*time.Second, maxQuiet)
 			v.quietBoot, v.quietUntil = q.BootID, now.Add(d)
@@ -298,13 +330,13 @@ func (v *dev) report(rep api.Report) {
 
 func (v *dev) addEventLocked(e api.KernelEvent) {
 	if e.Time.IsZero() {
-		e.Time = time.Now()
+		e.Time = v.s.now()
 	}
 	switch e.Kind {
 	case detect.Sleep:
-		v.asleep = time.Now()
+		v.asleep = v.s.now()
 	case detect.Wake:
-		v.asleep, v.awoke = time.Time{}, time.Now()
+		v.asleep, v.awoke = time.Time{}, v.s.now()
 	}
 	v.events = append(v.events, e)
 	v.s.hub.publish("kevent", v.d.Name, struct {
@@ -344,7 +376,7 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 func (v *dev) onSerial(line string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	now := time.Now()
+	now := v.s.now()
 	v.serialLast, v.serialLine = now, line
 	v.s.hub.publish("serial", v.d.Name, map[string]any{"device": v.d.Name, "time": now, "line": line})
 	if m := detect.Marker(line); m != "" {
@@ -368,9 +400,19 @@ func nextCmdID() string {
 	return fmt.Sprintf("c%d-%d", time.Now().Unix(), cmdSeq.n)
 }
 
-func (v *dev) send(kind, job string, args any) string {
+// send queues a command for the Mac on behalf of the job's Maintainer.
+func (v *dev) send(kind, job string, args any) string { return v.sendFor("", kind, job, args) }
+
+// sendFor queues a command for the Mac on behalf of maintainer, or when that
+// is "" of whoever submitted the job; the Mac records who in its Audit log.
+func (v *dev) sendFor(maintainer, kind, job string, args any) string {
+	if maintainer == "" && job != "" {
+		if j, err := v.s.store.job(job); err == nil {
+			maintainer = j.Maintainer
+		}
+	}
 	b, _ := json.Marshal(args)
-	c := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Args: b}
+	c := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Maintainer: maintainer, Args: b}
 	v.mu.Lock()
 	v.pending = append(v.pending, c)
 	v.target[c.ID] = v.d.BootID
@@ -384,11 +426,9 @@ func (v *dev) send(kind, job string, args any) string {
 func (v *dev) waitFor(ctx context.Context, timeout time.Duration, cond func() bool) error {
 	var deadline <-chan time.Time
 	if timeout > 0 {
-		t := time.NewTimer(timeout)
-		defer t.Stop()
-		deadline = t.C
+		deadline = v.s.clock().After(timeout)
 	}
-	tick := time.NewTicker(time.Second)
+	tick := v.s.clock().NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		v.mu.Lock()
@@ -404,7 +444,7 @@ func (v *dev) waitFor(ctx context.Context, timeout time.Duration, cond func() bo
 		case <-deadline:
 			return context.DeadlineExceeded
 		case <-ch:
-		case <-tick.C:
+		case <-tick.C():
 		}
 	}
 }
@@ -413,10 +453,20 @@ func (v *dev) waitFor(ctx context.Context, timeout time.Duration, cond func() bo
 // the command being lost or timing out, when it may or may not have run.
 var errAgentRefused = errors.New("the agent returned an error")
 
-type agentError struct{ kind, msg string }
+// errWindowClosed matches lab-agent refusing or stopping a command because
+// the Mac's Availability window is closed.
+var errWindowClosed = errors.New("the Mac's Availability window is closed")
 
-func (e agentError) Error() string        { return e.kind + ": " + e.msg }
-func (e agentError) Is(target error) bool { return target == errAgentRefused }
+type agentError struct {
+	kind, msg    string
+	windowClosed bool
+	accessLevel  bool
+}
+
+func (e agentError) Error() string { return e.kind + ": " + e.msg }
+func (e agentError) Is(target error) bool {
+	return target == errAgentRefused || (e.windowClosed && target == errWindowClosed) || (e.accessLevel && target == errAccessLevel)
+}
 
 // call sends a command and waits for its result. It gives up early with
 // errDeviceLost if the Mac reboots or stops heartbeating.
@@ -428,6 +478,12 @@ func (v *dev) call(ctx context.Context, kind, job string, args any, timeout time
 // said it is going to sleep, before a command on it counts as lost. Wi-Fi
 // reconnecting after a resume takes tens of seconds.
 var quietGrace = 60 * time.Second
+
+// aliveWindow and quietGrace are Config's, or the package defaults New
+// put there.
+func (s *Server) aliveWindow() time.Duration { return s.cfg.AliveWindow }
+
+func (s *Server) quietGrace() time.Duration { return s.cfg.QuietGrace }
 
 // maxSleep is how long a command waits for a Mac that went to sleep.
 var maxSleep = time.Hour
@@ -447,7 +503,7 @@ func (v *dev) quietLocked(now time.Time) bool {
 // wake-up, and past any spell off the network it announced for this boot.
 // Caller holds mu.
 func (v *dev) lostLocked(now time.Time) bool {
-	return now.Sub(v.d.LastSeen) > quietGrace && now.Sub(v.awoke) > quietGrace && !v.quietLocked(now)
+	return now.Sub(v.d.LastSeen) > v.s.quietGrace() && now.Sub(v.awoke) > v.s.quietGrace() && !v.quietLocked(now)
 }
 
 // callNote is call for commands that may outlive a quiet spell. A Mac that
@@ -461,8 +517,8 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 	boot := v.d.BootID
 	name := v.d.Name
 	v.mu.Unlock()
-	id := v.send(kind, job, args)
-	deadline := time.Now().Add(timeout)
+	id := v.sendFor(maintainerOf(ctx), kind, job, args)
+	deadline := v.s.now().Add(timeout)
 	var (
 		res            api.CommandResult
 		lost, timedOut bool
@@ -471,7 +527,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 		askedHuman     bool
 		notes          []string
 	)
-	tick := time.NewTicker(time.Second)
+	tick := v.s.clock().NewTicker(time.Second)
 	defer tick.Stop()
 	for {
 		v.mu.Lock()
@@ -481,11 +537,11 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 				delete(v.results, id)
 				return true
 			}
-			if v.d.BootID != boot {
+			if v.goneWhy != "" || v.d.BootID != boot {
 				lost = true
 				return true
 			}
-			now := time.Now()
+			now := v.s.now()
 			if v.aliveLocked() {
 				if !quietSince.IsZero() {
 					away := v.d.LastSeen.Sub(quietSince)
@@ -549,7 +605,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 			v.forget(id)
 			return ctx.Err()
 		case <-ch:
-		case <-tick.C:
+		case <-tick.C():
 		}
 	}
 	if timedOut {
@@ -564,7 +620,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 		if res.Error == errDeviceLost.Error() {
 			return errDeviceLost
 		}
-		return agentError{kind, res.Error}
+		return agentError{kind, res.Error, res.WindowClosed, res.AccessLevel}
 	}
 	if out != nil && len(res.Output) > 0 {
 		return json.Unmarshal(res.Output, out)

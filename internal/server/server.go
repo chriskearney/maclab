@@ -13,9 +13,10 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
+	"math/big"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -28,26 +29,39 @@ import (
 	"sync"
 	"time"
 
+	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/oob"
 	"github.com/iconidentify/maclab/internal/web"
 )
 
 type Config struct {
-	DataDir      string
-	AdminToken   string
-	Interval     time.Duration // agent heartbeat interval
-	BootTimeout  time.Duration // default time for a Mac to come back after a reboot
-	OfflineAfter time.Duration
-	NtfyURL      string
-	NotifyCmd    string
-	// Trust lists networks whose clients get admin access without a token,
-	// judged by the connection's source address only.
-	Trust []*net.IPNet
-	// Tailscale lets tailnet peers in by identity: logins in Admins get admin
-	// access, every other peer may only look.
+	DataDir string
+	// FirstMaintainer and FirstMaintainerToken name the Maintainer a labd
+	// with none starts with: on upgrade, whoever held the old admin token.
+	FirstMaintainer      string
+	FirstMaintainerToken string
+	Interval             time.Duration // agent heartbeat interval
+	BootTimeout          time.Duration // default time for a Mac to come back after a reboot
+	OfflineAfter         time.Duration
+	// AliveWindow and QuietGrace are timeouts that assume a LAN, as
+	// StageTimeout below does; a Mac far from labd needs them longer. Zero
+	// keeps the LAN default; labd's flags default to remote-sized values.
+	AliveWindow time.Duration // how stale a heartbeat may be before a Mac counts unresponsive
+	QuietGrace  time.Duration // silence on the same boot before a command counts lost
+	// WatchdogOpenTimeout is watchdog.open_timeout on every Lab boot's command
+	// line; 0 leaves it to lab-agent: half the job's boot timeout, at least
+	// 120 s.
+	WatchdogOpenTimeout time.Duration
+	// RebootWarning is how long before a Volunteer job's first reboot its Mac
+	// shows the Volunteer a notice, and how long the job waits after it; 0 is
+	// no notice and no wait. labd's flag defaults to 5m.
+	RebootWarning time.Duration
+	NtfyURL       string
+	NotifyCmd     string
+	// Tailscale lets tailnet peers look at the lab by identity; only a
+	// Maintainer's token changes it.
 	Tailscale bool
-	Admins    []string
 	// WhoIs names the peer behind a tailnet address; tests swap in fakes.
 	WhoIs func(ctx context.Context, ip string) (*TailnetPeer, error)
 	// AllowHosts are names labd answers to besides its own (--allow-host):
@@ -80,6 +94,8 @@ type Config struct {
 	TestGrace, GUIGrace time.Duration
 	// AgentBinary is the linux/arm64 lab-agent that ./volunteer downloads.
 	AgentBinary string
+	// Clock is where labd reads time; nil is the wall clock.
+	Clock agent.Clock
 }
 
 type Server struct {
@@ -95,6 +111,7 @@ type Server struct {
 	hub         hub
 	builds      *buildMgr
 	notifyHooks []func(Notification)
+	conns       maintainerConns
 	serialMu    sync.Mutex
 	whoMu       sync.Mutex
 	whoCache    map[netip.Addr]whoisEntry
@@ -104,6 +121,38 @@ type Server struct {
 	tsAt        time.Time // when tsNames were looked up
 	tsNames     []string  // its MagicDNS names
 }
+
+// clock is where labd reads time: Config.Clock, or the wall clock when unset.
+func (s *Server) clock() agent.Clock {
+	if s.cfg.Clock == nil {
+		return agent.WallClock
+	}
+	return s.cfg.Clock
+}
+
+func (s *Server) now() time.Time                  { return s.clock().Now() }
+func (s *Server) since(t time.Time) time.Duration { return s.clock().Now().Sub(t) }
+
+// withTimeout is context.WithTimeout on labd's clock.
+func (s *Server) withTimeout(parent context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	c := s.clock()
+	if c == agent.WallClock {
+		return context.WithTimeout(parent, d)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-c.After(d):
+			cancel()
+		}
+	}()
+	return ctx, cancel
+}
+
+// SetRebootWarning sets how long before a Volunteer job's first reboot labd
+// has the Mac warn its Volunteer (Config.RebootWarning).
+func (c *Config) SetRebootWarning(d time.Duration) { c.RebootWarning = d }
 
 func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if logger == nil {
@@ -136,15 +185,22 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			cfg.TailnetNames = tailscaleNames
 		}
 	}
-	warnTrustedNetworks(cfg, logger)
 	var hosts []string
 	for _, h := range cfg.AllowHosts {
 		hosts = append(hosts, hostName(h))
 	}
-	if len(cfg.Trust) > 0 || cfg.Tailscale {
+	if cfg.Tailscale {
 		hosts = append(hosts, localNames()...)
 		logger.Printf("without a token, labd answers only to its own names: IP addresses, localhost, %s%s; --allow-host adds one",
 			strings.Join(hosts, ", "), map[bool]string{true: " and its MagicDNS names"}[cfg.Tailscale])
+	}
+	// The LAN defaults are read once, here: labd's goroutines can outlive a
+	// Server, and must not read them while a test sets them for the next one.
+	if cfg.AliveWindow == 0 {
+		cfg.AliveWindow = aliveWindow
+	}
+	if cfg.QuietGrace == 0 {
+		cfg.QuietGrace = quietGrace
 	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
@@ -158,7 +214,11 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, start: time.Now(), devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}, hosts: hosts}
+	s := &Server{cfg: cfg, store: st, log: logger, ctx: ctx, devs: map[string]*dev{}, cancels: map[string]context.CancelFunc{}, hosts: hosts}
+	s.start = s.now()
+	if err := s.firstMaintainer(); err != nil {
+		return nil, err
+	}
 	rows, err := st.devices()
 	if err != nil {
 		return nil, err
@@ -166,6 +226,12 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	for _, row := range rows {
 		d := row.d
 		d.ActiveJob = ""
+		if d.Kind == "" { // enrolled before Kinds existed: ./volunteer's Macs are Volunteers'
+			d.Kind = map[bool]string{false: api.KindLabOwned, true: api.KindVolunteer}[d.Volunteer]
+		}
+		if d.IsVolunteer() && d.AccessLevel == "" {
+			d.AccessLevel = api.AccessQualification // enrolled before Access levels existed
+		}
 		if d.State == api.StateBusy || d.State == api.StateRecovering {
 			d.State = api.StateOffline
 		}
@@ -207,19 +273,19 @@ func (s *Server) OnNotify(f func(Notification)) {
 }
 
 func (s *Server) monitor() {
-	t := time.NewTicker(time.Second)
+	t := s.clock().NewTicker(time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		for _, v := range s.allDevs() {
 			v.mu.Lock()
 			// After a restart, agents need a moment to reconnect before silence means anything.
-			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && time.Since(s.start) > s.cfg.OfflineAfter
-			if idle && !v.d.LastSeen.IsZero() && time.Since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(time.Now()) {
+			idle := (v.d.State == api.StateReady || v.d.State == api.StateNew) && s.since(s.start) > s.cfg.OfflineAfter
+			if idle && !v.d.LastSeen.IsZero() && s.since(v.d.LastSeen) > s.cfg.OfflineAfter && !v.quietLocked(s.now()) {
 				v.restore = v.d.State
 				why := "no heartbeat since " + v.d.LastSeen.Format(time.TimeOnly)
 				if !v.asleep.IsZero() {
@@ -300,7 +366,7 @@ func (s *Server) attachOOB(v *dev) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(backoff):
+			case <-s.clock().After(backoff):
 			}
 			if backoff < time.Minute {
 				backoff *= 2
@@ -320,7 +386,7 @@ func (s *Server) appendSerial(name, line string) {
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(f, "%s %s\n", time.Now().Format("2006-01-02T15:04:05.000"), line)
+	fmt.Fprintf(f, "%s %s\n", s.now().Format("2006-01-02T15:04:05.000"), line)
 	f.Close()
 }
 
@@ -368,7 +434,7 @@ func (s *Server) updateJob(j *api.Job, f func(*api.Job)) {
 	defer jobMu.Unlock()
 	j.GateExclusion = s.store.gateExclusion(j.ID)
 	f(j)
-	j.Updated = time.Now()
+	j.Updated = s.now()
 	if err := s.store.saveJob(j); err != nil {
 		s.log.Printf("save job %s: %v", j.ID, err)
 	}
@@ -402,62 +468,70 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/agent/enroll", s.hEnroll)
 	m.HandleFunc("POST /api/agent/checkin", s.agent(s.hCheckin))
 	m.HandleFunc("POST /api/agent/report", s.agent(s.hReport))
+	m.HandleFunc("GET /api/agent/enrollment", s.agent(s.hAgentEnrollment))
+	m.HandleFunc("POST /api/agent/left", s.agent(s.hAgentLeave))
 	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
 	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
 	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
+	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
 	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
 	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
-	m.HandleFunc("PATCH /api/devices/{name}", s.admin(s.hPatchDevice))
-	m.HandleFunc("DELETE /api/devices/{name}", s.admin(s.hForgetDevice))
-	m.HandleFunc("POST /api/devices/{name}/lease", s.admin(s.hLease))
-	m.HandleFunc("DELETE /api/devices/{name}/lease", s.admin(s.hRelease))
-	m.HandleFunc("POST /api/devices/{name}/reset", s.admin(s.hReset))
-	m.HandleFunc("GET /api/devices/{name}/serial", s.admin(s.hSerial))
+	m.HandleFunc("PATCH /api/devices/{name}", s.maintainer(s.hPatchDevice))
+	m.HandleFunc("DELETE /api/devices/{name}", s.maintainer(s.hForgetDevice))
+	m.HandleFunc("POST /api/devices/{name}/end-enrollment", s.maintainer(s.hEndEnrollment))
+	m.HandleFunc("POST /api/devices/{name}/lease", s.maintainer(s.hLease))
+	m.HandleFunc("DELETE /api/devices/{name}/lease", s.maintainer(s.hRelease))
+	m.HandleFunc("POST /api/devices/{name}/reset", s.maintainer(s.hReset))
+	m.HandleFunc("GET /api/devices/{name}/serial", s.maintainer(s.hSerial))
 	m.HandleFunc("GET /api/devices/{name}/oob", s.viewer(s.hOOBStatus))
 	m.HandleFunc("GET /api/stream", s.viewer(s.hStream))
-	m.HandleFunc("POST /api/devices/{name}/screenshot", s.admin(s.hScreenshot))
+	m.HandleFunc("POST /api/devices/{name}/screenshot", s.maintainer(s.hScreenshot))
 	m.HandleFunc("GET /api/devices/{name}/screen", s.viewer(s.hScreen))
 	m.HandleFunc("GET /api/devices/{name}/screens", s.viewer(s.hScreens))
 	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.viewer(s.hScreen))
 	m.HandleFunc("GET /api/devices/{name}/logs", s.viewer(s.hLogs))
-	m.HandleFunc("GET /api/devices/{name}/console", s.admin(s.hConsoleRaw))
-	m.HandleFunc("POST /api/devices/{name}/console", s.admin(s.hConsoleWrite))
-	m.HandleFunc("POST /api/devices/{name}/console/arm", s.admin(s.hConsoleArm))
+	m.HandleFunc("GET /api/devices/{name}/console", s.maintainer(s.hConsoleRaw))
+	m.HandleFunc("POST /api/devices/{name}/console", s.maintainer(s.hConsoleWrite))
+	m.HandleFunc("POST /api/devices/{name}/console/arm", s.maintainer(s.hConsoleArm))
 	m.HandleFunc("POST /api/agent/screen", s.agent(s.hAgentScreen))
-	m.HandleFunc("POST /api/enroll-tokens", s.admin(s.hEnrollToken))
+	m.HandleFunc("POST /api/enroll-tokens", s.maintainer(s.hEnrollToken))
 	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
 	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
-	m.HandleFunc("POST /api/artifacts", s.admin(s.hPutArtifact))
-	m.HandleFunc("POST /api/jobs", s.admin(s.hSubmit))
+	m.HandleFunc("POST /api/artifacts", s.maintainer(s.hPutArtifact))
+	m.HandleFunc("POST /api/jobs", s.maintainer(s.hSubmit))
 	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
 	m.HandleFunc("GET /api/jobs/{id}", s.viewer(s.hJob))
 	m.HandleFunc("GET /api/jobs/{id}/wait", s.viewer(s.hWait))
-	m.HandleFunc("POST /api/jobs/{id}/cancel", s.admin(s.hCancel))
-	m.HandleFunc("POST /api/jobs/{id}/retry", s.admin(s.hRetry))
-	m.HandleFunc("POST /api/jobs/{id}/publish", s.admin(s.hPublish))
-	m.HandleFunc("POST /api/jobs/{id}/exclude", s.admin(s.hExclude))
-	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.admin(s.hExclude))
+	m.HandleFunc("POST /api/jobs/{id}/cancel", s.maintainer(s.hCancel))
+	m.HandleFunc("POST /api/jobs/{id}/retry", s.maintainer(s.hRetry))
+	m.HandleFunc("POST /api/jobs/{id}/publish", s.maintainer(s.hPublish))
+	m.HandleFunc("POST /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
+	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
 	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.viewer(s.hJobFile))
-	m.HandleFunc("GET /api/gate/{kernel}", s.admin(s.hGate))
+	m.HandleFunc("GET /api/gate/{kernel}", s.maintainer(s.hGate))
 	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
 	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
 	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hAgentArtifact))
-	m.HandleFunc("POST /api/builds", s.admin(s.hCreateBuild))
-	m.HandleFunc("POST /api/installed/{release}/manifest", s.admin(s.hFreezeManifest))
-	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.admin(s.hFreezeEntry))
-	m.HandleFunc("POST /api/installed/{release}/promote", s.admin(s.hPromote))
+	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
+	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
+	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
+	m.HandleFunc("POST /api/installed/{release}/promote", s.maintainer(s.hPromote))
 	m.HandleFunc("GET /api/installed/{release}", s.viewer(s.hInstalledStatus))
 	m.HandleFunc("GET /api/builds", s.viewer(s.hBuilds))
 	m.HandleFunc("GET /api/builds/{id}", s.viewer(s.hBuild))
 	m.HandleFunc("GET /api/builds/{id}/log", s.viewer(s.hBuildLog))
 	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
-	m.HandleFunc("POST /api/builds/{id}/cancel", s.admin(s.hCancelBuild))
+	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
 	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
-	m.HandleFunc("POST /api/devices/{name}/exec", s.admin(s.hExec))
+	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
+	m.HandleFunc("GET /api/devices/{name}/audit", s.maintainer(s.hAudit))
+	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
+	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
+	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
 	web.Register(m)
 	return sameOrigin(m)
 }
@@ -475,78 +549,16 @@ func bearer(r *http.Request) string {
 	return strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 }
 
-// admin guards everything that changes the lab, the console (lab shell) and
-// the Mac's stored serial log.
-func (s *Server) admin(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		switch a, who, foreign := s.accessHost(r); {
-		case a == adminAccess:
-			h(w, r)
-		case a == viewAccess:
-			httpErr(w, 403, "%s may only look; this needs a lab admin", who)
-		case foreign:
-			foreignHost(w, r)
-		default:
-			httpErr(w, 401, "bad admin token")
-		}
-	}
-}
-
-// viewer guards read-only endpoints, which tailnet viewers may use too.
-func (s *Server) viewer(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if a, _, foreign := s.accessHost(r); foreign {
-			foreignHost(w, r)
-			return
-		} else if a == noAccess {
-			httpErr(w, 401, "bad admin token")
-			return
-		}
-		h(w, r)
-	}
-}
-
-// trusted reports whether the client connected from a trusted network. It
-// uses the TCP peer address, never a forwarded header a client could forge.
-func (s *Server) trusted(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return false
-	}
-	ip := net.ParseIP(host)
-	for _, n := range s.cfg.Trust {
-		if ip != nil && n.Contains(ip) {
-			return true
-		}
-	}
-	return false
-}
-
-// ParseTrust turns "10.1.1.0/24,127.0.0.1" into networks; a bare IP is one host.
-func ParseTrust(v string) ([]*net.IPNet, error) {
-	var out []*net.IPNet
-	for _, f := range strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' }) {
-		if !strings.Contains(f, "/") {
-			if strings.Contains(f, ":") {
-				f += "/128"
-			} else {
-				f += "/32"
-			}
-		}
-		_, n, err := net.ParseCIDR(f)
-		if err != nil {
-			return nil, fmt.Errorf("trust %q: %w", f, err)
-		}
-		out = append(out, n)
-	}
-	return out, nil
-}
-
 // hAuth tells the UI whether this client needs a token at all, and whether
-// it may only look. Sent with a token, it says what that token is worth.
+// it may only look. Sent with a Maintainer's token, it names its Maintainer.
 // A request to a name labd doesn't know as its own needs a token, and
-// refused says why.
+// refused says why. Without --tailscale nothing gets in without a token, so
+// there is nothing to ask: labd answers 404, and the UI asks for the token.
 func (s *Server) hAuth(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.Tailscale {
+		http.NotFound(w, r)
+		return
+	}
 	a, who, foreign := s.accessHost(r)
 	role := map[access]string{viewAccess: "viewer", adminAccess: "admin"}[a]
 	resp := map[string]any{"trusted": a == adminAccess, "token_required": a == noAccess, "role": role, "login": who}
@@ -562,10 +574,16 @@ func (s *Server) agent(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		hash := hashSecret(bearer(r))
 		for _, v := range s.allDevs() {
-			if subtle.ConstantTimeCompare([]byte(hash), []byte(v.secretHash)) == 1 {
+			v.mu.Lock()
+			ok := subtle.ConstantTimeCompare([]byte(hash), []byte(v.secretHash)) == 1
+			v.mu.Unlock()
+			if ok {
 				h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, v)))
 				return
 			}
+		}
+		if s.ended(w, bearer(r)) {
+			return
 		}
 		httpErr(w, 401, "unknown device secret")
 	}
@@ -585,7 +603,9 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "device name must be lowercase letters, digits and dashes")
 		return
 	}
-	if s.dev(req.Name) != nil {
+	// A Mac that never checked in hasn't taken the name: its enrollment failed,
+	// and enrolling again with the new token replaces its secret.
+	if v := s.dev(req.Name); v != nil && v.checkedIn() {
 		httpErr(w, 409, "device %s already enrolled", req.Name)
 		return
 	}
@@ -599,11 +619,17 @@ func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest, v
 	if req.Model == "" {
 		req.Model = api.ModelLaptop
 	}
+	req.VolunteerName, req.Contact = strings.TrimSpace(req.VolunteerName), strings.TrimSpace(req.Contact)
+	if (req.VolunteerName == "") != (req.Contact == "") {
+		httpErr(w, 400, "a Volunteer's token needs both the Volunteer's name and their contact")
+		return
+	}
+	req.Volunteer = req.Volunteer || req.VolunteerName != ""
 	tok := "enr_" + randHex(16)
-	exp := time.Now().Add(24 * time.Hour)
+	exp := s.now().Add(24 * time.Hour)
 	var err error
 	if volunteer != "" {
-		err = s.store.addVolunteerToken(hashSecret(tok), req, volunteer, exp, maxVolunteerTokens)
+		err = s.store.addVolunteerToken(hashSecret(tok), req, volunteer, exp, s.now(), maxVolunteerTokens)
 	} else {
 		err = s.store.addToken(hashSecret(tok), req, exp)
 	}
@@ -686,12 +712,15 @@ func tooManyMacs(w http.ResponseWriter, login string, names []string) {
 // free device name, labelled with the volunteer's tailnet login and marked a
 // volunteer's. Tagged tailnet devices are machines, lab Macs among them, not
 // people, so they get no token, and a person with maxVolunteerMacs Macs in
-// the lab gets none either. Admins may ask too, outside the limits: they can
-// make any token with POST /api/enroll-tokens anyway.
+// the lab gets none either. Maintainers may ask too, with their token,
+// outside the limits: they can make any token with POST /api/enroll-tokens
+// anyway.
 func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	a, who := s.access(r)
 	volunteer := ""
-	if a != adminAccess {
+	if a == adminAccess {
+		who = "" // a Maintainer, not a volunteer's tailnet login
+	} else {
 		if s.taggedPeer(r) {
 			httpErr(w, 403, "%s is a tagged tailnet device, a machine rather than a person: only a person may volunteer a Mac", who)
 			return
@@ -713,6 +742,9 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Label, req.Volunteer = who, true
+	if volunteer != "" { // a tailnet login is all labd knows of the person
+		req.VolunteerName, req.Contact = who, who
+	}
 	if req.Model != api.ModelDesktop {
 		req.Model = api.ModelLaptop
 	}
@@ -720,7 +752,7 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "no free device name")
 		return
 	}
-	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(an admin)"))
+	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(Maintainer "+maintainerName(r)+")"))
 	s.issueToken(w, req, volunteer)
 }
 
@@ -769,6 +801,11 @@ func (s *Server) hVolunteerAgent(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, "lab-agent", st.ModTime(), f)
 }
 
+func (s *Server) tokenValid(hash string) bool {
+	_, err := s.store.token(hash, s.now())
+	return err == nil
+}
+
 // hEnroll turns an enrollment token into a device. It needs no secret, so
 // its body is held to enrollBodyMax before the token is even looked at.
 func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
@@ -776,15 +813,44 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, enrollBodyMax, &req) {
 		return
 	}
-	t, err := s.store.takeToken(hashSecret(req.Token))
+	t, err := s.store.token(hashSecret(req.Token), s.now())
 	if err != nil {
 		httpErr(w, 403, "enrollment token unknown, used or expired")
 		return
 	}
 	secret := "dev_" + randHex(24)
-	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, Volunteer: t.Volunteer, VolunteeredBy: t.VolunteeredBy,
-		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts}
+	// The token is spent by the Mac's first check-in, not by this call: if the
+	// answer never reached the Mac, enrolling again must work. Until then the
+	// Mac it made gets a new secret.
+	if v := s.dev(t.Name); v != nil {
+		v.mu.Lock()
+		// Its own token again, or a new one once the old one has run out.
+		retry := v.d.BootID == "" && (v.enrolledWith == hashSecret(req.Token) || !s.tokenValid(v.enrolledWith))
+		if retry {
+			v.enrolledWith = hashSecret(req.Token)
+			v.secretHash = hashSecret(secret)
+			v.d.Enrollment = enrollment(t, v.d.Enrollment)
+			v.d.Volunteer, v.d.VolunteeredBy = v.d.IsVolunteer(), t.VolunteeredBy
+			v.saveLocked()
+		}
+		d := v.d
+		v.mu.Unlock()
+		if !retry {
+			httpErr(w, 409, "device %s already enrolled", t.Name)
+			return
+		}
+		s.log.Printf("enrolled %s again before its first check-in", t.Name)
+		writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
+		return
+	}
+	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy,
+		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{})}
+	d.Volunteer = d.IsVolunteer()
+	if d.IsVolunteer() {
+		d.AccessLevel = api.AccessQualification // until its Volunteer chooses
+	}
 	v := newDev(s, d, hashSecret(secret))
+	v.enrolledWith = hashSecret(req.Token)
 	s.mu.Lock()
 	if _, dup := s.devs[d.Name]; dup {
 		s.mu.Unlock()
@@ -807,8 +873,55 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	v.saveLocked()
 	v.mu.Unlock()
 	go s.deviceLoop(v)
-	s.log.Printf("enrolled %s (%s)", d.Name, req.Facts.DTModel)
-	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret})
+	s.log.Printf("enrolled %s (%s, %s)", d.Name, d.Kind, req.Facts.DTModel)
+	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
+}
+
+// enrollment is what token t makes a Mac. A Volunteer's Mac enrolled again
+// before its first check-in keeps the topic it was given (old).
+func enrollment(t *api.EnrollTokenRequest, old api.Enrollment) api.Enrollment {
+	if !t.Volunteer {
+		return api.Enrollment{Kind: api.KindLabOwned}
+	}
+	e := api.Enrollment{Kind: api.KindVolunteer, VolunteerName: t.VolunteerName, Contact: t.Contact, NtfyTopic: old.NtfyTopic, NtfyOwnURL: old.NtfyOwnURL}
+	if e.NtfyTopic == "" {
+		e.NtfyTopic = newNtfyTopic()
+	}
+	return e
+}
+
+// newNtfyTopic is an unguessable ntfy topic for one Volunteer Mac: about 106
+// random bits, in digits only so that no topic spells a word or a name.
+func newNtfyTopic() string {
+	n, _ := rand.Int(rand.Reader, new(big.Int).Exp(big.NewInt(10), big.NewInt(32), nil))
+	return fmt.Sprintf("maclab-%032d", n)
+}
+
+// macTopicURL is where a Volunteer Mac's own notices are posted: the topic
+// the Volunteer chose, else the Mac's generated one on the lab's ntfy server.
+func (s *Server) macTopicURL(e api.Enrollment) string { return s.agentEnrollment(e).NtfyURL }
+
+// agentEnrollment is e as the Mac is told it, with its topic's URL on the
+// lab's ntfy server (the one --ntfy posts to).
+func (s *Server) agentEnrollment(e api.Enrollment) api.AgentEnrollment {
+	ae := api.AgentEnrollment{Enrollment: e}
+	if e.NtfyOwnURL != "" {
+		ae.NtfyURL = e.NtfyOwnURL
+		return ae
+	}
+	if u, err := url.Parse(s.cfg.NtfyURL); err == nil && e.NtfyTopic != "" && u.Host != "" {
+		ae.NtfyURL = (&url.URL{Scheme: u.Scheme, Host: u.Host, Path: "/" + e.NtfyTopic}).String()
+	}
+	return ae
+}
+
+// hAgentEnrollment tells a Mac what it is enrolled as, for `lab-agent status`.
+func (s *Server) hAgentEnrollment(w http.ResponseWriter, r *http.Request) {
+	v := agentDev(r)
+	v.mu.Lock()
+	e := v.d.Enrollment
+	v.mu.Unlock()
+	writeJSON(w, s.agentEnrollment(e))
 }
 
 func (s *Server) hCheckin(w http.ResponseWriter, r *http.Request) {
@@ -824,7 +937,9 @@ func (s *Server) hCheckin(w http.ResponseWriter, r *http.Request) {
 	if wait > 0 {
 		v.waitFor(r.Context(), wait, func() bool { return len(v.pending) > 0 || v.d.BootID != ci.BootID })
 	}
-	writeJSON(w, v.deliver(ci.BootID))
+	resp := v.deliver(ci.BootID)
+	resp.AuditHave = v.auditHaveNow()
+	writeJSON(w, resp)
 }
 
 func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
@@ -833,6 +948,7 @@ func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	agentDev(r).report(rep)
+	agentDev(r).copyAudit(rep.Audit)
 	w.Write([]byte("ok"))
 }
 
@@ -874,7 +990,7 @@ func (s *Server) storeArtifact(r io.Reader) (string, int64, error) {
 		return "", 0, err
 	}
 	sha := hex.EncodeToString(h.Sum(nil))
-	now := time.Now()
+	now := s.now()
 	os.Chtimes(tmp.Name(), now, now)
 	return sha, n, os.Rename(tmp.Name(), s.artifactPath(sha))
 }
@@ -952,7 +1068,7 @@ func (s *Server) hDevice(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, struct {
 			DeviceView
 			Events []api.KernelEvent `json:"recent_events"`
-		}{s.view(v), v.eventsSince(time.Now().Add(-24 * time.Hour))})
+		}{s.view(v), v.eventsSince(s.now().Add(-24 * time.Hour))})
 	}
 }
 
@@ -1030,16 +1146,16 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	if v.d.State == api.StateBusy || v.d.State == api.StateRecovering || len(v.queue) > 0 || len(open) > 0 {
 		return 409, fmt.Errorf("%s has a job running or queued; cancel it first", name)
 	}
-	if l := v.d.Lease; !force && l != nil && time.Now().Before(l.Expires) && l.Holder != holder {
+	if l := v.d.Lease; !force && l != nil && s.now().Before(l.Expires) && l.Holder != holder {
 		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s --holder %s`), or pass --force",
 			name, l.Holder, l.Expires.Format(time.DateTime), name, l.Holder)
 	}
 	// An agent that told labd it is leaving may still check in until
 	// uninstall has stopped it. Any other one that checks in is still set up,
 	// and would only get 401s once its row is gone.
-	if seen := v.d.LastSeen; !force && v.d.State != api.StateLeft && !seen.IsZero() && time.Since(seen) < s.cfg.OfflineAfter {
+	if seen := v.d.LastSeen; !force && v.d.State != api.StateLeft && !seen.IsZero() && s.since(seen) < s.cfg.OfflineAfter {
 		return 409, fmt.Errorf("%s's lab-agent checked in %s ago, so it is still set up: run `sudo lab-agent uninstall` on the Mac first, or pass --force",
-			name, time.Since(seen).Round(time.Second))
+			name, s.since(seen).Round(time.Second))
 	}
 	if err := s.store.deleteDevice(v.d.ID); err != nil {
 		return 500, err
@@ -1074,11 +1190,16 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	}
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && time.Now().Before(l.Expires) && l.Holder != req.Holder {
+	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
 		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: time.Now().Add(time.Duration(req.TTLSec) * time.Second)}
+	if v.d.IsVolunteer() && v.openUntilLocked().IsZero() {
+		httpErr(w, 409, "%s's Availability window is closed: a lease on a Volunteer's Mac lasts only inside it", v.d.Name)
+		return
+	}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.capLeaseLocked()
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
 }
@@ -1091,7 +1212,7 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 	holder := r.URL.Query().Get("holder")
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && time.Now().Before(l.Expires) {
+	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
 		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
 		return
 	}
@@ -1120,7 +1241,7 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
-	if lease != nil && time.Now().Before(lease.Expires) && lease.Holder != by {
+	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
 		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
 		return
 	}
@@ -1183,7 +1304,7 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
-	j, code, err := s.Submit(spec)
+	j, code, err := s.submit(maintainerName(r), spec, "")
 	if err != nil {
 		httpErr(w, code, "%v", err)
 		return
@@ -1191,8 +1312,8 @@ func (s *Server) hSubmit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, j)
 }
 
-// Submit validates and queues a job.
-func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit(spec, "") }
+// Submit validates and queues a job that labd queues itself, for no Maintainer.
+func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.submit("", spec, "") }
 
 // Retry queues a finished job again as a new job: the same Mac, kernel,
 // tests and cmdline, recording which job it retries. holder, if given,
@@ -1201,7 +1322,10 @@ func (s *Server) Submit(spec api.JobSpec) (*api.Job, int, error) { return s.subm
 // collected, it builds again from the commit and the config that build
 // recorded, never from wherever a branch points now or the Mac's config as
 // it is now.
-func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
+func (s *Server) Retry(id, holder string) (*api.Job, int, error) { return s.retry("", id, holder) }
+
+// retry is Retry for the Maintainer who asked.
+func (s *Server) retry(maintainer, id, holder string) (*api.Job, int, error) {
 	old, err := s.store.job(id)
 	if err != nil {
 		return nil, 404, fmt.Errorf("no job %s", id)
@@ -1237,7 +1361,7 @@ func (s *Server) Retry(id, holder string) (*api.Job, int, error) {
 			notes = append(notes, note)
 		}
 	}
-	return s.submit(spec, old.ID, notes...)
+	return s.submit(maintainer, spec, old.ID, notes...)
 }
 
 // pinnedConfig is the config a retry of old builds its kernel again with: the
@@ -1287,11 +1411,11 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
-// submit queues a job; retryOf names the job it retries, whose source may
+// submit queues a job for the Maintainer who asked; retryOf names the job it retries, whose source may
 // come with the kernel already built from it, and notes go in the job's
 // events after the first. The job records what lab gate needs to know about
 // its Mac as it is now.
-func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api.Job, int, error) {
+func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, notes ...string) (*api.Job, int, error) {
 	v := s.dev(spec.Device)
 	if v == nil {
 		return nil, 404, fmt.Errorf("no device %q", spec.Device)
@@ -1328,6 +1452,9 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 		}
 	}
 	for _, t := range spec.Tests {
+		if t.Identity != nil {
+			return nil, 400, fmt.Errorf("test %s: identity checks are the lab's own, part of an Installed run", t.Name)
+		}
 		if t.Script != "" {
 			if _, err := os.Stat(s.artifactPath(t.Script)); err != nil {
 				return nil, 400, fmt.Errorf("test %s: script artifact %s not uploaded", t.Name, t.Script)
@@ -1335,6 +1462,11 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 		}
 		if t.Name == "" || strings.ContainsAny(t.Name, "/ ") {
 			return nil, 400, fmt.Errorf("test name %q must be non-empty with no slashes or spaces", t.Name)
+		}
+	}
+	if why := needsFull(spec); why != "" {
+		if err := refuseAtAccessLevel(v.snapshot(), "Maintainer's script ("+why+")"); err != nil {
+			return nil, 403, err
 		}
 	}
 	if spec.Crash != "" && spec.Crash != "panic" {
@@ -1363,13 +1495,16 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 			if t.Builtin == omtTest {
 				has = true
 				spec.Tests[i].GUI = true
+				spec.Tests[i].SkipOnScreen = d.Enrollment.IsVolunteer()
 				if t.TimeoutSec == 0 {
 					spec.Tests[i].TimeoutSec = omtSpec().TimeoutSec
 				}
 			}
 		}
 		if !has && s.omtWanted(v.snapshot(), spec) {
-			spec.Tests = append(spec.Tests, omtSpec())
+			ts := omtSpec()
+			ts.SkipOnScreen = d.Enrollment.IsVolunteer()
+			spec.Tests = append(spec.Tests, ts)
 		}
 	}
 	if d.KnownGood == "" && !spec.Baseline {
@@ -1388,12 +1523,12 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 	if l := d.Lease; l != nil && l.Holder != spec.Holder {
 		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 	}
-	now := time.Now()
+	now := s.now()
 	msg := "queued"
 	if retryOf != "" {
 		msg = "queued: a retry of job " + retryOf
 	}
-	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, State: api.JobQueued, Created: now, Updated: now,
+	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, Maintainer: maintainer, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: msg}}, RetryOf: retryOf,
 		DeviceAtSubmit: &api.DeviceSnapshot{Family: family(d.Facts), Volunteer: d.Volunteer, OMT: s.omtWanted(d.Device, api.JobSpec{})}}
 	for _, n := range notes {
@@ -1420,7 +1555,7 @@ func (s *Server) submit(spec api.JobSpec, retryOf string, notes ...string) (*api
 
 // hRetry submits a finished job again; ?holder= names who retries it.
 func (s *Server) hRetry(w http.ResponseWriter, r *http.Request) {
-	j, code, err := s.Retry(r.PathValue("id"), r.URL.Query().Get("holder"))
+	j, code, err := s.retry(maintainerName(r), r.PathValue("id"), r.URL.Query().Get("holder"))
 	if err != nil {
 		httpErr(w, code, "%v", err)
 		return
@@ -1460,21 +1595,21 @@ func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
 	if sec <= 0 || sec > 3600 {
 		sec = 60
 	}
-	deadline := time.Now().Add(time.Duration(sec) * time.Second)
+	deadline := s.now().Add(time.Duration(sec) * time.Second)
 	for {
 		j, err := s.store.job(id)
 		if err != nil {
 			httpErr(w, 404, "no job %s", id)
 			return
 		}
-		if j.State == api.JobDone || time.Now().After(deadline) {
+		if j.State == api.JobDone || s.now().After(deadline) {
 			writeJSON(w, j)
 			return
 		}
 		select {
 		case <-r.Context().Done():
 			return
-		case <-time.After(500 * time.Millisecond):
+		case <-s.clock().After(500 * time.Millisecond):
 		}
 	}
 }
