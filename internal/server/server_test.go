@@ -71,6 +71,34 @@ type lab struct {
 	url    string
 	name   string // the simulated Mac
 	secret string // its device secret
+	ctx    context.Context
+	agent  *agent.Config // the simulated Mac's enrolled lab-agent
+	logs   *logBuf
+}
+
+// harnessMaintainer is the first Maintainer of every harness labd, and
+// harnessToken its token: the one l.get and l.post send.
+const (
+	harnessMaintainer = "ada"
+	harnessToken      = "admin"
+)
+
+// logBuf collects labd's log so tests can read what it recorded.
+type logBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *logBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *logBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
 }
 
 func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "sim-mac") }
@@ -80,6 +108,33 @@ func newLab(t *testing.T, withOOB bool) *lab { return newLabNamed(t, withOOB, "s
 var testKnobs sync.Once
 
 func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
+	return newLabWith(t, labConfig{oob: withOOB, name: name})
+}
+
+// labConfig shapes a lab; the zero value is one lab-owned, OOB-less Mac
+// named sim-mac on the wall clock.
+type labConfig struct {
+	oob       bool
+	name      string
+	clock     *agent.FakeClock // nil runs labd and lab-agent on the wall clock
+	volunteer bool             // the Mac is a Volunteer's; drive its commands with l.volunteer
+	// wrap puts a test's transport (a flaky link, a stalled download) in front
+	// of labd's handler, so every request from the Mac and the Maintainers
+	// goes through it.
+	wrap func(http.Handler) http.Handler
+	// config adjusts labd's Config before it starts.
+	config func(*Config)
+}
+
+func newLabWith(t *testing.T, c labConfig) *lab {
+	name, withOOB := c.name, c.oob
+	if name == "" {
+		name = "sim-mac"
+	}
+	var clock agent.Clock = agent.WallClock
+	if c.clock != nil {
+		clock = c.clock
+	}
 	testKnobs.Do(func() {
 		aliveWindow = 1500 * time.Millisecond
 		panicGrace = 2 * time.Second
@@ -89,7 +144,7 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
-	l := &lab{t: t, cancel: cancel, name: name}
+	l := &lab{t: t, cancel: cancel, name: name, ctx: ctx, logs: &logBuf{}}
 	sim := agent.NewSim(t.TempDir())
 	sim.RebootDelay = 300 * time.Millisecond
 	l.sim = sim
@@ -100,30 +155,44 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 		default:
 		}
 	}
-	quiet := log.New(io.Discard, "", 0)
+	var logw io.Writer = l.logs
 	if os.Getenv("MACLAB_TEST_LOG") != "" {
-		quiet = log.New(os.Stderr, "labd: ", log.Ltime|log.Lmicroseconds)
+		logw = io.MultiWriter(l.logs, os.Stderr)
 	}
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "admin", Interval: 200 * time.Millisecond,
-		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld",
-		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}, quiet)
+	logger := log.New(logw, "labd: ", log.Ltime|log.Lmicroseconds)
+	cfg := Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
+		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
+		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}
+	if c.config != nil {
+		c.config(&cfg)
+	}
+	s, err := New(ctx, cfg, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.s = s
 	s.OnNotify(func(n Notification) { l.mu.Lock(); l.notes = append(l.notes, n); l.mu.Unlock() })
-	hs := httptest.NewServer(s.Handler())
+	handler := s.Handler()
+	if c.wrap != nil {
+		handler = c.wrap(handler)
+	}
+	hs := httptest.NewServer(handler)
 	l.url = hs.URL
 	t.Cleanup(func() { cancel(); hs.Close() })
 
 	// Enroll the simulated Mac exactly as lab-agent setup would.
-	tok, _ := s.store.addTokenForTest(name)
+	addToken := s.store.addTokenForTest
+	if c.volunteer {
+		addToken = s.store.addVolunteerTokenForTest
+	}
+	tok, _ := addToken(name)
 	resp, err := agent.Enroll(ctx, hs.URL, tok, sim.Facts())
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.secret = resp.Secret
-	a := agent.New(&agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir()}, sim, quiet)
+	l.agent = &agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir(), Clock: clock}
+	a := agent.New(l.agent, sim, logger)
 	go a.Run(ctx)
 	if withOOB {
 		v := s.dev(name)
@@ -138,6 +207,22 @@ func newLabNamed(t *testing.T, withOOB bool, name string) *lab {
 func (st *store) addTokenForTest(name string) (string, error) {
 	tok := "enr_test_" + name
 	return tok, st.addToken(hashSecret(tok), api.EnrollTokenRequest{Name: name, Model: api.ModelLaptop}, time.Now().Add(time.Hour))
+}
+
+// addVolunteerTokenForTest is the token a Volunteer's Mac enrolls with: a
+// Volunteer's enrollment token, as `lab enroll --volunteer` makes.
+func (st *store) addVolunteerTokenForTest(name string) (string, error) {
+	tok := "enr_test_" + name
+	return tok, st.addToken(hashSecret(tok), api.EnrollTokenRequest{Name: name, Model: api.ModelLaptop,
+		Volunteer: true, VolunteerName: "Ada Lovelace", Contact: "ada@example.org"}, time.Now().Add(time.Hour))
+}
+
+// volunteer runs a Volunteer command on the simulated Mac, as
+// `sudo lab-agent <args>` would, and returns what it printed.
+func (l *lab) volunteer(args ...string) (string, error) {
+	var out bytes.Buffer
+	err := agent.Volunteer(l.ctx, l.agent, l.sim, args, &out)
+	return out.String(), err
 }
 
 func (l *lab) artifact(content string) string {
@@ -393,15 +478,7 @@ func TestFailingTest(t *testing.T) {
 
 func (l *lab) get(method, path string) (*http.Response, string) {
 	l.t.Helper()
-	req, _ := http.NewRequest(method, l.url+path, nil)
-	req.Header.Set("Authorization", "Bearer admin")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		l.t.Fatal(err)
-	}
-	b, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	return resp, string(b)
+	return l.as(harnessToken, method, path, nil)
 }
 
 func TestLiveStreamScreenAndLogs(t *testing.T) {
@@ -465,7 +542,7 @@ func TestScreenAtRestoredOnStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	quiet := log.New(io.Discard, "", 0)
-	s, err := New(ctx, Config{DataDir: dir, AdminToken: "a"}, quiet)
+	s, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +550,7 @@ func TestScreenAtRestoredOnStart(t *testing.T) {
 	s.store.saveDevice(&d, "h")
 	os.MkdirAll(s.screenDir("mac"), 0o755)
 	os.WriteFile(filepath.Join(s.screenDir("mac"), "1790753481823.jpg"), []byte("x"), 0o644)
-	s2, err := New(ctx, Config{DataDir: dir, AdminToken: "a"}, quiet)
+	s2, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -702,6 +779,16 @@ func TestSuspendDuringTestIsNotACrash(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
 	l.sim.SuspendFor = 6 * time.Second // well past quietGrace: only the announcement keeps it waiting
+	// The test carries on after the resume, as one that checks the Mac after
+	// waking does, until labd has seen it back: a result that came with the
+	// wake would end the wait before labd saw a check-in.
+	l.sim.TestFiles = func(test, kernel string) map[string][]byte {
+		for end := time.Now().Add(10 * time.Second); test == "suspend-then-resume" && time.Now().Before(end) &&
+			!strings.Contains(l.logs.String(), "back on the same boot"); {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return nil
+	}
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"),
 		Tests: []api.TestSpec{{Name: "suspend-then-resume", Builtin: "x"}, {Name: "after-resume", Builtin: "x"}}})
 	l.expect(j, api.OutcomePass)
@@ -1075,7 +1162,7 @@ func TestCmdlineBaseAndStrip(t *testing.T) {
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok"), CmdlineBase: "default", Cmdline: "extra=1"})
 	l.expect(j, api.OutcomePass)
 	c := j.Result.BootCmdline
-	if !strings.HasPrefix(c, "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") || !strings.Contains(c, "extra=1") || !strings.Contains(c, "maclab.job="+j.ID) {
+	if !strings.HasPrefix(withoutLabBootAdditions(c), "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") || !strings.Contains(c, "extra=1") || !strings.Contains(c, "maclab.job="+j.ID) {
 		t.Fatalf("booted with %q", c)
 	}
 	var shown bool
@@ -1387,12 +1474,12 @@ func TestQuietTestBoots(t *testing.T) {
 	l.baseline()
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-quiet behavior=ok"), CmdlineBase: "default"})
 	l.expect(j, api.OutcomePass)
-	if c := j.Result.BootCmdline; !strings.HasPrefix(c, "root=UUID=sim rw quiet splash panic=10") || strings.Contains(c, "loglevel=7") {
+	if c := j.Result.BootCmdline; !strings.HasPrefix(withoutLabBootAdditions(c), "root=UUID=sim rw quiet splash panic=10") || strings.Contains(c, "loglevel=7") {
 		t.Fatalf("quiet boot: %q", c)
 	}
 	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-verbose behavior=ok"), CmdlineBase: "default", VerboseBoot: true})
 	l.expect(j, api.OutcomePass)
-	if c := j.Result.BootCmdline; !strings.HasPrefix(c, "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") {
+	if c := j.Result.BootCmdline; !strings.HasPrefix(withoutLabBootAdditions(c), "root=UUID=sim rw loglevel=7 panic=10") || strings.Contains(c, "quiet") {
 		t.Fatalf("verbose boot: %q", c)
 	}
 }
@@ -1430,7 +1517,7 @@ func TestRunningBuildSurvivesLabdRestart(t *testing.T) {
 	defer cancel()
 	dir := t.TempDir()
 	quiet := log.New(io.Discard, "", 0)
-	s1, err := New(ctx, Config{DataDir: dir, AdminToken: "a", BuilderToken: "bld"}, quiet)
+	s1, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a", BuilderToken: "bld"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1439,7 +1526,7 @@ func TestRunningBuildSurvivesLabdRestart(t *testing.T) {
 		ConfigSHA: "c", State: api.BuildRunning, Stage: "build", Created: now, Updated: now}
 	s1.saveBuild(b)
 	// labd restarts while the builder keeps compiling.
-	s2, err := New(ctx, Config{DataDir: dir, AdminToken: "a", BuilderToken: "bld"}, quiet)
+	s2, err := New(ctx, Config{DataDir: dir, FirstMaintainer: harnessMaintainer, FirstMaintainerToken: "a", BuilderToken: "bld"}, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1528,7 +1615,7 @@ func TestCancelKeepsKernelFailure(t *testing.T) {
 	k := l.artifact("krel=7.2-oops behavior=crash-in-test")
 	// collecting the crashed boot's logs takes long enough to cancel meanwhile
 	l.sim.CollectHook = func(boot, outDir string) error {
-		if boot == "-1" {
+		if boot != "0" { // the crashed boot, which the lost-boot collection names by its ID
 			time.Sleep(2 * time.Second)
 		}
 		return nil

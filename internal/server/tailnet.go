@@ -3,16 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/netip"
 	"os/exec"
 	"runtime"
-	"strings"
 	"time"
 )
 
@@ -65,11 +62,11 @@ type whoisCall struct {
 	p    *TailnetPeer
 }
 
-// access decides what a request may do. The admin token and a trusted network
-// give admin. With Tailscale on, a tailnet peer whose login is in Admins is an
-// admin and any other peer, tagged devices included, a viewer. who names the
-// tailnet peer, for error messages. Without the token, a request gets in only
-// when it asked for labd by one of its own names (see ownHost).
+// access decides what a request may do. A Maintainer's token gives admin,
+// and who is that Maintainer's name. With Tailscale on, any tailnet peer,
+// tagged devices included, is a viewer, and who names the peer, for error
+// messages. Without a token, a request gets in only when it asked for labd
+// by one of its own names (see ownHost).
 func (s *Server) access(r *http.Request) (a access, who string) {
 	a, who, _ = s.accessHost(r)
 	return a, who
@@ -77,10 +74,10 @@ func (s *Server) access(r *http.Request) (a access, who string) {
 
 // accessHost is access, and says whether the request has no access only
 // because it asked for labd by a name that isn't labd's own (foreign): its
-// network or its tailnet login would have let it in.
+// tailnet login would have let it look.
 func (s *Server) accessHost(r *http.Request) (a access, who string, foreign bool) {
-	if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.AdminToken)) == 1 {
-		return adminAccess, "", false
+	if name, err := s.store.maintainerByToken(hashSecret(bearer(r))); err == nil {
+		return adminAccess, name, false
 	}
 	if a, who = s.tokenless(r); a != noAccess && !s.ownHost(r.Host) {
 		return noAccess, "", true
@@ -88,15 +85,10 @@ func (s *Server) accessHost(r *http.Request) (a access, who string, foreign bool
 	return a, who, false
 }
 
-// tokenless is the access a request gets without the admin token. With
-// Tailscale on, a trusted network gives nothing to traffic that may be from
-// the tailnet, as far as labd can tell (see mayBeTailnet): a tailnet peer
-// address is judged by its identity, and a proxied request gets no trust at
-// all.
+// tokenless is the access a request gets without a Maintainer's token: with
+// Tailscale on, a tailnet peer may look, judged by its identity; nothing
+// else gets in.
 func (s *Server) tokenless(r *http.Request) (access, string) {
-	if s.trusted(r) && !(s.cfg.Tailscale && mayBeTailnet(r)) {
-		return adminAccess, ""
-	}
 	if !s.cfg.Tailscale {
 		return noAccess, ""
 	}
@@ -107,58 +99,7 @@ func (s *Server) tokenless(r *http.Request) (access, string) {
 	if len(p.Tags) > 0 {
 		return viewAccess, p.Node
 	}
-	for _, a := range s.cfg.Admins {
-		if strings.EqualFold(a, p.Login) {
-			return adminAccess, p.Login
-		}
-	}
 	return viewAccess, p.Login
-}
-
-// serveHeaders are what tailscale serve sets on a request it proxies, besides
-// X-Forwarded-For: the identity of a tailnet user, or Funnel's marker for
-// internet traffic. Tagged nodes get none of them.
-var serveHeaders = []string{"Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-User-Profile-Pic",
-	"Tailscale-Headers-Info", "Tailscale-App-Capabilities", "Tailscale-Funnel-Request"}
-
-// mayBeTailnet reports whether a request may have come from the tailnet, as
-// far as labd can tell: it came from a tailnet address, or through an HTTP
-// proxy. tailscale serve and Funnel proxy from 127.0.0.1 or this host's own
-// address, so only headers give them away: serve's own, and the
-// X-Forwarded-For it always sets. Any X-Forwarded-* or Forwarded header
-// counts, whatever it says: labd can't tell which proxy set it, or where that
-// proxy's client came from. Faking one only loses a client access. Raw TCP
-// forwarding (tailscale serve --tcp or --tls-terminated-tcp, Funnel's TCP
-// mode) sets no header at all, and labd can't tell it from a local client.
-func mayBeTailnet(r *http.Request) bool {
-	if ap, err := netip.ParseAddrPort(r.RemoteAddr); err == nil && inTailnet(ap.Addr()) {
-		return true
-	}
-	for _, h := range serveHeaders {
-		if len(r.Header.Values(h)) > 0 {
-			return true
-		}
-	}
-	for h := range r.Header {
-		if strings.EqualFold(h, "Forwarded") || len(h) > len("X-Forwarded-") && strings.EqualFold(h[:len("X-Forwarded-")], "X-Forwarded-") {
-			return true
-		}
-	}
-	return false
-}
-
-// warnTrustedNetworks says, for each trusted network, what tailnet traffic
-// gets admin through it anyway: labd only sees a local or LAN address.
-func warnTrustedNetworks(cfg Config, logger *log.Logger) {
-	if !cfg.Tailscale {
-		return
-	}
-	for _, n := range cfg.Trust {
-		logger.Printf("warning: --trust %s with --tailscale: tailnet traffic that reaches labd through %s gets admin with no token "+
-			"(a subnet router into it, Tailscale SSH onto a machine in it, tailscale serve --tcp or Funnel TCP forwarding from this host). "+
-			"labd refuses trust to requests carrying a proxy's headers (X-Forwarded-*, Forwarded, tailscale serve's), "+
-			"but can't tell the rest from local traffic", n, n)
-	}
 }
 
 // tailnetPeer asks tailscaled who connected, by the TCP peer address only.
@@ -253,9 +194,4 @@ func tailscaleCLI() string {
 		return "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
 	}
 	return "tailscale"
-}
-
-// ParseAdmins turns "a@github, b@github" into logins.
-func ParseAdmins(v string) []string {
-	return strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' })
 }

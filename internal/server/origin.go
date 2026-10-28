@@ -19,15 +19,15 @@ import (
 
 // sameOrigin refuses a request that can change something (any method but
 // GET, HEAD and OPTIONS) when a browser sent it from another site's page.
-// labd gives admin by the network a browser is on (--trust, a tailnet login
-// in --admins) as well as by token, so without this any page open in a
-// browser there could POST to /api/devices/{name}/exec. Browsers name the
-// sending page's origin in Origin on such requests, and newer ones say in
-// Sec-Fetch-Site how it relates to labd; a page can set neither. labd's own
-// UI is served from the origin it calls, so its Origin names the host it
-// asked. The lab CLI, agents, builders and curl send neither header and are
-// let through: what guards them is the token, device secret or network
-// they come with.
+// Changes need a Maintainer's token, which a page can't send, so this is a
+// second guard: should a browser ever carry access by itself, say a tailnet
+// login, no page open in it may POST to /api/devices/{name}/exec. Browsers
+// name the sending page's origin in Origin on such requests, and newer ones
+// say in Sec-Fetch-Site how it relates to labd; a page can set neither.
+// labd's own UI is served from the origin it calls, so its Origin names the
+// host it asked. The lab CLI, agents, builders and curl send neither header and are
+// let through: what guards them is the token or device secret they come
+// with.
 func sameOrigin(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
@@ -68,12 +68,11 @@ func originIsHost(origin, host string) bool {
 	return strings.EqualFold(u.Hostname(), hName) && oPort == hPort
 }
 
-// A request that gets in without a token, by the network it comes from
-// (--trust) or its tailnet login, counts only when its Host names labd
+// A request that gets in without a token, by its tailnet login, counts only when its Host names labd
 // itself (ownHost). A web page whose site points its own name at labd's
 // address once the page is open (DNS rebinding) is served from that name,
 // so its Origin and Host agree and sameOrigin lets it through; but its Host
-// is that name, not one of labd's. Requests with the admin token, a device
+// is that name, not one of labd's. Requests with a Maintainer's token, a device
 // secret or the builder token are let in whatever their Host: a page can't
 // send those.
 
@@ -201,5 +200,5 @@ func hostRefusal(host string) string {
 	name := hostName(host)
 	return fmt.Sprintf("refused: this request asked for labd as %s, a name labd doesn't know as its own, and without a token only requests "+
 		"to labd's own names get in (a web page can point a name its site owns at labd's address). If %s is labd's, run labd with --allow-host %s; "+
-		"or open labd by its IP address or host name, or use the admin token", host, name, name)
+		"or open labd by its IP address or host name, or use a Maintainer's token", host, name, name)
 }

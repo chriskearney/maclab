@@ -61,7 +61,7 @@ func (m *buildMgr) wait(ctx context.Context, d time.Duration) {
 	select {
 	case <-ctx.Done():
 	case <-ch:
-	case <-time.After(d):
+	case <-m.s.clock().After(d):
 	}
 }
 
@@ -79,7 +79,7 @@ func (s *Server) getBuild(id string) (*api.Build, error) {
 }
 
 func (s *Server) saveBuild(b *api.Build) {
-	b.Updated = time.Now()
+	b.Updated = s.now()
 	if err := s.store.saveBuild(b); err != nil {
 		s.log.Printf("save build %s: %v", b.ID, err)
 	}
@@ -155,7 +155,7 @@ func (s *Server) EnsureBuild(ctx context.Context, req api.BuildRequest) (*api.Bu
 	default:
 		return nil, errors.New("say whose config to build with: a device, or a config artifact")
 	}
-	now := time.Now()
+	now := s.now()
 	b := &api.Build{ID: "b" + now.Format("0102-150405") + "-" + randHex(2), Key: buildKey(src, cfg), Source: src,
 		Device: req.Device, ConfigSHA: cfg, State: api.BuildQueued, Created: now, Updated: now}
 	if req.Config != "" {
@@ -189,7 +189,7 @@ func (s *Server) ensurePackageBuild(ctx context.Context, req api.BuildRequest) (
 			return nil, err
 		}
 	}
-	now := time.Now()
+	now := s.now()
 	return s.queueBuild(&api.Build{ID: "b" + now.Format("0102-150405") + "-" + randHex(2), Kind: api.BuildPackage,
 		Key: packageKey(src, req.Recipe, req.Pkgrel), Source: src, Recipe: req.Recipe, RecipeDir: req.RecipeDir,
 		Pkgrel: req.Pkgrel, State: api.BuildQueued, Created: now, Updated: now}, req.Force)
@@ -335,18 +335,18 @@ func (s *Server) hBuilderPoll(w http.ResponseWriter, r *http.Request) {
 	if strings.Contains(r.URL.Query().Get("kinds"), "package") {
 		kinds = `1=1`
 	}
-	deadline := time.Now().Add(25 * time.Second)
+	deadline := s.now().Add(25 * time.Second)
 	for {
 		s.builds.mu.Lock()
-		s.builds.builders[host] = time.Now()
+		s.builds.builders[host] = s.now()
 		s.builds.mu.Unlock()
 		q, _ := s.store.builds(`state='queued' AND (` + kinds + `) ORDER BY created ASC LIMIT 1`)
 		if len(q) > 0 {
 			b := q[0]
-			b.State, b.Builder, b.Started, b.Stage = api.BuildRunning, host, time.Now(), "starting"
+			b.State, b.Builder, b.Started, b.Stage = api.BuildRunning, host, s.now(), "starting"
 			b.ETA = s.estimate(b)
 			s.builds.mu.Lock()
-			s.builds.beat[b.ID] = time.Now()
+			s.builds.beat[b.ID] = s.now()
 			s.builds.mu.Unlock()
 			s.saveBuild(b)
 			s.log.Printf("build %s started on %s", b.ID, host)
@@ -357,11 +357,11 @@ func (s *Server) hBuilderPoll(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, a)
 			return
 		}
-		if time.Now().After(deadline) || r.Context().Err() != nil {
+		if s.now().After(deadline) || r.Context().Err() != nil {
 			w.WriteHeader(204)
 			return
 		}
-		s.builds.wait(r.Context(), time.Until(deadline))
+		s.builds.wait(r.Context(), deadline.Sub(s.now()))
 	}
 }
 
@@ -407,10 +407,10 @@ func (s *Server) hBuilderProgress(w http.ResponseWriter, r *http.Request) {
 	}
 	b.LogLines += len(shown)
 	if est := s.estimate(b); est > 0 {
-		b.ETA = max(0, est-time.Since(b.Started).Seconds())
+		b.ETA = max(0, est-s.since(b.Started).Seconds())
 	}
 	s.builds.mu.Lock()
-	s.builds.beat[b.ID] = time.Now()
+	s.builds.beat[b.ID] = s.now()
 	cancel := s.builds.cancel[b.ID]
 	s.builds.mu.Unlock()
 	s.saveBuild(b)
@@ -480,7 +480,7 @@ func (s *Server) hBuilderDone(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-// ---- admin API ----
+// ---- Maintainer API ----
 
 func (s *Server) hCreateBuild(w http.ResponseWriter, r *http.Request) {
 	var req api.BuildRequest
@@ -609,7 +609,7 @@ func (s *Server) hBuilders(w http.ResponseWriter, r *http.Request) {
 	s.builds.mu.Lock()
 	out := []map[string]any{}
 	for host, t := range s.builds.builders {
-		out = append(out, map[string]any{"host": host, "last_seen": t, "alive": time.Since(t) < time.Minute})
+		out = append(out, map[string]any{"host": host, "last_seen": t, "alive": s.since(t) < time.Minute})
 	}
 	s.builds.mu.Unlock()
 	writeJSON(w, out)
@@ -624,21 +624,21 @@ func (s *Server) buildMonitor() {
 	running, _ := s.store.builds(`state='running'`)
 	s.builds.mu.Lock()
 	for _, b := range running {
-		s.builds.beat[b.ID] = time.Now()
+		s.builds.beat[b.ID] = s.now()
 	}
 	s.builds.mu.Unlock()
-	t := time.NewTicker(30 * time.Second)
+	t := s.clock().NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		s.builds.mu.Lock()
 		var lost []string
 		for id, at := range s.builds.beat {
-			if time.Since(at) > 10*time.Minute {
+			if s.since(at) > 10*time.Minute {
 				lost = append(lost, id)
 				delete(s.builds.beat, id)
 			}

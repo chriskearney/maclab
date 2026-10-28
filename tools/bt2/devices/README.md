@@ -1,0 +1,1 @@
+Operational profiles are intentionally local. Supply a reviewed JSON profile directory with `--devices-dir`; do not copy test fixtures to a live lab. Profiles bind board identity, known-good kernel, frozen release, exact parkable paths, GUI identity and recovery modes. A profile is not hardware authorization.

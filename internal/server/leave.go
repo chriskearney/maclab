@@ -59,7 +59,7 @@ func (s *Server) leave(v *dev, why string) ([]string, error) {
 	name := v.d.Name
 	if v.d.State != api.StateLeft {
 		v.leftBy = why
-		v.setStateLocked(api.StateLeft, why+" ran at "+time.Now().Format(time.DateTime)+"; `lab forget "+name+"` takes it out of the lab, `lab reset "+name+"` puts it back")
+		v.setStateLocked(api.StateLeft, why+" ran at "+s.now().Format(time.DateTime)+"; `lab forget "+name+"` takes it out of the lab, `lab reset "+name+"` puts it back")
 	}
 	v.mu.Unlock()
 	s.log.Printf("%s is leaving the lab: %s", name, why)

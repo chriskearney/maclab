@@ -18,14 +18,13 @@ import (
 // address, which is always one of labd's own names.
 const labdAt = "http://10.1.1.5:7770"
 
-// A page on another site, open in a browser on a trusted network, can't
-// change the lab through it; labd's own UI, the CLI, agents and builders
-// can.
+// A page on another site, open in a browser that holds a Maintainer's token,
+// can't change the lab through it; labd's own UI, the CLI, agents and
+// builders can.
 func TestSameOrigin(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	trust, _ := ParseTrust("10.1.1.0/24")
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", BuilderToken: "bld", Trust: trust,
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", BuilderToken: "bld",
 		AllowHosts: []string{"labd", "labd.tail1234.ts.net"}}, log.New(io.Discard, "", 0))
 	if err != nil {
 		t.Fatal(err)
@@ -64,16 +63,16 @@ func TestSameOrigin(t *testing.T) {
 		{"a sandboxed frame", "POST", exec, "null", "cross-site", "", 403},
 		{"a sibling subdomain, no Origin", "DELETE", "http://labd:7770/api/devices/m1air/lease", "", "same-site", "", 403},
 		{"another site, no Origin", "PATCH", "http://labd:7770/api/devices/m1air", "", "cross-site", "", 403},
-		{"labd's own UI", "POST", exec, "http://labd:7770", "same-origin", "", past},
-		{"labd's own UI, Origin only", "POST", exec, "http://labd:7770", "", "", past},
-		{"the UI under another case", "POST", exec, "http://LabD:7770", "", "", past},
-		{"the UI by IPv6 address", "POST", "http://[fd7a:115c:a1e0::5]:7770/api/devices/m1air/exec", "http://[fd7a:115c:a1e0::5]:7770", "same-origin", "", past},
-		{"the UI behind https", "POST", "https://labd.tail1234.ts.net/api/devices/m1air/exec", "https://labd.tail1234.ts.net", "same-origin", "", past},
-		{"the UI, Host with the default port", "POST", "https://labd.tail1234.ts.net:443/api/devices/m1air/exec", "https://labd.tail1234.ts.net", "", "", past},
-		{"typed into the address bar", "POST", exec, "", "none", "", past},
-		{"the CLI, curl, scripts", "POST", exec, "", "", "", past},
+		{"labd's own UI", "POST", exec, "http://labd:7770", "same-origin", "adm_secret", past},
+		{"labd's own UI, Origin only", "POST", exec, "http://labd:7770", "", "adm_secret", past},
+		{"the UI under another case", "POST", exec, "http://LabD:7770", "", "adm_secret", past},
+		{"the UI by IPv6 address", "POST", "http://[fd7a:115c:a1e0::5]:7770/api/devices/m1air/exec", "http://[fd7a:115c:a1e0::5]:7770", "same-origin", "adm_secret", past},
+		{"the UI behind https", "POST", "https://labd.tail1234.ts.net/api/devices/m1air/exec", "https://labd.tail1234.ts.net", "same-origin", "adm_secret", past},
+		{"the UI, Host with the default port", "POST", "https://labd.tail1234.ts.net:443/api/devices/m1air/exec", "https://labd.tail1234.ts.net", "", "adm_secret", past},
+		{"typed into the address bar", "POST", exec, "", "none", "adm_secret", past},
+		{"the CLI, curl, scripts", "POST", exec, "", "", "adm_secret", past},
 		{"the CLI with the token", "POST", exec, "", "", "adm_secret", past},
-		{"another site may still look", "GET", "http://labd:7770/api/devices", "http://evil.example", "cross-site", "", 200},
+		{"another site may still look", "GET", "http://labd:7770/api/devices", "http://evil.example", "cross-site", "adm_secret", 200},
 		{"and ask about CORS", "OPTIONS", exec, "http://evil.example", "cross-site", "", 405},
 
 		// Agents and builders send neither header, and get the same check:
@@ -92,19 +91,18 @@ func TestSameOrigin(t *testing.T) {
 }
 
 // A page whose site points its own name at labd's address once it is open
-// (DNS rebinding) sends labd that name as Host, and its Origin agrees: on a
-// trusted network, or as a tailnet peer, labd answers it only on a Host of
-// labd's own. A token, a device secret or the builder token works on any.
+// (DNS rebinding) sends labd that name as Host, and its Origin agrees: to a
+// tailnet peer, who may look without a token, labd answers it only on a
+// Host of labd's own. A token, a device secret or the builder token works on any.
 func TestDNSRebinding(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	trust, _ := ParseTrust("10.1.1.0/24")
 	whois := func(_ context.Context, ip string) (*TailnetPeer, error) {
-		return &TailnetPeer{Login: "admin@github", Node: "laptop"}, nil
+		return &TailnetPeer{Login: "viewer@github", Node: "laptop"}, nil
 	}
 	tsLookups := 0
-	s, err := New(ctx, Config{DataDir: t.TempDir(), AdminToken: "adm_secret", BuilderToken: "bld", Trust: trust,
-		Tailscale: true, Admins: []string{"admin@github"}, WhoIs: whois, AllowHosts: []string{"Lab.Example.LAN."},
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", BuilderToken: "bld",
+		Tailscale: true, WhoIs: whois, AllowHosts: []string{"Lab.Example.LAN."},
 		TailnetNames: func(context.Context) ([]string, error) {
 			tsLookups++
 			return parseStatusNames([]byte(`{"Self":{"DNSName":"i9beef.tail1234.ts.net."}}`))
@@ -145,22 +143,22 @@ func TestDNSRebinding(t *testing.T) {
 		name, method, url, remote, origin, token string
 		want                                     int
 	}{
-		{"a rebound page runs a command", "POST", "http://evil.example:7770" + exec, lan, "http://evil.example:7770", "", 403},
-		{"a rebound page reads the Macs", "GET", "http://evil.example:7770/api/devices", lan, "http://evil.example:7770", "", 403},
-		{"a rebound page reads a job", "GET", "http://evil.example:7770/api/jobs/j1", lan, "", "", 403},
-		{"a rebound page on the default port", "GET", "http://evil.example/api/devices", lan, "", "", 403},
-		{"a rebound page from a tailnet admin", "POST", "http://evil.example:7770" + exec, tailnet, "http://evil.example:7770", "", 403},
-		{"a rebound page watches the stream", "GET", "http://evil.example:7770/api/stream", lan, "", "", 403},
-		{"by IPv4 address", "POST", "http://10.1.1.5:7770" + exec, lan, "http://10.1.1.5:7770", "", past},
-		{"by IPv4 address, no port", "GET", "http://10.1.1.5/api/devices", lan, "", "", 200},
-		{"by IPv6 address", "POST", "http://[fd00::5]:7770" + exec, lan, "http://[fd00::5]:7770", "", past},
-		{"by IPv6 address, no port", "GET", "http://[::1]/api/devices", lan, "", "", 200},
-		{"by localhost", "POST", "http://localhost:7770" + exec, lan, "http://localhost:7770", "", past},
-		{"by its host name", "POST", "http://" + short + ":7770" + exec, lan, "http://" + short + ":7770", "", past},
-		{"by its host name, in capitals", "GET", "http://" + strings.ToUpper(short) + ":7770/api/devices", lan, "", "", 200},
-		{"by its .local name", "GET", "http://" + short + ".local:7770/api/devices", lan, "", "", 200},
-		{"by an --allow-host name", "POST", "http://lab.example.lan:7770" + exec, lan, "http://lab.example.lan:7770", "", past},
-		{"by its MagicDNS name", "POST", "http://i9beef.tail1234.ts.net:7770" + exec, tailnet, "http://i9beef.tail1234.ts.net:7770", "", past},
+		{"a rebound page runs a command", "POST", "http://evil.example:7770" + exec, tailnet, "http://evil.example:7770", "", 403},
+		{"a rebound page reads the Macs", "GET", "http://evil.example:7770/api/devices", tailnet, "http://evil.example:7770", "", 403},
+		{"a rebound page reads a job", "GET", "http://evil.example:7770/api/jobs/j1", tailnet, "", "", 403},
+		{"a rebound page on the default port", "GET", "http://evil.example/api/devices", tailnet, "", "", 403},
+		{"a rebound page from a tailnet viewer", "POST", "http://evil.example:7770" + exec, tailnet, "http://evil.example:7770", "", 403},
+		{"a rebound page watches the stream", "GET", "http://evil.example:7770/api/stream", tailnet, "", "", 403},
+		{"by IPv4 address", "GET", "http://10.1.1.5:7770/api/devices", tailnet, "http://10.1.1.5:7770", "", 200},
+		{"by IPv4 address, no port", "GET", "http://10.1.1.5/api/devices", tailnet, "", "", 200},
+		{"by IPv6 address", "GET", "http://[fd00::5]:7770/api/devices", tailnet, "http://[fd00::5]:7770", "", 200},
+		{"by IPv6 address, no port", "GET", "http://[::1]/api/devices", tailnet, "", "", 200},
+		{"by localhost", "GET", "http://localhost:7770/api/devices", tailnet, "http://localhost:7770", "", 200},
+		{"by its host name", "GET", "http://" + short + ":7770/api/devices", tailnet, "http://" + short + ":7770", "", 200},
+		{"by its host name, in capitals", "GET", "http://" + strings.ToUpper(short) + ":7770/api/devices", tailnet, "", "", 200},
+		{"by its .local name", "GET", "http://" + short + ".local:7770/api/devices", tailnet, "", "", 200},
+		{"by an --allow-host name", "GET", "http://lab.example.lan:7770/api/devices", tailnet, "http://lab.example.lan:7770", "", 200},
+		{"by its MagicDNS name", "GET", "http://i9beef.tail1234.ts.net:7770/api/devices", tailnet, "http://i9beef.tail1234.ts.net:7770", "", 200},
 		{"by its MagicDNS short name", "GET", "http://i9beef:7770/api/devices", tailnet, "", "", 200},
 		{"the token, by any name", "POST", "http://evil.example:7770" + exec, lan, "", "adm_secret", past},
 		{"the token from outside, by any name", "GET", "http://evil.example:7770/api/devices", "192.168.7.3:5000", "", "adm_secret", 200},
@@ -176,7 +174,7 @@ func TestDNSRebinding(t *testing.T) {
 	if tsLookups != 1 {
 		t.Errorf("looked up the MagicDNS names %d times, want once", tsLookups)
 	}
-	got := try("GET", "http://evil.example:7770/api/devices", lan, "", "", "")
+	got := try("GET", "http://evil.example:7770/api/devices", tailnet, "", "", "")
 	if want := "refused: this request asked for labd as evil.example:7770"; !strings.HasPrefix(got.body, want) || !strings.Contains(got.body, "--allow-host evil.example;") {
 		t.Errorf("the refusal says %q", got.body)
 	}
@@ -185,12 +183,12 @@ func TestDNSRebinding(t *testing.T) {
 		TokenRequired bool   `json:"token_required"`
 		Refused       string `json:"refused"`
 	}
-	json.Unmarshal([]byte(try("GET", "http://evil.example:7770/api/auth", lan, "", "", "").body), &a)
+	json.Unmarshal([]byte(try("GET", "http://evil.example:7770/api/auth", tailnet, "", "", "").body), &a)
 	if !a.TokenRequired || !strings.Contains(a.Refused, "--allow-host evil.example") {
 		t.Errorf("/api/auth by a rebound name: %+v", a)
 	}
 	a.TokenRequired, a.Refused = true, ""
-	json.Unmarshal([]byte(try("GET", "http://10.1.1.5:7770/api/auth", lan, "", "", "").body), &a)
+	json.Unmarshal([]byte(try("GET", "http://10.1.1.5:7770/api/auth", tailnet, "", "", "").body), &a)
 	if a.TokenRequired || a.Refused != "" {
 		t.Errorf("/api/auth by address: %+v", a)
 	}

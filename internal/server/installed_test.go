@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -35,16 +34,7 @@ var tB2 = strings.Repeat("b2", 64) // the UKI's measured BLAKE2b-512, which its 
 
 func (l *lab) post(path string, body any) (*http.Response, string) {
 	l.t.Helper()
-	b, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", l.url+path, bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer admin")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		l.t.Fatal(err)
-	}
-	out, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	return resp, string(out)
+	return l.as(harnessToken, "POST", path, body)
 }
 
 func pinsFor(dir string, rels ...string) string {
@@ -141,6 +131,18 @@ func installedLab(t *testing.T, tamper func(phase string, o map[string]any)) (*l
 	return l, installed.SHA256(mb), entry
 }
 
+// Build metadata describes the installed agent binary without lowering its
+// release version. Exercise the real admission path using the simulator only.
+func TestInstalledJobBuildMetadata(t *testing.T) {
+	l, msha, _ := installedLab(t, nil)
+	v := l.s.dev("sim-mac")
+	v.mu.Lock()
+	v.d.Facts.AgentVersion = installedMinAgent + "+gui-workspace"
+	v.mu.Unlock()
+	j := l.run(api.JobSpec{InstalledManifest: msha, Holder: "tester"})
+	l.expect(j, api.OutcomePass)
+}
+
 func TestInstalledJob(t *testing.T) {
 	l, msha, entry := installedLab(t, nil)
 	kg := l.s.dev("sim-mac").snapshot().KnownGood
@@ -179,7 +181,7 @@ func TestInstalledJob(t *testing.T) {
 		t.Fatalf("tests %v (before %v)", names, ir.Before)
 	}
 	want := strings.Join(entry.CmdlineTokens, " ") + " maclab.job=" + j.ID + " panic=10"
-	if j.Result.BootKernel != tKrel || j.Result.BootCmdline != want {
+	if j.Result.BootKernel != tKrel || withoutLabBootAdditions(j.Result.BootCmdline) != want {
 		t.Fatalf("booted %s with %q, want %q", j.Result.BootKernel, j.Result.BootCmdline, want)
 	}
 	for _, f := range []string{"identity-before.json", "identity-booted.json", "identity-after.json", "omt-compare.json", "dmesg-compare.json", "dmesg-errors.txt", "job.json"} {
@@ -221,11 +223,15 @@ func TestInstalledJob(t *testing.T) {
 	}
 
 	// promotion is explicit, and only of a passed installed job
-	if resp, _ := l.post("/api/installed/9.9/promote", map[string]any{"device": "sim-mac", "job": j.ID}); resp.StatusCode != 400 {
-		t.Fatalf("promote without accepted_by: %s", resp.Status)
+	if resp, _ := l.post("/api/installed/9.9/promote", map[string]any{"device": "sim-mac"}); resp.StatusCode != 400 {
+		t.Fatalf("promote without a job: %s", resp.Status)
 	}
+	// the acceptor is the Maintainer behind the token: a free-text
+	// accepted_by in the body is ignored (these attempts all fail; the one
+	// that succeeds below sends none)
+	grace := l.addMaintainer(harnessToken, "grace")
 	promote := func() (*http.Response, string) {
-		return l.post("/api/installed/9.9/promote", map[string]any{"device": "sim-mac", "job": j.ID, "accepted_by": "dave"})
+		return l.as(grace.Token, "POST", "/api/installed/9.9/promote", map[string]any{"device": "sim-mac", "job": j.ID, "accepted_by": "dave"})
 	}
 	unchanged := func(why string) {
 		t.Helper()
@@ -320,9 +326,13 @@ func TestInstalledJob(t *testing.T) {
 		t.Fatalf("agent did not answer: %d FAILED ledger records, want 2", n)
 	}
 
-	resp, body := promote()
+	resp, body := l.as(grace.Token, "POST", "/api/installed/9.9/promote", map[string]any{"device": "sim-mac", "job": j.ID})
 	if resp.StatusCode != 200 || l.s.dev("sim-mac").snapshot().KnownGood != tKrel {
 		t.Fatalf("promote: %s %s", resp.Status, body)
+	}
+	var promoted struct{ Log string }
+	if json.Unmarshal([]byte(body), &promoted) != nil || !strings.HasSuffix(promoted.Log, "\taccepted-by=grace") {
+		t.Fatalf("promote's log line does not name the accepting Maintainer: %s", body)
 	}
 	if l.sim.RecordedKnownGood != tKrel {
 		t.Fatalf("the agent's known-good is %q, not %s", l.sim.RecordedKnownGood, tKrel)
@@ -339,7 +349,7 @@ func TestInstalledJob(t *testing.T) {
 	if b, err := os.ReadFile(l.s.omtBaselinePath("sim-mac") + ".before-" + j.ID); err != nil || !bytes.Equal(b, refBefore) {
 		t.Fatalf("the previous reference was not kept: %v", err)
 	}
-	if b, _ := os.ReadFile(filepath.Join(l.s.frozenDir("9.9"), "promotions.log")); !strings.Contains(string(b), j.ID+"\t"+tKrel+"\taccepted-by=dave") {
+	if b, _ := os.ReadFile(filepath.Join(l.s.frozenDir("9.9"), "promotions.log")); !strings.Contains(string(b), j.ID+"\t"+tKrel+"\taccepted-by=grace") || strings.Contains(string(b), "accepted-by=dave") {
 		t.Fatalf("promotions.log: %q", b)
 	}
 	// a read-only kernel error reference, as an earlier labd's promotion left

@@ -1,6 +1,10 @@
-bin/
+/bin/
 # A lab's own handoff for its agents: hosts, users, house rules. Keep it local.
 LAB-FOR-AGENTS.md
 
 # Python bytecode (the installed-mode collector is tested in place)
 __pycache__/
+
+# Local distribution output and generated Python caches
+dist/
+*.pyc

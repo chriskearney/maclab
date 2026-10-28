@@ -654,18 +654,19 @@ func (u *uninstaller) serialGetty() error {
 }
 
 // autologin removes the lab's SDDM autologin and turns Omarchy's stay-awake
-// off for the user it named, unless that user had it on before setup.
+// off for the user it named, or setup's --stay-awake turned it on for,
+// unless that user had it on before setup.
 func (u *uninstaller) autologin() error {
 	conf := u.path(sddmConf)
-	b, err := os.ReadFile(conf)
-	if err != nil {
-		return nil
-	}
+	b, confErr := os.ReadFile(conf)
 	user := ""
 	for _, l := range strings.Split(string(b), "\n") {
 		if v, ok := strings.CutPrefix(strings.TrimSpace(l), "User="); ok {
 			user = strings.TrimSpace(v)
 		}
+	}
+	if m, err := os.ReadFile(u.path(workDir, stayAwakeUser)); user == "" && err == nil {
+		user = strings.TrimSpace(string(m))
 	}
 	if user != "" && !exists(u.path(workDir, stayAwakeWasOn)) {
 		home, err := u.home(user)
@@ -684,6 +685,9 @@ func (u *uninstaller) autologin() error {
 				}
 			}
 		}
+	}
+	if confErr != nil {
+		return nil
 	}
 	if err := u.remove(conf, ""); err != nil {
 		return err

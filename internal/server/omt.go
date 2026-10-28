@@ -206,7 +206,10 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 	if len(changed) > 0 {
 		r.ev("omarchy-m-test: %s", strings.Join(changed, ", "))
 	}
-	if res.KnownGood {
+	if j.Spec.Mesa != nil {
+		res.Reference = "staged Mesa diagnostic: kept existing installed-desktop reference"
+		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
+	} else if res.KnownGood {
 		// A known-good kernel can't regress against itself in a way that blames
 		// the kernel, so the test isn't failed. But a pass that turned into a
 		// fail says something else changed (boot.bin, firmware, a cable), and a
@@ -215,7 +218,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		switch {
 		case j.Spec.Baseline:
 			// lab baseline is how a person sets the references on purpose
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
 				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
 			res.Reference = "a baseline: becomes the reference if it passes"
 		case len(res.Regressions) > 0:
@@ -225,7 +228,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		case j.Spec.Cmdline != "" || len(j.Spec.CmdlineStrip) > 0 || (j.Spec.CmdlineBase != "" && j.Spec.CmdlineBase != "known-good"):
 			res.Reference = "not a reference: the job changed the known-good cmdline"
 		default:
-			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: time.Now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
+			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
 				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
 			res.Reference = "becomes the reference if the job passes"
 		}
@@ -380,6 +383,8 @@ func omtNodes(base *omtBaseline, status map[string]string, rep omtReport) (regre
 func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 	res := j.Result.OMT
 	switch {
+	case j.Spec.Mesa != nil:
+		return "", errors.New("staged Mesa diagnostics are private and never published")
 	case s.cfg.OMTSite == "":
 		return "", errors.New("publishing is off (labd --omt-site)")
 	case res == nil:
@@ -388,6 +393,11 @@ func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 		return res.Published, nil
 	case !res.KnownGood:
 		return "", fmt.Errorf("ran on lab kernel %s, which the installed packages don't describe; only known-good runs are published", res.Kernel)
+	}
+	if v := s.dev(j.Spec.Device); v != nil {
+		if d := v.snapshot(); d.IsVolunteer() && !d.Publish {
+			return "", fmt.Errorf("publishing is off on %s, a Volunteer's Mac: only its Volunteer turns it on (sudo lab-agent publish on)", d.Name)
+		}
 	}
 	// A baseline makes the kernel it booted the known-good one, but only once it
 	// finishes, after this upload; until then compare with what it booted.
@@ -404,6 +414,9 @@ func (s *Server) publishOMT(ctx context.Context, j *api.Job) (string, error) {
 	body, err := os.ReadFile(filepath.Join(s.jobDir(j.ID), res.Report))
 	if err != nil {
 		return "", err
+	}
+	if err := packagedOMTReport(body, res.Kernel); err != nil {
+		return "", fmt.Errorf("report remains private: %w", err)
 	}
 	site := strings.TrimRight(s.cfg.OMTSite, "/")
 	req, _ := http.NewRequestWithContext(ctx, "POST", site+"/api/v1/reports", bytes.NewReader(body))
@@ -453,6 +466,9 @@ func (s *Server) omtPublish(ctx context.Context, j *api.Job) (string, error) {
 	return url, err
 }
 
+// omtHolder holds the jobs omtScheduler queues.
+const omtHolder = "maclab-omt"
+
 // omtScheduler re-runs omarchy-m-test on each Mac's known-good kernel once
 // every OMTEvery, publishing the result if that's on: the reference that lab
 // kernels are compared with stays fresh, and so does the site.
@@ -460,29 +476,37 @@ func (s *Server) omtScheduler() {
 	if s.cfg.OMTEvery <= 0 {
 		return
 	}
-	t := time.NewTicker(10 * time.Minute)
+	t := s.clock().NewTicker(10 * time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-t.C:
+		case <-t.C():
 		}
 		for _, v := range s.allDevs() {
 			d := v.snapshot()
 			if d.State != api.StateReady || d.ActiveJob != "" || !s.omtWanted(d, api.JobSpec{}) {
 				continue
 			}
-			if l := d.Lease; l != nil && time.Now().Before(l.Expires) {
+			if l := d.Lease; l != nil && s.now().Before(l.Expires) {
 				continue
 			}
-			if base := s.omtBaseline(d.Name); base != nil && time.Since(base.Time) < s.cfg.OMTEvery {
+			spec := api.JobSpec{Device: d.Name, Holder: omtHolder, Publish: s.cfg.OMTPublish}
+			length := (&jobRun{s: s, v: v, j: &api.Job{Spec: spec}, boot: s.cfg.BootTimeout}).expectedLength()
+			v.mu.Lock()
+			held := v.windowHoldLocked(length) != ""
+			v.mu.Unlock()
+			if held {
+				continue // a Volunteer's Mac is refreshed only when it fits in a window
+			}
+			if base := s.omtBaseline(d.Name); base != nil && s.since(base.Time) < s.cfg.OMTEvery {
 				continue
 			}
 			if open, _ := s.store.jobs(d.Name, 1, true); len(open) > 0 {
 				continue
 			}
-			j, _, err := s.Submit(api.JobSpec{Device: d.Name, Holder: "maclab-omt", Publish: s.cfg.OMTPublish})
+			j, _, err := s.Submit(spec)
 			if err != nil {
 				s.log.Printf("%s: scheduled omarchy-m-test: %v", d.Name, err)
 				continue
@@ -494,7 +518,7 @@ func (s *Server) omtScheduler() {
 
 // versionAtLeast compares dotted version numbers.
 func versionAtLeast(have, want string) bool {
-	h, w := strings.Split(have, "."), strings.Split(want, ".")
+	h, w := strings.Split(versionWithoutBuild(have), "."), strings.Split(versionWithoutBuild(want), ".")
 	for i := range w {
 		var a, b int
 		if i < len(h) {
@@ -555,4 +579,62 @@ func writeFileAtomic(path string, data []byte) error {
 		return err
 	}
 	return syncDir(filepath.Dir(path))
+}
+
+// Build identifiers do not affect version precedence. Strip only a valid
+// metadata suffix, so malformed versions do not newly satisfy an agent gate.
+func versionWithoutBuild(version string) string {
+	core, build, found := strings.Cut(version, "+")
+	if !found {
+		return version
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return version
+	}
+	for _, part := range parts {
+		if part == "" || (len(part) > 1 && part[0] == '0') {
+			return version
+		}
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				return version
+			}
+		}
+	}
+	for _, identifier := range strings.Split(build, ".") {
+		if identifier == "" {
+			return version
+		}
+		for _, c := range identifier {
+			if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-') {
+				return version
+			}
+		}
+	}
+	return core
+}
+
+// packagedOMTReport uses the tester's pacman ownership result, not a release
+// name heuristic. Missing, skipped, duplicate or malformed identity fails
+// closed without altering the local report or qualification reference.
+func packagedOMTReport(body []byte, kernel string) error {
+	var report omtReport
+	if err := json.Unmarshal(body, &report); err != nil {
+		return fmt.Errorf("invalid omarchy-m-test report: %w", err)
+	}
+	if kernel == "" || report.Machine.Kernel != kernel {
+		return errors.New("report kernel does not match the tested kernel")
+	}
+	count, pass := 0, false
+	for _, check := range report.Checks {
+		if check.ID == "boot.kernel-package" {
+			count++
+			pass = check.Status == "pass"
+		}
+	}
+	if count != 1 || !pass {
+		return errors.New("running kernel has no unique passing boot.kernel-package ownership check")
+	}
+	return nil
 }

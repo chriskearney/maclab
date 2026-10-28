@@ -1,0 +1,44 @@
+{
+  "schema": "bt2.device/1",
+  "name": "m1",
+  "board": "apple,j293",
+  "board_dtb": "t8103-j293.dtb",
+  "dt_model": "Apple MacBook Pro (13-inch, M1, 2020)",
+  "known_good_kernel": "7.2.11-6-1-ARCH",
+  "gui_user": "chrisk",
+  "gui_uid": 1000,
+  "esp": "/boot/efi",
+  "recovery_modes": [
+    "network-only"
+  ],
+  "writer_units": [
+    "limine-snapper-sync.service",
+    "limine-snapper-watcher.service",
+    "snapper-timeline.timer",
+    "snapper-cleanup.timer"
+  ],
+  "parkable": [
+    "EFI/Linux/siliconforest-normal-205f5e8b20fc.efi",
+    "m1n1/boot.bin.pre-omacom-50fb"
+  ],
+  "baseline_release": "rc7-m1-network-20261026-r5",
+  "manifest_source_release": "rc7-m1-network-20261026-r5",
+  "boot_chain_packages": [
+    "m1n1-aurora",
+    "uboot-asahi"
+  ],
+  "etc_capture": [
+    "/etc/pacman.conf",
+    "/etc/default/limine",
+    "/etc/limine-entry-tool.conf",
+    "/etc/limine-entry-tool.d",
+    "/etc/default/update-m1n1",
+    "/etc/m1n1.conf",
+    "/etc/mkinitcpio.conf",
+    "/etc/mkinitcpio.conf.d",
+    "/etc/mkinitcpio.d",
+    "/etc/systemd/system",
+    "/etc/pacman.d/hooks",
+    "/etc/boot/hooks"
+  ]
+}

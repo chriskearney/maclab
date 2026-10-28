@@ -1,18 +1,18 @@
 // Package installed checks a Mac's installed release against a frozen,
 // immutable expectation: the "installed-kernel" job mode of an acceptance run.
 //
-// A collector script (collect.py, run on the Mac) reports what is installed and
-// running. Compare merges that observation with the frozen manifest and the
-// frozen installer boot entry into an identity file with explicit checks, and
-// keeps the raw observation alongside, so the checks can be verified
-// independently. OMT and kernel-error comparisons are against the frozen
-// pre-install baseline, never against anything that a later run could replace.
+// lab-agent's collector script (agent/collect.py, run on the Mac) reports
+// what is installed and running. Compare merges that observation with the
+// frozen manifest and the frozen installer boot entry into an identity file
+// with explicit checks, and keeps the raw observation alongside, so the
+// checks can be verified independently. OMT and kernel-error comparisons are
+// against the frozen preinstall references, never against anything that a
+// later run could replace.
 package installed
 
 import (
 	"bufio"
 	"crypto/sha256"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -21,14 +21,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/iconidentify/maclab/internal/agent"
+	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
 )
 
-//go:embed collect.py
-var collector string
-
-// Collector is the observation script for the Mac.
-func Collector() string { return collector }
+// Collector is the observation script for the Mac: lab-agent's own.
+func Collector() string { return agent.IdentityCollector() }
 
 // Phases of an installed-mode job. Before runs on whatever boot is current,
 // booted is the first test on the installed kernel, after the last one.
@@ -45,23 +44,7 @@ func TestName(phase string) string { return "identity-" + phase }
 // its observation to $MACLAB_OUT/observed.json. entryPath is the frozen
 // installer entry's path ("" when freezing it).
 func Script(phase, device, krel, entryPath string, pkgs []string, payload bool) string {
-	q := func(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-	args := []string{"--phase", q(phase), "--device", q(device), "--krel", q(krel), "--job", `"${MACLAB_JOB:-}"`}
-	if entryPath != "" {
-		args = append(args, "--entry-path", q(entryPath))
-	}
-	if len(pkgs) > 0 {
-		args = append(args, "--pkgs", q(strings.Join(pkgs, ",")))
-	}
-	if payload {
-		args = append(args, "--payload")
-	}
-	return "#!/bin/bash\n# maclab installed-mode identity, phase " + phase + " (read only)\nset -u\n" +
-		`out=${MACLAB_OUT:-.}` + "\n" +
-		`py=$(mktemp); trap 'rm -f "$py"' EXIT` + "\n" +
-		"cat > \"$py\" <<'MACLAB_COLLECTOR_EOF'\n" + collector + "MACLAB_COLLECTOR_EOF\n" +
-		`python3 "$py" ` + strings.Join(args, " ") + ` > "$out/observed.json" || exit 1` + "\n" +
-		`python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d["running"]["uname_r"], d["running"]["boot_id"], (d.get("installer_entry") or {}).get("uki_sha256"))' "$out/observed.json"` + "\n"
+	return agent.IdentityScript(api.IdentityCheck{Phase: phase, Device: device, Kernel: krel, EntryPath: entryPath, Packages: pkgs}, payload)
 }
 
 // --- the frozen expectation ---
@@ -351,7 +334,8 @@ type Identity struct {
 	Mismatches           []string        `json:"mismatches"`
 }
 
-// Additions are the only cmdline tokens a lab boot may add to the installer's.
+// Additions are the only cmdline tokens labd adds to the installer's. lab-agent
+// adds its Lab boot parameters on top (agent.IsLabBootParam).
 func Additions(job string, serial bool) []string {
 	a := []string{"maclab.job=" + job, "panic=10"}
 	if serial {
@@ -504,9 +488,10 @@ func Compare(phase string, raw []byte, m *Manifest, manifestSHA string, payload 
 	add(Check{ID: "dt_board", Expected: mac.Board, Observed: o.DT.Board, Match: o.DT.Board == mac.Board}) // hardware: binding in every phase
 	if e != nil {
 		want := strings.Fields(Cmdline(e.CmdlineTokens, o.Job, serial))
-		got := strings.Fields(o.Running.ProcCmdline)
+		observed := strings.Fields(o.Running.ProcCmdline)
+		got := slices.DeleteFunc(slices.Clone(observed), func(f string) bool { return agent.IsLabBootParam(f) && !slices.Contains(want, f) })
 		add(Check{ID: "cmdline", PhaseBinding: "booted|after only",
-			Expected: want, Observed: got,
+			Expected: want, Observed: observed,
 			Detail: map[string]any{"installer": e.CmdlineTokens, "permitted_additions": Additions(o.Job, serial),
 				"unexpected": nz(minus(got, want)), "missing": nz(minus(want, got))},
 			Match: strings.Join(got, " ") == strings.Join(want, " ")})

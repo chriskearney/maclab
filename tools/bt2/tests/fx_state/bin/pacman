@@ -1,0 +1,102 @@
+#!/usr/bin/python3 -IB
+"""Fake pacman for bt2 tests. State = the fake root's local DB ($BT2_TEST_ROOT/var/lib/pacman/local/<n>-<v>/
+{desc,files}), i.e. the same files real pacman reads. Supported: -Q, -Q NAME..., -Qqo PATH..., -Qlq NAME.
+Never touches anything outside $BT2_TEST_ROOT."""
+import os
+import sys
+
+ROOT = os.environ.get('BT2_TEST_ROOT')
+if not ROOT or not os.path.isdir(ROOT) or ROOT.rstrip('/') in ('', '/'):
+    sys.stderr.write('fake pacman: BT2_TEST_ROOT not set to a test root\n')
+    sys.exit(2)
+LOCAL = ROOT + '/var/lib/pacman/local'
+
+
+def sections(text):
+    out, cur = {}, None
+    for line in text.split('\n'):
+        if len(line) > 2 and line.startswith('%') and line.endswith('%'):
+            cur = line
+            out.setdefault(cur, [])
+        elif cur is not None and line:
+            out[cur].append(line)
+    return out
+
+
+def db():
+    pk = {}
+    for d in sorted(os.listdir(LOCAL)):
+        p = os.path.join(LOCAL, d)
+        if not os.path.isdir(p) or os.path.islink(p):
+            continue
+        with open(p + '/desc') as f:
+            desc = sections(f.read())
+        files = []
+        if os.path.exists(p + '/files'):
+            with open(p + '/files') as f:
+                files = sections(f.read()).get('%FILES%', [])
+        pk[desc['%NAME%'][0]] = (desc['%VERSION%'][0], files)
+    return pk
+
+
+def main(argv):
+    if not argv:
+        sys.stderr.write('fake pacman: no operation\n')
+        return 1
+    op, args = argv[0], [a for a in argv[1:] if a != '--']
+    pk = db()
+    if op == '-Q' and not args:
+        for n in sorted(pk):
+            print(n, pk[n][0])
+        return 0
+    if op == '-Q':
+        rc = 0
+        for n in args:
+            if n in pk:
+                print(n, pk[n][0])
+            else:
+                sys.stderr.write("error: package '%s' was not found\n" % n)
+                rc = 1
+        return rc
+    if op == '-Qqo':
+        rc = 0
+        index = {}
+        for n, (_, files) in pk.items():
+            for f in files:
+                index.setdefault(f, []).append(n)
+        for path in args:
+            if not path.startswith('/'):
+                sys.stderr.write("error: failed to find '%s' in PATH\n" % path)
+                rc = 1
+                continue
+            rel = path.lstrip('/')
+            full = ROOT + path
+            if not os.path.lexists(full):
+                sys.stderr.write("error: failed to read file '%s': No such file or directory\n" % path)
+                rc = 1
+                continue
+            if os.path.isdir(full) and not os.path.islink(full) and not rel.endswith('/'):
+                rel += '/'
+            owners = sorted(index.get(rel, []))
+            if owners:
+                for o in owners:
+                    print(o)
+            else:
+                sys.stderr.write('error: No package owns %s\n' % path)
+                rc = 1
+        return rc
+    if op == '-Qlq':
+        rc = 0
+        for n in args:
+            if n not in pk:
+                sys.stderr.write("error: package '%s' was not found\n" % n)
+                rc = 1
+                continue
+            for f in pk[n][1]:
+                print('/' + f)
+        return rc
+    sys.stderr.write('fake pacman: unsupported operation %s\n' % ' '.join(argv))
+    return 1
+
+
+sys.exit(main(sys.argv[1:]))

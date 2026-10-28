@@ -27,9 +27,14 @@ import (
 
 const usage = `lab: run kernels and tests on Omarchy Macs
 
-  lab login <labd-url> <admin-token>
+  lab boot-test --catalog-descriptor PIN --profile ID --request FILE --review-descriptor PIN --out DIR [--compile | --execute --authorization FILE]
+  lab login <labd-url> <your-maintainer-token>
+  lab maintainer add <name> | remove <name> | list   the people with their own labd token
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
+             [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one
+  lab remove <mac>                    end a Mac's enrollment: its device secret stops working at once, and lab-agent
+                                      removes the lab from the Mac at its next check-in (a Volunteer is told)
   lab device <name> [--label ..] [--model ..] [--oob-url http://m3:7780 --oob-token ..] [--no-oob]
   lab baseline <device>               prove the one-shot boot works; required once per Mac
   lab build <github-url> --device <mac> | --config <file>   build a kernel from a repo, branch, commit or PR URL (reused if built before)
@@ -56,13 +61,14 @@ const usage = `lab: run kernels and tests on Omarchy Macs
                                       Refused while someone else leases it or its agent checks in, unless --force
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
   lab installed freeze-entry <device> --release R    freeze the installer's boot entry, after the install
-  lab installed promote <device> --release R --job <id> --accepted-by <who>
+  lab installed promote <device> --release R --job <id>   accepted by you
                                       references + known-good, labd's and the agent's (Mac on that kernel, agent 0.7.3+)
   lab installed status --release R                   the frozen files of a release
   lab reset <device>                  run the recovery ladder on an idle Mac by hand; a Mac that left
                                       (lab-agent uninstall) goes back in the lab first
   lab shell <device>                  shell over the serial link: works with the Mac's network down (Ctrl-] exits)
   lab serial <device> [-n 100] | lab oob <device>
+  lab audit <device>                  labd's copy of a Volunteer's Mac's Audit log: every Maintainer action on it
   lab upload <file>
   lab mcp                             MCP server on stdio, for AI agents
 `
@@ -76,6 +82,8 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
+	case "boot-test":
+		err = bootTest(args)
 	case "login":
 		err = login(args)
 	case "pack":
@@ -148,15 +156,24 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 	case "enroll":
 		label := fs.String("label", "", "where the Mac physically is, for power-cycle instructions")
 		model := fs.String("model", api.ModelLaptop, "laptop or desktop")
+		volunteer := fs.String("volunteer", "", "the Volunteer whose Mac this is (with --contact); none makes a Lab-owned Mac")
+		contact := fs.String("contact", "", "how to reach the Volunteer")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab enroll <name>"); err != nil {
+		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact>]`); err != nil {
 			return err
 		}
-		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model})
+		if (strings.TrimSpace(*volunteer) == "") != (strings.TrimSpace(*contact) == "") {
+			return fmt.Errorf("a Volunteer's Mac needs both --volunteer and --contact")
+		}
+		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model, VolunteerName: *volunteer, Contact: *contact})
 		if err != nil {
 			return err
 		}
-		fmt.Printf("Enrollment token for %s (one use, expires %s):\n\n  %s\n\n", pos[0], t.Expires.Format(time.DateTime), t.Token)
+		kind := "a Lab-owned Mac"
+		if v := strings.TrimSpace(*volunteer); v != "" {
+			kind = "the Volunteer " + v + "'s Mac"
+		}
+		fmt.Printf("Enrollment token for %s, %s (one use, expires %s):\n\n  %s\n\n", pos[0], kind, t.Expires.Format(time.DateTime), t.Token)
 		fmt.Printf("On the Mac, copy lab-agent over and run:\n\n  sudo ./lab-agent setup --server %s --token %s [--gui-user <you>]\n\n", c.URL, t.Token)
 		fmt.Printf("Then: lab baseline %s\n", pos[0])
 		return nil
@@ -189,23 +206,43 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		return showDevice(ctx, c, pos[0])
 
+	case "recovery-mode":
+		mode := fs.String("mode", "", "network-only or serial-assisted")
+		transaction := fs.String("transaction", "", "fresh reviewed transaction identity")
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab recovery-mode <device> --mode MODE --transaction ID"); err != nil {
+			return err
+		}
+		out, err := c.SelectRecoveryMode(ctx, pos[0], api.RecoveryModeRequest{Mode: *mode, Holder: holder(), Transaction: *transaction})
+		if err != nil {
+			return err
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
 	case "baseline":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		noWait := fs.Bool("no-wait", false, "")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab baseline <device>"); err != nil {
 			return err
 		}
-		return submit(ctx, c, api.JobSpec{Device: pos[0], Baseline: true, Holder: holder()}, *noWait)
+		return submit(ctx, c, api.JobSpec{Device: pos[0], Baseline: true, RecoveryMode: *mode, RecoveryTransaction: *transaction, Holder: holder()}, *noWait)
 
 	case "crashtest":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		noWait := fs.Bool("no-wait", false, "")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab crashtest <device>"); err != nil {
 			return err
 		}
-		return submit(ctx, c, api.JobSpec{Device: pos[0], Crash: "panic", Holder: holder()}, *noWait)
+		return submit(ctx, c, api.JobSpec{Device: pos[0], Crash: "panic", RecoveryMode: *mode, RecoveryTransaction: *transaction, Holder: holder()}, *noWait)
 
 	case "run":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		kernel := fs.String("kernel", "", "kernel artifact: a file to upload, or a sha256 already uploaded")
 		cmdline := fs.String("cmdline", "", "extra kernel arguments, appended to the base")
 		runConfig := fs.String("config", "", "with a source URL --kernel: build with this .config (file or uploaded sha256) instead of the Mac's own")
@@ -218,7 +255,13 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		omtAllow := fs.String("omt-allow", "", "omarchy-m-test checks this kernel is expected to fail, comma-separated (hardware.drivers:<compatible> for one unbound node)")
 		publish := fs.Bool("publish", false, "publish the omarchy-m-test report to omarchy-m-testing.org (known-good kernel runs only)")
 		installedMan := fs.String("installed", "", "boot the INSTALLED release through its installer entry and check it against a frozen expected manifest (file or sha256); see `lab installed`")
-		var tests, guiTests, scripts, guiScripts multi
+		mesaMode := fs.String("mesa-mode", api.MesaStaged, "with --mesa-package: staged (a diagnostic of the packages in a private prefix; the desktop keeps the installed Mesa)")
+		mesaOfficial := fs.Bool("mesa-official-gpu", false, "optional reviewed official65 GPU suite after staged native provider checks (requires adapter support)")
+		mesaPublic := fs.String("mesa-signing-public-sha256", "", "with --mesa-official-gpu: actual existing GUI machine-key.pub file SHA256")
+		mesaState := fs.String("mesa-signing-state-home", "", "with --mesa-official-gpu: explicit existing normal XDG_STATE_HOME (never inferred from private job HOME)")
+		mesaBuild := fs.String("mesa-build", "", "with --mesa-package: the package build that produced the packages, for the record")
+		var tests, guiTests, scripts, guiScripts, mesaPkgs multi
+		fs.Var(&mesaPkgs, "mesa-package", "a pinned Mesa split package to test, name=FILE or name=SHA256 (repeatable), e.g. mesa-aurora=mesa-aurora-…pkg.tar.zst")
 		fs.Var(&tests, "test", "builtin test to run (repeatable)")
 		fs.Var(&guiTests, "gui-test", "builtin GUI test to run in the Wayland session (repeatable)")
 		fs.Var(&scripts, "script", "shell script test to upload and run (repeatable)")
@@ -227,7 +270,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if err := need(pos, 1, "lab run <device> [flags]"); err != nil {
 			return err
 		}
-		spec := api.JobSpec{Device: pos[0], Cmdline: *cmdline, BootTimeoutSec: *bootTimeout, Holder: holder(), Publish: *publish}
+		spec := api.JobSpec{Device: pos[0], Cmdline: *cmdline, RecoveryMode: *mode, RecoveryTransaction: *transaction, BootTimeoutSec: *bootTimeout, Holder: holder(), Publish: *publish}
 		spec.OMTAllow = splitAllow(*omtAllow)
 		spec.CmdlineBase = *cmdlineBase
 		spec.CmdlineStrip = strings.FieldsFunc(*cmdlineStrip, func(r rune) bool { return r == ',' || r == ' ' })
@@ -238,6 +281,23 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 				return err
 			}
 			spec.InstalledManifest = sha
+		}
+		if len(mesaPkgs) > 0 {
+			m := &api.MesaSpec{Mode: *mesaMode, Build: *mesaBuild, OfficialGPU: *mesaOfficial, SigningPublicSHA256: *mesaPublic, SigningStateHome: *mesaState}
+			for _, p := range mesaPkgs {
+				name, src, ok := strings.Cut(p, "=")
+				if !ok || name == "" || src == "" {
+					return fmt.Errorf("--mesa-package %q: want name=FILE or name=SHA256", p)
+				}
+				sha, err := artifact(ctx, c, src)
+				if err != nil {
+					return fmt.Errorf("--mesa-package %s: %w", name, err)
+				}
+				m.Packages = append(m.Packages, api.MesaPackage{Name: name, SHA256: sha})
+			}
+			spec.Mesa = m
+		} else if *mesaBuild != "" || *mesaMode != api.MesaStaged || *mesaOfficial || *mesaPublic != "" || *mesaState != "" {
+			return errors.New("--mesa-mode and --mesa-build need at least one --mesa-package")
 		}
 		if *scriptTimeout > 4*time.Hour {
 			return fmt.Errorf("--script-timeout %s: at most 4h", *scriptTimeout)
@@ -352,6 +412,9 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 
 	case "installed":
 		return installedCmd(ctx, c, args)
+
+	case "maintainer":
+		return maintainerCmd(ctx, c, args)
 
 	case "builds":
 		l, err := c.Builds(ctx, 20)
@@ -630,6 +693,31 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		fmt.Print(out)
 		return err
 
+	case "remove":
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab remove <mac>"); err != nil {
+			return err
+		}
+		if err := c.EndEnrollment(ctx, pos[0]); err != nil {
+			return err
+		}
+		fmt.Printf("ended %s's enrollment; its device secret no longer works\n", pos[0])
+		return nil
+
+	case "audit":
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab audit <device>"); err != nil {
+			return err
+		}
+		es, err := c.Audit(ctx, pos[0])
+		if err != nil {
+			return err
+		}
+		for _, e := range es {
+			fmt.Println(e.Line(time.Local))
+		}
+		return nil
+
 	case "oob":
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab oob <device>"); err != nil {
@@ -713,6 +801,9 @@ func printJob(j *api.Job, events bool) {
 	fmt.Printf("job %s on %s: %s\n", j.ID, j.Spec.Device, strings.ToUpper(orDash(j.Outcome, string(j.State))))
 	if j.Summary != "" {
 		fmt.Printf("  %s\n", j.Summary)
+	}
+	if j.Maintainer != "" {
+		fmt.Printf("  submitted by %s\n", j.Maintainer)
 	}
 	if x := j.GateExclusion; x != nil {
 		fmt.Printf("  set aside in lab gate by %s at %s: %s\n", x.By, x.Time.Local().Format(time.DateTime), x.Reason)
@@ -933,8 +1024,16 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 		fmt.Printf("\n>>> %s\n%s\n\n", strings.ToUpper(d.Action.Title), indent(d.Action.Text()))
 	}
 	fmt.Printf("  model:       %s, %s\n", d.Facts.DTModel, orDash(d.Label, "no label"))
+	if d.IsVolunteer() {
+		fmt.Printf("  kind:        Volunteer's Mac: %s, %s\n", d.VolunteerName, d.Contact)
+	} else {
+		fmt.Printf("  kind:        Lab-owned Mac\n")
+	}
+	if !d.SnapshotEligible {
+		fmt.Printf("  installed:   not eligible for Installed runs: @ can't be snapshotted\n")
+	}
 	if d.Volunteer {
-		fmt.Printf("  volunteer:   enrolled with ./volunteer; lab gate counts it only with --volunteers\n")
+		fmt.Printf("  gate:        a Volunteer's Mac: lab gate counts it only with --volunteers\n")
 	}
 	fmt.Printf("  kernel:      %s (known-good: %s)\n", d.Kernel, orDash(d.KnownGood, "no baseline yet"))
 	fmt.Printf("  last seen:   %s, uptime %.0fs, systemd %s\n", ago(d.LastSeen), d.Health.Uptime, d.Health.SystemState)
@@ -995,7 +1094,7 @@ func trunc(s string, n int) string {
 
 func login(args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: lab login <labd-url> <admin-token>")
+		return fmt.Errorf("usage: lab login <labd-url> <your-maintainer-token>")
 	}
 	c := &client.Client{URL: strings.TrimRight(args[0], "/"), Token: args[1]}
 	if err := c.Save(); err != nil {
@@ -1296,7 +1395,6 @@ func installedCmd(ctx context.Context, c *client.Client, args []string) error {
 	release := fs.String("release", "", "release name, e.g. 12.0")
 	approved := fs.String("approved-by", "", "who approved the manifest, comma-separated")
 	job := fs.String("job", "", "the installed job to promote")
-	accepted := fs.String("accepted-by", "", "who accepted it (required)")
 	pos := parse(fs, args[1:])
 	if *release == "" {
 		return errors.New("--release is required")
@@ -1324,10 +1422,10 @@ func installedCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		err = c.Installed(ctx, "POST", *release, "entry/"+pos[0], nil, &out)
 	case "promote":
-		if err := need(pos, 1, "lab installed promote <device> --release R --job <id> --accepted-by <who>"); err != nil {
+		if err := need(pos, 1, "lab installed promote <device> --release R --job <id>"); err != nil {
 			return err
 		}
-		err = c.Installed(ctx, "POST", *release, "promote", map[string]any{"device": pos[0], "job": *job, "accepted_by": *accepted}, &out)
+		err = c.Installed(ctx, "POST", *release, "promote", map[string]any{"device": pos[0], "job": *job}, &out)
 	case "status":
 		err = c.Installed(ctx, "GET", *release, "", nil, &out)
 	default:
@@ -1339,4 +1437,47 @@ func installedCmd(ctx context.Context, c *client.Client, args []string) error {
 	b, _ := json.MarshalIndent(out, "", "  ")
 	fmt.Println(string(b))
 	return nil
+}
+
+// maintainerCmd handles `lab maintainer ...`: the people with their own labd
+// token. labd logs each change under the Maintainer who made it.
+func maintainerCmd(ctx context.Context, c *client.Client, args []string) error {
+	const use = "lab maintainer add <name> | remove <name> | list"
+	if len(args) < 1 {
+		return errors.New(use)
+	}
+	switch args[0] {
+	case "add":
+		if err := need(args[1:], 1, "lab maintainer add <name>"); err != nil {
+			return err
+		}
+		m, err := c.AddMaintainer(ctx, args[1])
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Token for %s (shown only this once; labd keeps only its hash):\n\n  %s\n\n", m.Name, m.Token)
+		fmt.Printf("They log in with:\n\n  lab login %s <token>\n", c.URL)
+		return nil
+	case "remove":
+		if err := need(args[1:], 1, "lab maintainer remove <name>"); err != nil {
+			return err
+		}
+		if err := c.RemoveMaintainer(ctx, args[1]); err != nil {
+			return err
+		}
+		fmt.Printf("removed %s; their token no longer works\n", args[1])
+		return nil
+	case "list":
+		ms, err := c.Maintainers(ctx)
+		if err != nil {
+			return err
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+		fmt.Fprintln(w, "MAINTAINER\tADDED\tBY")
+		for _, m := range ms {
+			fmt.Fprintf(w, "%s\t%s\t%s\n", m.Name, m.Added.Format(time.DateOnly), orDash(m.AddedBy, "-"))
+		}
+		return w.Flush()
+	}
+	return errors.New(use)
 }

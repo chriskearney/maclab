@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 )
 
 var gcMu sync.Mutex
@@ -27,6 +28,25 @@ func (s *Server) gcLoop() {
 	}
 }
 
+// pinRows marks every sha256 a one-column query returns as kept and pinned.
+// Any query, scan or iteration error is returned, so the GC can stop.
+func (s *Server) pinRows(query string, keep, pinned map[string]bool) error {
+	rows, err := s.store.db.Query(query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sha string
+		if err := rows.Scan(&sha); err != nil {
+			return err
+		}
+		keep[sha] = true
+		pinned[sha] = true
+	}
+	return rows.Err()
+}
+
 // gcArtifacts keeps the artifact store bounded. Anything a recent job, a
 // recent build or a device config refers to is kept; everything else is
 // deleted once it is a day old. If the store is still over budget, the
@@ -39,11 +59,27 @@ func (s *Server) gcArtifacts() {
 	if budget <= 0 {
 		budget = 20 << 30
 	}
-	pinned := map[string]bool{} // never deleted: unfinished work
-	keep := map[string]bool{}   // deleted only when over budget
-	jobs, _ := s.store.jobs("", 300, false)
-	for _, j := range jobs {
-		refs := []string{j.Spec.Kernel}
+	pinned := map[string]bool{mesa.GLProbeSHA: true, mesa.VKProbeSHA: true, mesa.OfficialArchiveSHA: true} // immutable bootstrap assets
+	keep := map[string]bool{}                                                                              // deleted only when over budget
+	// The references decide what may be deleted, so a reference that cannot
+	// be read stops this pass: nothing is deleted on an incomplete picture.
+	skip := func(what string, err error) {
+		s.log.Printf("artifact gc: skipped, cannot read %s: %v (nothing deleted)", what, err)
+	}
+	jobs, err := s.store.jobs("", 300, false)
+	if err != nil {
+		skip("recent jobs", err)
+		return
+	}
+	// Unfinished work is pinned however old it is: the recent window above
+	// must never decide whether a queued job still has its artifacts.
+	open, err := s.store.jobs("", -1, true)
+	if err != nil {
+		skip("unfinished jobs", err)
+		return
+	}
+	for _, j := range append(jobs, open...) {
+		refs := append([]string{j.Spec.Kernel}, mesaRefs(j.Spec)...)
 		for _, t := range j.Spec.Tests {
 			refs = append(refs, t.Script)
 		}
@@ -57,7 +93,11 @@ func (s *Server) gcArtifacts() {
 			}
 		}
 	}
-	builds, _ := s.store.builds(`1=1 ORDER BY created DESC LIMIT 200`)
+	builds, err := s.store.builds(`1=1 ORDER BY created DESC LIMIT 200`)
+	if err != nil {
+		skip("builds", err)
+		return
+	}
 	for i, b := range builds {
 		if b.ConfigSHA != "" {
 			keep[b.ConfigSHA] = true
@@ -80,25 +120,14 @@ func (s *Server) gcArtifacts() {
 	}
 	// A package recipe is small and is the only record of what a release was
 	// built from, so it stays for as long as any build refers to it.
-	if rows, err := s.store.db.Query(`SELECT DISTINCT json_extract(data, '$.recipe') FROM builds
-		WHERE json_extract(data, '$.recipe') != ''`); err == nil {
-		for rows.Next() {
-			var sha string
-			rows.Scan(&sha)
-			keep[sha] = true
-			pinned[sha] = true
+	for _, q := range []struct{ what, sql string }{
+		{"build recipes", `SELECT DISTINCT json_extract(data, '$.recipe') FROM builds WHERE json_extract(data, '$.recipe') != ''`},
+		{"device configs", `SELECT sha FROM configs`},
+	} {
+		if err := s.pinRows(q.sql, keep, pinned); err != nil {
+			skip(q.what, err)
+			return
 		}
-		rows.Close()
-	}
-	rows, _ := s.store.db.Query(`SELECT sha FROM configs`)
-	if rows != nil {
-		for rows.Next() {
-			var sha string
-			rows.Scan(&sha)
-			keep[sha] = true
-			pinned[sha] = true
-		}
-		rows.Close()
 	}
 
 	type art struct {
@@ -135,7 +164,7 @@ func (s *Server) gcArtifacts() {
 		}
 	}
 	for _, a := range all {
-		if !keep[a.sha] && time.Since(a.mod) > 24*time.Hour {
+		if !keep[a.sha] && !pinned[a.sha] && time.Since(a.mod) > 24*time.Hour {
 			remove(a)
 		}
 	}

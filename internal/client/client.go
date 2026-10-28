@@ -1,4 +1,4 @@
-// Package client is the Go client for labd's admin API, used by the lab CLI and MCP server.
+// Package client is the Go client for labd's Maintainer API, used by the lab CLI and MCP server.
 package client
 
 import (
@@ -43,7 +43,7 @@ func Load() (*Client, error) {
 		c.Token = v
 	}
 	if c.URL == "" || c.Token == "" {
-		return nil, fmt.Errorf("not configured: run `lab login <labd-url> <admin-token>` or set MACLAB_URL and MACLAB_TOKEN")
+		return nil, fmt.Errorf("not configured: run `lab login <labd-url> <your-maintainer-token>` or set MACLAB_URL and MACLAB_TOKEN")
 	}
 	c.URL = strings.TrimRight(c.URL, "/")
 	c.http = &http.Client{}
@@ -126,6 +126,26 @@ func (c *Client) EnrollToken(ctx context.Context, req api.EnrollTokenRequest) (*
 	return &out, c.do(ctx, "POST", "/api/enroll-tokens", jsonBody(req), &out)
 }
 
+func (c *Client) Maintainers(ctx context.Context) ([]api.Maintainer, error) {
+	var out []api.Maintainer
+	return out, c.do(ctx, "GET", "/api/maintainers", nil, &out)
+}
+
+// AddMaintainer returns the new Maintainer's token, which labd shows only this once.
+func (c *Client) AddMaintainer(ctx context.Context, name string) (*api.NewMaintainer, error) {
+	var out api.NewMaintainer
+	return &out, c.do(ctx, "POST", "/api/maintainers", jsonBody(api.MaintainerRequest{Name: name}), &out)
+}
+
+func (c *Client) RemoveMaintainer(ctx context.Context, name string) error {
+	return c.do(ctx, "DELETE", "/api/maintainers/"+url.PathEscape(name), nil, nil)
+}
+
+// EndEnrollment ends a Mac's enrollment: labd forgets it and revokes its device secret at once.
+func (c *Client) EndEnrollment(ctx context.Context, name string) error {
+	return c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/end-enrollment", nil, nil)
+}
+
 func (c *Client) Lease(ctx context.Context, name, holder string, ttl time.Duration) (*api.Lease, error) {
 	var out api.Lease
 	return &out, c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/lease", jsonBody(api.LeaseRequest{Holder: holder, TTLSec: int(ttl.Seconds())}), &out)
@@ -154,6 +174,12 @@ func (c *Client) Reset(ctx context.Context, name, by string) (string, error) {
 func (c *Client) Serial(ctx context.Context, name string, lines int) (string, error) {
 	var out string
 	return out, c.do(ctx, "GET", fmt.Sprintf("/api/devices/%s/serial?lines=%d", url.PathEscape(name), lines), nil, &out)
+}
+
+// Audit is labd's copy of a Volunteer Mac's Audit log.
+func (c *Client) Audit(ctx context.Context, name string) ([]api.AuditEntry, error) {
+	var out []api.AuditEntry
+	return out, c.do(ctx, "GET", "/api/devices/"+url.PathEscape(name)+"/audit", nil, &out)
 }
 
 func (c *Client) OOBStatus(ctx context.Context, name string) (map[string]any, error) {
@@ -187,8 +213,39 @@ func (c *Client) Upload(ctx context.Context, path string) (string, error) {
 }
 
 func (c *Client) Submit(ctx context.Context, spec api.JobSpec) (*api.Job, error) {
+	if err := c.requireRecoveryMode(ctx, spec.RecoveryMode); err != nil {
+		return nil, err
+	}
+	if spec.RecoveryTransaction != "" {
+		var caps api.RecoveryCapabilities
+		if e := c.do(ctx, "GET", "/api/recovery", nil, &caps); e != nil || !caps.TransactionIsolation {
+			return nil, fmt.Errorf("controller lacks transaction recovery isolation; no job submitted")
+		}
+	}
 	var out api.Job
-	return &out, c.do(ctx, "POST", "/api/jobs", jsonBody(spec), &out)
+	if spec.Mesa != nil {
+		var caps api.MesaCapabilities
+		if err := c.do(ctx, "GET", "/api/mesa", nil, &caps); err != nil {
+			return nil, fmt.Errorf("controller does not support first-class Mesa; no job submitted: %w", err)
+		}
+		if caps.Schema != 1 || !caps.Staged || (spec.Mesa.OfficialGPU && !caps.OfficialGPU) {
+			return nil, fmt.Errorf("controller Mesa capability/mode unavailable; no job submitted")
+		}
+	}
+	route := "/api/jobs"
+	if spec.Mesa != nil {
+		route = "/api/mesa/jobs"
+	}
+	if err := c.do(ctx, "POST", route, jsonBody(spec), &out); err != nil {
+		return nil, err
+	}
+	if out.Spec.RecoveryMode != spec.RecoveryMode || out.Spec.RecoveryTransaction != spec.RecoveryTransaction {
+		return &out, fmt.Errorf("job %s returned different recovery_mode; do not retry blindly", out.ID)
+	}
+	if spec.Mesa != nil && out.Spec.Mesa == nil {
+		return nil, fmt.Errorf("controller omitted Mesa request identity; job is not valid Mesa evidence")
+	}
+	return &out, nil
 }
 
 func (c *Client) Job(ctx context.Context, id string) (*api.Job, error) {
@@ -365,7 +422,7 @@ func (c *Client) BuildFile(ctx context.Context, id, name, dst string) (string, e
 	return hex.EncodeToString(h.Sum(nil)), os.Rename(dst+".part", dst)
 }
 
-// Installed sends one of the installed-release admin requests
+// Installed sends one of the installed-release Maintainer requests
 // (/api/installed/<release>[/<what>]) and decodes the reply into out.
 func (c *Client) Installed(ctx context.Context, method, release, what string, body, out any) error {
 	var r io.Reader

@@ -169,7 +169,7 @@ func routeBack(ctx context.Context, route bool, logf func(string, ...any)) error
 		case time.Since(t1) > suspendNetWait:
 			return fmt.Errorf("no default route %s after resuming (it was up before suspending)", suspendNetWait)
 		}
-		sleepCtx(ctx, suspendPoll)
+		sleepCtx(ctx, WallClock, suspendPoll)
 	}
 	logf("default route back %.0fs after resuming", time.Since(t1).Seconds())
 	return nil
@@ -236,7 +236,7 @@ func pmTestDevices(ctx, tidy context.Context, gui, prev string, before int, quie
 		case ctx.Err() != nil:
 			why = fmt.Errorf("no suspend cycle ended before the test stopped (%w)", ctx.Err())
 		default:
-			sleepCtx(ctx, suspendPoll)
+			sleepCtx(ctx, WallClock, suspendPoll)
 			continue
 		}
 		jobs, cerr := cancelSleepJobs(tidy)
@@ -282,7 +282,7 @@ func restorePMTest(ctx context.Context, prev string, logf func(string, ...any)) 
 			logf("left pm_test at devices: %s", pending)
 			return fmt.Errorf("left pm_test at devices, so that a later suspend isn't a real one: %s, %s", waited, pending)
 		}
-		sleepCtx(ctx, suspendPoll)
+		sleepCtx(ctx, WallClock, suspendPoll)
 	}
 	if err := os.WriteFile(pmTestPath, []byte(prev), 0o644); err != nil {
 		return fmt.Errorf("restoring pm_test=%s: %w", prev, err)
