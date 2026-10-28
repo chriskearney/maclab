@@ -1083,6 +1083,40 @@ class NativeTests(unittest.TestCase):
                          (pkgs.KREL7, boot, '/var/tmp/sf-rc-normal-session-' + 'f' * 16))
         self.assertEqual(m['providers'], inp['providers'])
 
+    def test_worker_cmdline_accepts_only_agent_generated_additions(self):
+        check = self.worker()['installed_cmdline']
+        job = 'j1028-082251-7b2c'
+        base = ['root=UUID=x', 'rw', 'quiet']
+        added = ['maclab.job=' + job, 'panic=10']
+        consoles = ['console=ttySAC0,115200', 'console=tty0', 'loglevel=7']
+        for serial in (False, True):
+            prefix = base + added + (consoles if serial else [])
+            for timeout in ('120', '240'):
+                modern = prefix + ['watchdog.open_timeout=' + timeout, 'maclab.lab_boot=1']
+                self.assertEqual(check(modern, base, job), serial)
+            bad_tails = [
+                ['watchdog.open_timeout=120'], ['maclab.lab_boot=1'],
+                ['watchdog.open_timeout=120', 'maclab.lab_boot=0'],
+                ['watchdog.open_timeout=-1', 'maclab.lab_boot=1'],
+                ['watchdog.open_timeout=1.5', 'maclab.lab_boot=1'],
+                ['watchdog.open_timeout=', 'maclab.lab_boot=1'],
+                ['maclab.lab_boot=1', 'watchdog.open_timeout=120'],
+                ['watchdog.open_timeout=120', 'maclab.lab_boot=1', 'maclab.lab_boot=1'],
+                ['watchdog.open_timeout=120', 'watchdog.open_timeout=120', 'maclab.lab_boot=1'],
+                ['watchdog.open_timeout=120', 'maclab.lab_boot=1', 'extra'],
+            ]
+            for tail in bad_tails:
+                with self.subTest(serial=serial, tail=tail), self.assertRaises(RuntimeError):
+                    check(prefix + tail, base, job)
+        inherited = base + ['watchdog.open_timeout=77']
+        actual = inherited + added + ['maclab.lab_boot=1']
+        self.assertFalse(check(actual, inherited, job))
+        with self.assertRaises(RuntimeError):
+            check(base + ['watchdog.open_timeout=78'] + added + ['maclab.lab_boot=1'], inherited, job)
+        for changed in (['root=UUID=other'] + actual[1:], actual + ['maclab.job=other']):
+            with self.assertRaises(RuntimeError):
+                check(changed, inherited, job)
+
     def test_checker_pins_and_cohort_gate(self):
         ck = self.src['checker']
         pins = native.checker_pins(ck)                  # since r3 only the reference cohort (template/tests)
