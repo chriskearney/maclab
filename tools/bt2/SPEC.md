@@ -154,3 +154,11 @@ Default path unchanged: a candidate set that changes m1n1/boot.bin is refused. W
 - bootbin-guard-remove before rollback (also first in `restore`): stop hook, one more CAS restore, unit files out.
 - stage2-final after the ordinary reboot (and restore-stage2-final in `restore`, before audit): live stage 2 and
   boot.bin are the captured originals.
+
+## Off-target capture carrier
+
+The complete `capture/` and `receipts/` trees travel as `bt2-capture.tar.gz`.
+The controller verifies its SHA256 and size, and the M5 fsync/reopen verification
+retains it as `capture.tar.gz`. Compression changes the transport representation;
+the original files, metadata and on-Mac capture tree remain intact. Standard
+`tar -xzf capture.tar.gz` opens the independently retained recovery copy.

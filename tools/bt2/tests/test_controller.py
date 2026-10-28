@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tarfile
 import types
 import unittest
 from pathlib import Path
@@ -217,7 +218,7 @@ class ControllerTests(unittest.TestCase):
         calls = [json.loads(x) for x in (rd / 'labd-calls.jsonl').read_text().splitlines()]
         self.assertIn('submit', [c['call'] for c in calls])
         m5 = e.m5.roots['bt2-' + e.rid]
-        self.assertTrue({'capture.tar', 'capture-state.json', 'capture-result.json'} <= set(m5))
+        self.assertTrue({'capture.tar.gz', 'capture-state.json', 'capture-result.json'} <= set(m5))
         self.assertTrue(any(n.startswith('run-result-') for n in m5))
         self.assertEqual(json.loads((rd / 'RESULT.json').read_bytes())['job']['outcome'], 'pass')
 
@@ -1197,6 +1198,36 @@ class NativeTests(unittest.TestCase):
         exec(compile(self.src['checker'], 'checker', 'exec'), checker.__dict__)
         self.assertIs(checker.frozen_manifest(m), m)            # r3 accepts the generic manifest and binds 7c
         self.assertEqual(checker.PROVIDERS, pins['providers'])
+
+
+class CaptureArchiveTests(unittest.TestCase):
+    def test_gzip_capture_preserves_data_metadata_and_receipts(self):
+        with tempfile.TemporaryDirectory(dir=SCRATCH) as root:
+            root = Path(root)
+            (root / 'capture/nested').mkdir(parents=True)
+            (root / 'receipts').mkdir()
+            data = b'full recovery bytes\0' * 50000
+            p = root / 'capture/nested/boot.bin'
+            p.write_bytes(data)
+            p.chmod(0o640)
+            (root / 'capture/link').symlink_to('nested/boot.bin')
+            receipt = b'{"changed":false}\n'
+            (root / 'receipts/capture.1.json').write_bytes(receipt)
+            args = {'run_dir': str(root), 'name': 'bt2-capture.tar.gz'}
+            out = subprocess.check_output([sys.executable, '-I', '-B', '-c',
+                                           controller.SNIPPETS['tar'], json.dumps(args)])
+            result = json.loads(out)
+            archive = root / args['name']
+            self.assertEqual(result['sha256'], H(archive.read_bytes()))
+            self.assertEqual(result['bytes'], archive.stat().st_size)
+            self.assertEqual(result['receipts'], {'capture.1.json': H(receipt)})
+            self.assertLess(result['bytes'], len(data) // 4)
+            with tarfile.open(archive, 'r:gz') as tar:
+                self.assertEqual(tar.extractfile('capture/nested/boot.bin').read(), data)
+                self.assertEqual(tar.getmember('capture/nested/boot.bin').mode, 0o640)
+                self.assertEqual(tar.getmember('capture/link').linkname, 'nested/boot.bin')
+                self.assertEqual(tar.extractfile('receipts/capture.1.json').read(), receipt)
+            self.assertEqual(p.read_bytes(), data)
 
 
 class PlanTests(unittest.TestCase):

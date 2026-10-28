@@ -434,7 +434,7 @@ import hashlib,json,os,subprocess,sys
 a=json.loads(sys.argv[1]);run=a['run_dir'];out=run+'/'+a['name']
 assert os.path.isdir(run+'/capture'),'no capture dir'
 assert not os.path.lexists(out),'tarball exists'
-r=subprocess.run(['/usr/bin/tar','--sort=name','--numeric-owner','--format=gnu','-C',run,'-cf',out,'capture','receipts'],capture_output=True,timeout=1500,env={'PATH':'/usr/bin:/bin','LC_ALL':'C'})
+r=subprocess.run(['/usr/bin/tar','--sort=name','--numeric-owner','--format=gnu','-C',run,'-czf',out,'capture','receipts'],capture_output=True,timeout=1500,env={'PATH':'/usr/bin:/bin','LC_ALL':'C'})
 assert r.returncode==0,'tar failed: '+r.stderr.decode(errors='replace')[-400:]
 os.chmod(out,0o600);h=hashlib.sha256();n=0
 with open(out,'rb') as f:
@@ -1140,19 +1140,19 @@ class Controller:
         for o in self.cfg['originals']:
             got = ((st.get('packages') or {}).get(o['name']) or {}).get('version', o['version'])
             check(got == o['version'], 'capture %s version %r != original %r' % (o['name'], got, o['version']))
-        t = self.snippet('tar', {'run_dir': self.rrun, 'name': 'bt2-capture.tar'}, 1800)
+        t = self.snippet('tar', {'run_dir': self.rrun, 'name': 'bt2-capture.tar.gz'}, 1800)
         tar = self.ops.pull(t['path'])
         check(H(tar) == t['sha256'] and len(tar) == t['bytes'], 'capture tarball pull mismatch')
-        # The tarball is ESP-sized. The controller disk is nearly full and gives EIO on big writes, so the
-        # tarball stays in memory for the M5 copy; the Mac keeps capture/ and only the hash is written here.
-        self.save_local('capture/bt2-capture.tar.json', canon({'sha256': t['sha256'], 'bytes': t['bytes'],
+        # Keep the complete capture compressed for slow agent links. It stays in memory
+        # until the fsynced M5 copy; the Mac retains the original capture/ tree.
+        self.save_local('capture/bt2-capture.tar.gz.json', canon({'sha256': t['sha256'], 'bytes': t['bytes'],
                                                                 'mac_path': t['path']}))
         for name, sha in sorted((t.get('receipts') or {}).items()):
             check(re.fullmatch(r'[A-Za-z0-9._-]{1,120}', name) is not None, 'odd receipt name')
             data = self.ops.pull(self.rrun + '/receipts/' + name, limit=1 << 20)
             check(H(data) == sha, 'receipt %s pull mismatch' % name)
             self.save_local('receipts/' + name, data)
-        self.capture_blobs = {'capture-state.json': state, 'capture.tar': tar,
+        self.capture_blobs = {'capture-state.json': state, 'capture.tar.gz': tar,
                               'capture-result.json': canon(cap)}
         return {'state_sha256': H(state), 'tar_sha256': t['sha256'], 'tar_bytes': t['bytes'],
                 'receipts': sorted(t.get('receipts') or {})}
