@@ -88,7 +88,6 @@ func TestReviewGCReferenceReadFailureMustNotDelete(t *testing.T) {
 	l := newLab(t, false)
 	sha := l.artifact("only copy of a package whose references are temporarily unreadable")
 	old := time.Now().Add(-48 * time.Hour)
-	os.Chtimes(l.s.artifactPath(sha), old, old)
 	j := &api.Job{ID: "j-review-active-db-failure", State: api.JobQueued, Created: old, Updated: old, Spec: api.JobSpec{Device: l.name, Mesa: &api.MesaSpec{Mode: api.MesaStaged, Packages: []api.MesaPackage{{Name: "mesa-aurora", SHA256: sha}}}}}
 	if e := l.s.store.saveJob(j); e != nil {
 		t.Fatal(e)
@@ -97,7 +96,17 @@ func TestReviewGCReferenceReadFailureMustNotDelete(t *testing.T) {
 	if e := l.s.store.db.Close(); e != nil {
 		t.Fatal(e)
 	}
-	l.s.cfg.ArtifactBudget = 1
+	// The startup GC may have read an empty catalog before this fixture was
+	// saved. Let that pass finish while the object is still fresh; only then
+	// make it old. The pass under test must read the now-unavailable catalog.
+	func() {
+		gcMu.Lock()
+		defer gcMu.Unlock()
+		if err := os.Chtimes(l.s.artifactPath(sha), old, old); err != nil {
+			t.Fatal(err)
+		}
+		l.s.cfg.ArtifactBudget = 1
+	}()
 	l.s.gcArtifacts()
 	if _, e := os.Stat(l.s.artifactPath(sha)); e != nil {
 		t.Fatalf("GC deleted content despite failing reference query: %v", e)
