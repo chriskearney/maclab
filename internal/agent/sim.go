@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 )
 
 // Sim is a pretend Mac. A kernel artifact for it is a text file such as
@@ -37,6 +38,7 @@ import (
 // it is back. A test named hang-* goes silent for HangFor, and then a
 // watchdog resets the Mac, as hang-in-test does.
 type Sim struct {
+	mesaSpecs   map[string]api.MesaSpec
 	RebootDelay time.Duration
 	OnBoot      func() // called when the machine goes down, like a dropped connection
 	Model       string
@@ -647,6 +649,9 @@ func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fet
 			return api.TestResult{Name: t.Name, Error: "machine went away"}
 		}
 	}
+	if t.Builtin == "mesa-provider" {
+		return s.simMesaProvider(job, t)
+	}
 	if t.Builtin == "omarchy-m-test" {
 		return s.omtReport(t, outDir, b)
 	}
@@ -769,10 +774,12 @@ func (s *Sim) Cleanup(job string, all bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if all {
+		s.mesaSpecs = map[string]api.MesaSpec{}
 		s.staged = map[string]simEntry{}
 		s.armed = ""
 	} else {
 		delete(s.staged, job)
+		delete(s.mesaSpecs, job)
 	}
 	return nil
 }
@@ -868,4 +875,30 @@ func (s *Sim) SetKnownGoodHook(f func(kernel string) error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.KnownGoodHook = f
+}
+
+// Simulated evidence is explicit and never a device/provider qualification.
+func (s *Sim) StageMesa(ctx context.Context, job string, a api.MesaStageArgs, fetch Fetcher) (api.MesaStageResult, error) {
+	boot, k, cmd := s.Identity()
+	if boot != a.BootID || k != a.Kernel || jobTag(cmd) != job || mesa.Sum([]byte(cmd+"\n")) != a.CmdlineSHA256 || a.Spec.Mode != api.MesaStaged || a.Spec.OfficialGPU {
+		return api.MesaStageResult{}, fmt.Errorf("sim Mesa job identity/mode mismatch")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.mesaSpecs == nil {
+		s.mesaSpecs = map[string]api.MesaSpec{}
+	}
+	s.mesaSpecs[job] = a.Spec
+	return api.MesaStageResult{ManifestSHA256: mesa.Sum(mesa.JSON(a.Spec)), Prefix: "/sim/mesa/" + job}, nil
+}
+func (s *Sim) simMesaProvider(job string, t api.TestSpec) api.TestResult {
+	boot, k, _ := s.Identity()
+	s.mu.Lock()
+	spec, ok := s.mesaSpecs[job]
+	s.mu.Unlock()
+	if !ok {
+		return api.TestResult{Name: t.Name, ExitCode: -1, Error: "sim Mesa not staged"}
+	}
+	m := &api.MesaResult{Mode: api.MesaStaged, Semantics: mesa.Semantics, Job: job, BootID: boot, Kernel: k, ManifestSHA256: mesa.Sum(mesa.JSON(spec)), CleanupVerified: true, Simulated: true, Packages: append([]api.MesaPackage{}, spec.Packages...), Provider: map[string]string{"gl": "NATIVE_STAGED", "vulkan": "NATIVE_STAGED"}, Verdict: "PASS"}
+	return api.TestResult{Name: t.Name, Passed: true, ExitCode: 0, Seconds: .01, Mesa: m, Tail: "SIMULATED staged Mesa provider (not hardware evidence)"}
 }

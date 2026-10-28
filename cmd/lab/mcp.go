@@ -58,30 +58,34 @@ func serveMCP(ctx context.Context) error {
 		})
 
 	type runArg struct {
-		Device            string   `json:"device"`
-		Source            string   `json:"source,omitempty" jsonschema:"build and boot this: a GitHub URL of a repo, branch (/tree/...), commit or pull request, or git URL#ref. Built with the Mac's own config; reused if built before"`
-		KernelPath        string   `json:"kernel_path,omitempty" jsonschema:"local path of a kernel artifact to upload; omit to reboot on the current kernel"`
-		KernelSHA256      string   `json:"kernel_sha256,omitempty" jsonschema:"sha256 of an artifact already uploaded"`
-		BuildID           string   `json:"build_id,omitempty" jsonschema:"boot the kernel of a finished build, e.g. the linux package of a lab_package build"`
-		Cmdline           string   `json:"cmdline,omitempty" jsonschema:"extra kernel command line arguments, appended to the base"`
-		CmdlineBase       string   `json:"cmdline_base,omitempty" jsonschema:"cmdline the test boot starts from: known-good (default), default (the distro's stock KERNEL_CMDLINE[default]), or a literal cmdline with root="`
-		CmdlineStrip      []string `json:"cmdline_strip,omitempty" jsonschema:"globs of base parameters to drop, e.g. asahi.* apple_t6030_display.*"`
-		VerboseBoot       bool     `json:"verbose_boot,omitempty" jsonschema:"boot with loglevel=7 and without quiet/splash; by default a test boot keeps the Mac's own (always verbose with a serial console)"`
-		InstalledManifest string   `json:"installed_manifest,omitempty" jsonschema:"sha256 of a frozen expected manifest: boot the INSTALLED release through its installer entry, check identity, compare with the frozen pre-install baseline, never promote (needs a lease)"`
-		Tests             []string `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal, suspend-devices"`
-		GUITests          []string `json:"gui_tests,omitempty" jsonschema:"builtin tests to run inside the GUI user's Hyprland session: gui-smoke, gui-terminal"`
-		Scripts           []string `json:"scripts,omitempty" jsonschema:"local paths of shell scripts to run as tests (as root); write outputs to $MACLAB_OUT"`
-		GUIScripts        []string `json:"gui_scripts,omitempty" jsonschema:"local paths of shell scripts to run in the Wayland session"`
-		BootTimeoutSec    int      `json:"boot_timeout_sec,omitempty"`
-		ScriptTimeoutSec  int      `json:"script_timeout_sec,omitempty" jsonschema:"time each script test may run (default 300, at most 14400), e.g. 5400 for a hands-on session that waits for a person"`
-		OMTAllow          []string `json:"omt_allow,omitempty" jsonschema:"omarchy-m-test checks this kernel is expected to fail; hardware.drivers:<compatible> allows one unbound node"`
-		Publish           bool     `json:"publish,omitempty" jsonschema:"publish the omarchy-m-test report to omarchy-m-testing.org; only runs on the Mac's known-good kernel qualify"`
-		WaitSec           int      `json:"wait_sec,omitempty" jsonschema:"wait up to this long for the result (max 900); 0 returns once queued"`
+		Mesa              *api.MesaSpec `json:"mesa,omitempty" jsonschema:"optional first-class staged Mesa job: mode staged, exact split package artifact hashes; automatic provider probe; installed mode refused"`
+		Device            string        `json:"device"`
+		Source            string        `json:"source,omitempty" jsonschema:"build and boot this: a GitHub URL of a repo, branch (/tree/...), commit or pull request, or git URL#ref. Built with the Mac's own config; reused if built before"`
+		KernelPath        string        `json:"kernel_path,omitempty" jsonschema:"local path of a kernel artifact to upload; omit to reboot on the current kernel"`
+		KernelSHA256      string        `json:"kernel_sha256,omitempty" jsonschema:"sha256 of an artifact already uploaded"`
+		BuildID           string        `json:"build_id,omitempty" jsonschema:"boot the kernel of a finished build, e.g. the linux package of a lab_package build"`
+		Cmdline           string        `json:"cmdline,omitempty" jsonschema:"extra kernel command line arguments, appended to the base"`
+		CmdlineBase       string        `json:"cmdline_base,omitempty" jsonschema:"cmdline the test boot starts from: known-good (default), default (the distro's stock KERNEL_CMDLINE[default]), or a literal cmdline with root="`
+		CmdlineStrip      []string      `json:"cmdline_strip,omitempty" jsonschema:"globs of base parameters to drop, e.g. asahi.* apple_t6030_display.*"`
+		VerboseBoot       bool          `json:"verbose_boot,omitempty" jsonschema:"boot with loglevel=7 and without quiet/splash; by default a test boot keeps the Mac's own (always verbose with a serial console)"`
+		InstalledManifest string        `json:"installed_manifest,omitempty" jsonschema:"sha256 of a frozen expected manifest: boot the INSTALLED release through its installer entry, check identity, compare with the frozen pre-install baseline, never promote (needs a lease)"`
+		Tests             []string      `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal, suspend-devices"`
+		GUITests          []string      `json:"gui_tests,omitempty" jsonschema:"builtin tests to run inside the GUI user's Hyprland session: gui-smoke, gui-terminal"`
+		Scripts           []string      `json:"scripts,omitempty" jsonschema:"local paths of shell scripts to run as tests (as root); write outputs to $MACLAB_OUT"`
+		GUIScripts        []string      `json:"gui_scripts,omitempty" jsonschema:"local paths of shell scripts to run in the Wayland session"`
+		BootTimeoutSec    int           `json:"boot_timeout_sec,omitempty"`
+		ScriptTimeoutSec  int           `json:"script_timeout_sec,omitempty" jsonschema:"time each script test may run (default 300, at most 14400), e.g. 5400 for a hands-on session that waits for a person"`
+		OMTAllow          []string      `json:"omt_allow,omitempty" jsonschema:"omarchy-m-test checks this kernel is expected to fail; hardware.drivers:<compatible> allows one unbound node"`
+		Publish           bool          `json:"publish,omitempty" jsonschema:"publish the omarchy-m-test report to omarchy-m-testing.org; only runs on the Mac's known-good kernel qualify"`
+		WaitSec           int           `json:"wait_sec,omitempty" jsonschema:"wait up to this long for the result (max 900); 0 returns once queued"`
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "lab_run", Description: "Boot a kernel on a Mac once and run tests. Give source (a GitHub URL) to build it first, or a kernel artifact. Returns the job; use lab_wait for the result."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a runArg) (*mcp.CallToolResult, any, error) {
 			spec := api.JobSpec{Device: a.Device, Kernel: a.KernelSHA256, Source: a.Source, Cmdline: a.Cmdline, BootTimeoutSec: a.BootTimeoutSec, Holder: who, Publish: a.Publish, OMTAllow: a.OMTAllow,
-				CmdlineBase: a.CmdlineBase, CmdlineStrip: a.CmdlineStrip, VerboseBoot: a.VerboseBoot, InstalledManifest: a.InstalledManifest}
+				CmdlineBase: a.CmdlineBase, CmdlineStrip: a.CmdlineStrip, VerboseBoot: a.VerboseBoot, InstalledManifest: a.InstalledManifest, Mesa: a.Mesa}
+			if spec.Mesa != nil && spec.Mesa.Mode == "" {
+				spec.Mesa.Mode = api.MesaStaged
+			}
 			if a.KernelPath != "" {
 				sha, err := c.Upload(ctx, a.KernelPath)
 				if err != nil {

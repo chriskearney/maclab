@@ -13,6 +13,7 @@ import (
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
 	"github.com/iconidentify/maclab/internal/installed"
+	"github.com/iconidentify/maclab/internal/mesa"
 	"github.com/iconidentify/maclab/internal/window"
 )
 
@@ -30,7 +31,8 @@ type jobRun struct {
 	armedBoot string    // the boot that was running when this job armed its one-shot and rebooted
 	armedAt   time.Time // when it did
 
-	ir *installedRun // installed-kernel jobs only
+	mesaManifest string
+	ir           *installedRun // installed-kernel jobs only
 
 	omtRef []byte // a known-good run's omarchy-m-test reference, written only if the job passes
 
@@ -91,8 +93,22 @@ func (s *Server) deviceLoop(v *dev) {
 
 func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	r := &jobRun{s: s, v: v, j: j, boot: s.cfg.BootTimeout}
+	if err := s.beginJobRecoveryMode(ctx, v, j); err != nil {
+		r.finish(api.OutcomeInfra, "recovery mode admission failed before device commands: "+err.Error())
+		return
+	}
 	if j.Spec.BootTimeoutSec > 0 {
 		r.boot = time.Duration(j.Spec.BootTimeoutSec) * time.Second
+	}
+
+	if j.Spec.Mesa != nil {
+		if _, err := s.validateMesa(j.Spec, v.snapshot()); err != nil {
+			r.finish(api.OutcomeInfra, "stored Mesa job refused before device commands: "+err.Error())
+			return
+		}
+		s.updateJob(j, func(j *api.Job) {
+			j.Result.Mesa = &api.MesaResult{Mode: api.MesaStaged, Semantics: mesa.Semantics, Packages: append([]api.MesaPackage{}, j.Spec.Mesa.Packages...), Verdict: "INCOMPLETE"}
+		})
 	}
 
 	// A source is built (or an identical earlier build reused) before the Mac is needed.
@@ -142,14 +158,24 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		return
 	}
 
+	if j.Spec.Mesa != nil {
+		if _, err := s.validateMesa(j.Spec, v.snapshot()); err != nil {
+			r.finish(api.OutcomeInfra, "Mesa admission changed before device commands: "+err.Error())
+			return
+		}
+	}
 	v.mu.Lock()
 	v.d.ActiveJob = j.ID
 	v.setStateLocked(api.StateBusy, "job "+j.ID)
 	v.mu.Unlock()
 	r.started = s.now()
-	r.serial0 = s.serialOffset(v.d.Name)
+	if r.serialEnabled() {
+		r.serial0 = s.serialOffset(v.d.Name)
+	}
 	defer func() {
-		s.copySerial(v.d.Name, r.serial0, j.ID)
+		if r.serialEnabled() {
+			s.copySerial(v.d.Name, r.serial0, j.ID)
+		}
 		v.mu.Lock()
 		v.d.ActiveJob = ""
 		if v.d.State == api.StateBusy || v.d.State == api.StateRecovering {
@@ -296,6 +322,12 @@ func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, 
 func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 	r.s.updateJob(r.j, func(j *api.Job) {
 		j.State, j.Outcome, j.Summary = api.JobDone, outcome, summary
+		if j.Result.Mesa != nil && outcome != api.OutcomePass {
+			j.Result.Mesa.Verdict = "FAIL"
+			if outcome == api.OutcomeCanceled {
+				j.Result.Mesa.Verdict = "INCOMPLETE"
+			}
+		}
 		j.Events = append(j.Events, api.JobEvent{Time: at, Msg: "done: " + outcome + ": " + summary})
 	})
 	r.s.log.Printf("job %s done: %s: %s", r.j.ID, outcome, summary)
@@ -352,11 +384,11 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	}
 	r.ev("staging %s", what)
 	d := v.snapshot()
-	args := api.StageArgs{Artifact: j.Spec.Kernel, Cmdline: j.Spec.Cmdline, Serial: d.OOB != nil,
+	args := api.StageArgs{Artifact: j.Spec.Kernel, Cmdline: j.Spec.Cmdline, Serial: r.serialEnabled(),
 		CmdlineBase: j.Spec.CmdlineBase, CmdlineStrip: j.Spec.CmdlineStrip, Verbose: j.Spec.VerboseBoot,
 		BootTimeoutSec: int(r.boot / time.Second)}
 	if r.ir != nil {
-		args = api.StageArgs{Serial: d.OOB != nil, Installed: r.ir.stageArgs()}
+		args = api.StageArgs{Serial: r.serialEnabled(), Installed: r.ir.stageArgs()}
 	}
 	args.WatchdogOpenTimeoutSec = int(r.s.cfg.WatchdogOpenTimeout / time.Second)
 	sr, outcome, why := r.stage(ctx, args)
@@ -446,6 +478,18 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		return r.crashTest(ctx)
 	}
 
+	if j.Spec.Mesa != nil {
+		var mr api.MesaStageResult
+		args := api.MesaStageArgs{Spec: *j.Spec.Mesa, BootID: r.bootID, Kernel: d.Kernel, CmdlineSHA256: mesa.Sum([]byte(d.Cmdline + "\n"))}
+		if err := v.call(ctx, api.CmdMesaStage, j.ID, args, 4*time.Minute, &mr); err != nil {
+			return api.OutcomeStageFailed, "staged Mesa: " + err.Error()
+		}
+		if !reSHA.MatchString(mr.ManifestSHA256) {
+			return api.OutcomeInfra, "Mesa stage returned no manifest pin"
+		}
+		r.mesaManifest = mr.ManifestSHA256
+		r.ev("staged Mesa packages in job-owned prefix; installed desktop unchanged")
+	}
 	r.state(api.JobTesting)
 	failed := 0
 	tests := r.tests()
@@ -484,6 +528,18 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 			}
 			r.s.updateJob(j, func(j *api.Job) { j.Result.Installed = &r.ir.res })
 		}
+		if t.Builtin == "mesa-provider" {
+			if why := r.acceptMesa(&tr); why != "" {
+				tr.Passed = false
+				tr.Error = why
+				tr.ExitCode = -1
+			}
+			r.s.updateJob(j, func(j *api.Job) {
+				if tr.Mesa != nil {
+					j.Result.Mesa = tr.Mesa
+				}
+			})
+		}
 		if !tr.Passed {
 			failed++
 			if !cut {
@@ -492,6 +548,10 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.Tests = append(j.Result.Tests, tr) })
 		r.ev("test %s: %s", t.Name, testVerdict(tr))
+		if j.Spec.Mesa != nil && t.Builtin == "boot-health" && !tr.Passed {
+			r.ev("boot-health did not pass; remaining Mesa GPU suites/tests were not run")
+			break
+		}
 	}
 	nTests := len(tests)
 	if omt := r.currentOMT(); omt != nil && (j.Spec.Publish || (r.s.cfg.OMTPublish && j.Spec.Baseline)) {
@@ -793,9 +853,31 @@ func realSleepNote(d api.Device, t api.TestSpec) string {
 }
 
 func testsFor(spec api.JobSpec) []api.TestSpec {
-	tests := spec.Tests
-	for _, t := range tests {
-		if t.Builtin == "boot-health" {
+	tests := append([]api.TestSpec{}, spec.Tests...)
+	if spec.Mesa != nil {
+		timeout := 120
+		if spec.Mesa.OfficialGPU {
+			timeout = 2100
+		}
+		health := api.TestSpec{Name: "boot-health", Builtin: "boot-health", TimeoutSec: 180}
+		rest := make([]api.TestSpec, 0, len(tests))
+		found := false
+		for _, test := range tests {
+			if test.Builtin == "boot-health" {
+				if !found {
+					health = test
+					found = true
+					continue
+				}
+			}
+			rest = append(rest, test)
+		}
+		// Explicit caller-selected boot-health settings are preserved, but it
+		// always precedes mandatory GL/Vulkan and any future official suite.
+		return append([]api.TestSpec{health, {Name: "mesa-provider", Builtin: "mesa-provider", TimeoutSec: timeout}}, rest...)
+	}
+	for _, test := range tests {
+		if test.Builtin == "boot-health" {
 			return tests
 		}
 	}
@@ -828,6 +910,12 @@ func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
 			return api.OutcomeHung, fmt.Sprintf("kernel hung (%s): %s", worst.Kind, worst.Line)
 		}
 		return api.OutcomePanicked, fmt.Sprintf("kernel crashed (%s): %s", worst.Kind, worst.Line)
+	}
+	if r.networkOnly() {
+		d := r.v.snapshot()
+		if d.State == api.StateNeedsHands || !r.v.alive() {
+			return api.OutcomeUnknown, "network-only: no return was observed; serial diagnosis and hard reset were disabled"
+		}
 	}
 	for _, s := range steps {
 		if strings.HasPrefix(s, "detected: ") {

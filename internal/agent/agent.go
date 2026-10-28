@@ -431,6 +431,10 @@ func (a *Agent) poll(ctx context.Context) error {
 	if refreshFacts {
 		f := a.sys.Facts()
 		f.AgentVersion = Version
+		_, f.MesaStaged = a.sys.(interface {
+			StageMesa(context.Context, string, api.MesaStageArgs, Fetcher) (api.MesaStageResult, error)
+		})
+		f.MesaOfficial = false // integrated source remains disabled until explicit runtime qualification
 		if a.wd.Load() != nil {
 			f.WatchdogArmed = true // systemd is off it on a test boot; the agent holds it
 		}
@@ -756,6 +760,19 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 	}
 	fetch := a.fetch
 	switch c.Kind {
+	case api.CmdMesaStage:
+		var args api.MesaStageArgs
+		if err := json.Unmarshal(c.Args, &args); err != nil {
+			return nil, nil, err
+		}
+		ms, ok := a.sys.(interface {
+			StageMesa(context.Context, string, api.MesaStageArgs, Fetcher) (api.MesaStageResult, error)
+		})
+		if !ok {
+			return nil, nil, errors.New("agent system has no staged Mesa support")
+		}
+		res, err := ms.StageMesa(ctx, c.JobID, args, fetch)
+		return res, nil, err
 	case api.CmdStage:
 		var args api.StageArgs
 		if err := json.Unmarshal(c.Args, &args); err != nil {

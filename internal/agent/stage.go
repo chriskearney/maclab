@@ -462,6 +462,16 @@ func (l *Linux) removeJob(job string) error {
 
 func (l *Linux) Cleanup(job string, all bool) error {
 	defer syncDisks()
+	return cleanupAfterMesa(l.cleanupMesa(job, all), func() error { return l.cleanupKernel(job, all) })
+}
+
+// A preserved/unreadable Mesa prefix is an error, not permission to skip the
+// independent kernel/entry/one-shot cleanup. Return both failures honestly.
+func cleanupAfterMesa(mesaErr error, kernelCleanup func() error) error {
+	return errors.Join(mesaErr, kernelCleanup())
+}
+
+func (l *Linux) cleanupKernel(job string, all bool) error {
 	g, err := detectBootloader()
 	if err != nil {
 		return err

@@ -27,6 +27,7 @@ import (
 
 const usage = `lab: run kernels and tests on Omarchy Macs
 
+  lab boot-test --catalog-descriptor PIN --profile ID --request FILE --review-descriptor PIN --out DIR [--compile | --execute --authorization FILE]
   lab login <labd-url> <your-maintainer-token>
   lab maintainer add <name> | remove <name> | list   the people with their own labd token
   lab status [device]                 devices, what they're doing, and anything a human must do
@@ -81,6 +82,8 @@ func main() {
 	cmd, args := os.Args[1], os.Args[2:]
 	var err error
 	switch cmd {
+	case "boot-test":
+		err = bootTest(args)
 	case "login":
 		err = login(args)
 	case "pack":
@@ -203,23 +206,43 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		}
 		return showDevice(ctx, c, pos[0])
 
+	case "recovery-mode":
+		mode := fs.String("mode", "", "network-only or serial-assisted")
+		transaction := fs.String("transaction", "", "fresh reviewed transaction identity")
+		pos := parse(fs, args)
+		if err := need(pos, 1, "lab recovery-mode <device> --mode MODE --transaction ID"); err != nil {
+			return err
+		}
+		out, err := c.SelectRecoveryMode(ctx, pos[0], api.RecoveryModeRequest{Mode: *mode, Holder: holder(), Transaction: *transaction})
+		if err != nil {
+			return err
+		}
+		b, _ := json.MarshalIndent(out, "", "  ")
+		fmt.Println(string(b))
+		return nil
 	case "baseline":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		noWait := fs.Bool("no-wait", false, "")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab baseline <device>"); err != nil {
 			return err
 		}
-		return submit(ctx, c, api.JobSpec{Device: pos[0], Baseline: true, Holder: holder()}, *noWait)
+		return submit(ctx, c, api.JobSpec{Device: pos[0], Baseline: true, RecoveryMode: *mode, RecoveryTransaction: *transaction, Holder: holder()}, *noWait)
 
 	case "crashtest":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		noWait := fs.Bool("no-wait", false, "")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab crashtest <device>"); err != nil {
 			return err
 		}
-		return submit(ctx, c, api.JobSpec{Device: pos[0], Crash: "panic", Holder: holder()}, *noWait)
+		return submit(ctx, c, api.JobSpec{Device: pos[0], Crash: "panic", RecoveryMode: *mode, RecoveryTransaction: *transaction, Holder: holder()}, *noWait)
 
 	case "run":
+		mode := fs.String("recovery-mode", "", "network-only or serial-assisted (empty inherits current policy)")
+		transaction := fs.String("recovery-transaction", "", "selected recovery transaction identity")
 		kernel := fs.String("kernel", "", "kernel artifact: a file to upload, or a sha256 already uploaded")
 		cmdline := fs.String("cmdline", "", "extra kernel arguments, appended to the base")
 		runConfig := fs.String("config", "", "with a source URL --kernel: build with this .config (file or uploaded sha256) instead of the Mac's own")
@@ -232,7 +255,13 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		omtAllow := fs.String("omt-allow", "", "omarchy-m-test checks this kernel is expected to fail, comma-separated (hardware.drivers:<compatible> for one unbound node)")
 		publish := fs.Bool("publish", false, "publish the omarchy-m-test report to omarchy-m-testing.org (known-good kernel runs only)")
 		installedMan := fs.String("installed", "", "boot the INSTALLED release through its installer entry and check it against a frozen expected manifest (file or sha256); see `lab installed`")
-		var tests, guiTests, scripts, guiScripts multi
+		mesaMode := fs.String("mesa-mode", api.MesaStaged, "with --mesa-package: staged (a diagnostic of the packages in a private prefix; the desktop keeps the installed Mesa)")
+		mesaOfficial := fs.Bool("mesa-official-gpu", false, "optional reviewed official65 GPU suite after staged native provider checks (requires adapter support)")
+		mesaPublic := fs.String("mesa-signing-public-sha256", "", "with --mesa-official-gpu: actual existing GUI machine-key.pub file SHA256")
+		mesaState := fs.String("mesa-signing-state-home", "", "with --mesa-official-gpu: explicit existing normal XDG_STATE_HOME (never inferred from private job HOME)")
+		mesaBuild := fs.String("mesa-build", "", "with --mesa-package: the package build that produced the packages, for the record")
+		var tests, guiTests, scripts, guiScripts, mesaPkgs multi
+		fs.Var(&mesaPkgs, "mesa-package", "a pinned Mesa split package to test, name=FILE or name=SHA256 (repeatable), e.g. mesa-aurora=mesa-aurora-…pkg.tar.zst")
 		fs.Var(&tests, "test", "builtin test to run (repeatable)")
 		fs.Var(&guiTests, "gui-test", "builtin GUI test to run in the Wayland session (repeatable)")
 		fs.Var(&scripts, "script", "shell script test to upload and run (repeatable)")
@@ -241,7 +270,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if err := need(pos, 1, "lab run <device> [flags]"); err != nil {
 			return err
 		}
-		spec := api.JobSpec{Device: pos[0], Cmdline: *cmdline, BootTimeoutSec: *bootTimeout, Holder: holder(), Publish: *publish}
+		spec := api.JobSpec{Device: pos[0], Cmdline: *cmdline, RecoveryMode: *mode, RecoveryTransaction: *transaction, BootTimeoutSec: *bootTimeout, Holder: holder(), Publish: *publish}
 		spec.OMTAllow = splitAllow(*omtAllow)
 		spec.CmdlineBase = *cmdlineBase
 		spec.CmdlineStrip = strings.FieldsFunc(*cmdlineStrip, func(r rune) bool { return r == ',' || r == ' ' })
@@ -252,6 +281,23 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 				return err
 			}
 			spec.InstalledManifest = sha
+		}
+		if len(mesaPkgs) > 0 {
+			m := &api.MesaSpec{Mode: *mesaMode, Build: *mesaBuild, OfficialGPU: *mesaOfficial, SigningPublicSHA256: *mesaPublic, SigningStateHome: *mesaState}
+			for _, p := range mesaPkgs {
+				name, src, ok := strings.Cut(p, "=")
+				if !ok || name == "" || src == "" {
+					return fmt.Errorf("--mesa-package %q: want name=FILE or name=SHA256", p)
+				}
+				sha, err := artifact(ctx, c, src)
+				if err != nil {
+					return fmt.Errorf("--mesa-package %s: %w", name, err)
+				}
+				m.Packages = append(m.Packages, api.MesaPackage{Name: name, SHA256: sha})
+			}
+			spec.Mesa = m
+		} else if *mesaBuild != "" || *mesaMode != api.MesaStaged || *mesaOfficial || *mesaPublic != "" || *mesaState != "" {
+			return errors.New("--mesa-mode and --mesa-build need at least one --mesa-package")
 		}
 		if *scriptTimeout > 4*time.Hour {
 			return fmt.Errorf("--script-timeout %s: at most 4h", *scriptTimeout)

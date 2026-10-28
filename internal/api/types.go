@@ -55,24 +55,28 @@ type HumanAction struct {
 }
 
 type Device struct {
-	ID          string       `json:"id"`
-	Name        string       `json:"name"`
-	Label       string       `json:"label"` // physical description for humans
-	Model       string       `json:"model"`
-	Volunteer   bool         `json:"volunteer,omitempty"` // a Volunteer's Mac (Kind volunteer): an agent the lab doesn't control, so lab gate leaves it out
-	OOB         *OOBConfig   `json:"oob,omitempty"`
-	State       DeviceState  `json:"state"`
-	StateReason string       `json:"state_reason,omitempty"`
-	Action      *HumanAction `json:"action,omitempty"`
-	LastSeen    time.Time    `json:"last_seen"`
-	BootID      string       `json:"boot_id"`
-	Kernel      string       `json:"kernel"`
-	Cmdline     string       `json:"cmdline"`
-	KnownGood   string       `json:"known_good,omitempty"` // kernel release the baseline ran on
-	Facts       Facts        `json:"facts"`
-	Health      Health       `json:"health"`
-	Lease       *Lease       `json:"lease,omitempty"`
-	ActiveJob   string       `json:"active_job,omitempty"`
+	EffectiveRecoveryMode string       `json:"effective_recovery_mode,omitempty"` // last explicit transaction policy; OOB config is preserved
+	RecoveryTransaction   string       `json:"recovery_transaction,omitempty"`
+	RecoveryHolder        string       `json:"recovery_holder,omitempty"`
+	RecoveryModeJob       string       `json:"recovery_mode_job,omitempty"`
+	ID                    string       `json:"id"`
+	Name                  string       `json:"name"`
+	Label                 string       `json:"label"` // physical description for humans
+	Model                 string       `json:"model"`
+	Volunteer             bool         `json:"volunteer,omitempty"` // a Volunteer's Mac (Kind volunteer): an agent the lab doesn't control, so lab gate leaves it out
+	OOB                   *OOBConfig   `json:"oob,omitempty"`
+	State                 DeviceState  `json:"state"`
+	StateReason           string       `json:"state_reason,omitempty"`
+	Action                *HumanAction `json:"action,omitempty"`
+	LastSeen              time.Time    `json:"last_seen"`
+	BootID                string       `json:"boot_id"`
+	Kernel                string       `json:"kernel"`
+	Cmdline               string       `json:"cmdline"`
+	KnownGood             string       `json:"known_good,omitempty"` // kernel release the baseline ran on
+	Facts                 Facts        `json:"facts"`
+	Health                Health       `json:"health"`
+	Lease                 *Lease       `json:"lease,omitempty"`
+	ActiveJob             string       `json:"active_job,omitempty"`
 
 	// VolunteeredBy is the tailnet login whose ./volunteer token enrolled the
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward
@@ -133,7 +137,7 @@ func (d *Device) Tier() int {
 	if d.Facts.WatchdogArmed {
 		t = 1
 	}
-	if d.OOB != nil {
+	if d.OOB != nil && d.EffectiveRecoveryMode != RecoveryNetworkOnly {
 		t = 2
 	}
 	return t
@@ -152,6 +156,8 @@ type Facts struct {
 	PanicTimeout  int      `json:"panic_timeout"`
 	GUIUser       string   `json:"gui_user,omitempty"`
 	AgentVersion  string   `json:"agent_version"`
+	MesaStaged    bool     `json:"mesa_staged,omitempty"`
+	MesaOfficial  bool     `json:"mesa_official,omitempty"`
 	PreflightOK   bool     `json:"preflight_ok"`
 	Problems      []string `json:"problems,omitempty"` // each one holds jobs back
 	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
@@ -271,11 +277,12 @@ type CheckinResponse struct {
 
 // Command kinds sent to the agent.
 const (
-	CmdStage    = "stage"
-	CmdBootOnce = "boot_once"
-	CmdReboot   = "reboot"
-	CmdRunTest  = "run_test"
-	CmdCollect  = "collect"
+	CmdMesaStage = "mesa_stage"
+	CmdStage     = "stage"
+	CmdBootOnce  = "boot_once"
+	CmdReboot    = "reboot"
+	CmdRunTest   = "run_test"
+	CmdCollect   = "collect"
 	// CmdCollectLost collects the Lab boot the Mac came back from (see LostBoot).
 	CmdCollectLost = "collect_lost"
 	CmdCleanup     = "cleanup"
@@ -335,6 +342,23 @@ type CommandResult struct {
 	// AccessLevel is lab-agent refusing or stopping the command because the
 	// Mac's Access level doesn't allow it: its Volunteer lowered it.
 	AccessLevel bool `json:"access_level,omitempty"`
+}
+
+type MesaCapabilities struct {
+	Schema      int    `json:"schema"`
+	Staged      bool   `json:"staged"`
+	OfficialGPU bool   `json:"official_gpu"`
+	AgentMin    string `json:"agent_min"`
+}
+type MesaStageArgs struct {
+	Spec          MesaSpec `json:"spec"`
+	BootID        string   `json:"boot_id"`
+	Kernel        string   `json:"kernel"`
+	CmdlineSHA256 string   `json:"cmdline_sha256"`
+}
+type MesaStageResult struct {
+	ManifestSHA256 string `json:"manifest_sha256"`
+	Prefix         string `json:"prefix"`
 }
 
 type StageArgs struct {
@@ -509,11 +533,12 @@ type IdentityCheck struct {
 func (t TestSpec) MaintainerScript() bool { return t.Script != "" }
 
 type TestResult struct {
-	Name     string  `json:"name"`
-	Passed   bool    `json:"passed"`
-	ExitCode int     `json:"exit_code"`
-	Seconds  float64 `json:"seconds"`
-	TimedOut bool    `json:"timed_out,omitempty"`
+	Mesa     *MesaResult `json:"mesa,omitempty"`
+	Name     string      `json:"name"`
+	Passed   bool        `json:"passed"`
+	ExitCode int         `json:"exit_code"`
+	Seconds  float64     `json:"seconds"`
+	TimedOut bool        `json:"timed_out,omitempty"`
 	// Skipped: the test couldn't run on this Mac (its kernel lacks what the
 	// test needs), and Error says why. A skipped test is never Passed, so it
 	// fails the job like any other test that didn't pass.
@@ -538,6 +563,7 @@ const (
 
 // Outcomes, most specific first. Only "pass" is success.
 const (
+	OutcomeUnknown     = "unknown" // no observation proves what happened; never a pass
 	OutcomePass        = "pass"
 	OutcomeTestsFailed = "tests_failed"
 	OutcomeUnhealthy   = "booted_unhealthy" // booted, but kernel errors or degraded system
@@ -561,20 +587,22 @@ const (
 )
 
 type JobSpec struct {
-	Device         string     `json:"device"`
-	Kernel         string     `json:"kernel,omitempty"` // artifact sha256; empty = reboot on the current kernel
-	Source         string     `json:"source,omitempty"` // build this first: a GitHub/git URL of a repo, branch, commit or PR
-	Config         string     `json:"config,omitempty"` // source builds: artifact sha256 of a .config to build with, instead of the Mac's own
-	Build          string     `json:"build,omitempty"`  // the build job that produced Kernel
-	Cmdline        string     `json:"cmdline,omitempty"`
-	CmdlineBase    string     `json:"cmdline_base,omitempty"`  // see StageArgs.CmdlineBase
-	CmdlineStrip   []string   `json:"cmdline_strip,omitempty"` // see StageArgs.CmdlineStrip
-	VerboseBoot    bool       `json:"verbose_boot,omitempty"`  // see StageArgs.Verbose
-	Tests          []TestSpec `json:"tests,omitempty"`
-	BootTimeoutSec int        `json:"boot_timeout_sec,omitempty"`
-	Crash          string     `json:"crash,omitempty"` // crash test mode, see CrashArgs
-	Baseline       bool       `json:"baseline,omitempty"`
-	Holder         string     `json:"holder,omitempty"`
+	RecoveryTransaction string     `json:"recovery_transaction,omitempty"`
+	RecoveryMode        string     `json:"recovery_mode,omitempty"` // explicit per-job controller policy; empty retains legacy/inherited behavior
+	Device              string     `json:"device"`
+	Kernel              string     `json:"kernel,omitempty"` // artifact sha256; empty = reboot on the current kernel
+	Source              string     `json:"source,omitempty"` // build this first: a GitHub/git URL of a repo, branch, commit or PR
+	Config              string     `json:"config,omitempty"` // source builds: artifact sha256 of a .config to build with, instead of the Mac's own
+	Build               string     `json:"build,omitempty"`  // the build job that produced Kernel
+	Cmdline             string     `json:"cmdline,omitempty"`
+	CmdlineBase         string     `json:"cmdline_base,omitempty"`  // see StageArgs.CmdlineBase
+	CmdlineStrip        []string   `json:"cmdline_strip,omitempty"` // see StageArgs.CmdlineStrip
+	VerboseBoot         bool       `json:"verbose_boot,omitempty"`  // see StageArgs.Verbose
+	Tests               []TestSpec `json:"tests,omitempty"`
+	BootTimeoutSec      int        `json:"boot_timeout_sec,omitempty"`
+	Crash               string     `json:"crash,omitempty"` // crash test mode, see CrashArgs
+	Baseline            bool       `json:"baseline,omitempty"`
+	Holder              string     `json:"holder,omitempty"`
 	// Publish uploads the job's omarchy-m-test report to omarchy-m-testing.org.
 	// Only a run on the Mac's known-good (packaged) kernel is ever published:
 	// the site names a report's build from pacman, which doesn't know lab kernels.
@@ -589,6 +617,66 @@ type JobSpec struct {
 	// expectation before, on and after the boot, compares omarchy-m-test and
 	// kernel errors with the frozen pre-install baseline, and never promotes.
 	InstalledManifest string `json:"installed_manifest,omitempty"`
+	// Mesa makes the job a first-class Mesa test of pinned split packages.
+	// See MesaSpec for what each mode does and does not claim.
+	Mesa *MesaSpec `json:"mesa,omitempty"`
+}
+
+// Mesa test modes. Staged is a diagnostic of the packages: they are unpacked
+// into a private per-job prefix on the Mac and only the job's own probe
+// processes are pointed at it, while the desktop keeps the installed Mesa.
+// A staged result therefore says nothing about the installed desktop.
+// Installed (a real package transaction with a recovery contract, judged
+// through the installed manifest/acceptance machinery) is not supported yet.
+const (
+	MesaStaged    = "staged"
+	MesaInstalled = "installed"
+)
+
+// MesaSpec pins the split packages a Mesa job tests.
+type MesaSpec struct {
+	OfficialGPU         bool          `json:"official_gpu,omitempty"`
+	SigningPublicSHA256 string        `json:"signing_public_sha256,omitempty"`
+	SigningStateHome    string        `json:"signing_state_home,omitempty"`
+	Mode                string        `json:"mode"`            // MesaStaged (MesaInstalled is refused for now)
+	Packages            []MesaPackage `json:"packages"`        // the exact split packages, as uploaded artifacts
+	Build               string        `json:"build,omitempty"` // the finished package build whose files they are (checked by sha256 at submission), if any
+}
+
+// MesaPackage is one pinned split package (for example mesa-aurora or
+// vulkan-aurora): its pacman name and the sha256 of its .pkg.tar.zst artifact.
+type MesaPackage struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
+// MesaResult is a Mesa job's verdicts. Semantics restates what the mode
+// covers, so a staged result can never be read as an installed one.
+type MesaOfficialResult struct {
+	Status            string `json:"status"`
+	NativeInvocations int    `json:"native_invocations"`
+	SignatureVerified bool   `json:"signature_verified"`
+	ReportSHA256      string `json:"report_sha256"`
+	SealSHA256        string `json:"seal_sha256"`
+	SourceCommit      string `json:"source_commit"`
+	ArchiveSHA256     string `json:"archive_sha256"`
+	ReportPath        string `json:"report_path"`
+	SealPath          string `json:"seal_path"`
+}
+type MesaResult struct {
+	Official        *MesaOfficialResult `json:"official,omitempty"`
+	Job             string              `json:"job"`
+	BootID          string              `json:"boot_id"`
+	Kernel          string              `json:"kernel"`
+	ManifestSHA256  string              `json:"manifest_sha256"`
+	CleanupVerified bool                `json:"cleanup_verified"`
+	Simulated       bool                `json:"simulated,omitempty"`
+	Evidence        map[string]any      `json:"evidence,omitempty"`
+	Mode            string              `json:"mode"`
+	Semantics       string              `json:"semantics"`
+	Packages        []MesaPackage       `json:"packages"`
+	Provider        map[string]string   `json:"provider,omitempty"` // api (gl, vulkan) -> NATIVE_STAGED, SYSTEM_PROVIDER, SOFTWARE or MISSING
+	Verdict         string              `json:"verdict"`            // PASS, FAIL or INCOMPLETE
 }
 
 type JobEvent struct {
@@ -609,6 +697,7 @@ type JobResult struct {
 	Logs          []string         `json:"logs,omitempty"`
 	OMT           *OMTResult       `json:"omt,omitempty"` // omarchy-m-test, when it ran
 	Installed     *InstalledResult `json:"installed,omitempty"`
+	Mesa          *MesaResult      `json:"mesa,omitempty"`
 }
 
 // InstalledResult is an installed-mode job's verdicts. The evidence files are
@@ -656,16 +745,17 @@ type OMTCheck struct {
 }
 
 type Job struct {
-	ID       string     `json:"id"`
-	Spec     JobSpec    `json:"spec"`
-	State    JobState   `json:"state"`
-	Outcome  string     `json:"outcome,omitempty"`
-	Summary  string     `json:"summary,omitempty"`
-	Created  time.Time  `json:"created"`
-	Updated  time.Time  `json:"updated"`
-	Events   []JobEvent `json:"events"`
-	Result   JobResult  `json:"result"`
-	Canceled bool       `json:"canceled,omitempty"`
+	EffectiveRecoveryMode string     `json:"effective_recovery_mode,omitempty"`
+	ID                    string     `json:"id"`
+	Spec                  JobSpec    `json:"spec"`
+	State                 JobState   `json:"state"`
+	Outcome               string     `json:"outcome,omitempty"`
+	Summary               string     `json:"summary,omitempty"`
+	Created               time.Time  `json:"created"`
+	Updated               time.Time  `json:"updated"`
+	Events                []JobEvent `json:"events"`
+	Result                JobResult  `json:"result"`
+	Canceled              bool       `json:"canceled,omitempty"`
 	// Maintainer is who submitted it, from their token; empty when labd queued it.
 	Maintainer string `json:"maintainer,omitempty"`
 	// RetryOf is the job this one retries (lab retry).

@@ -299,7 +299,7 @@ func (r *jobRun) newInstalled() (*installedRun, error) {
 			return nil, errors.New("no frozen installer entry")
 		}
 	}
-	return &installedRun{r: r, c: c, serial: r.v.snapshot().OOB != nil,
+	return &installedRun{r: r, c: c, serial: r.serialEnabled(),
 		res: api.InstalledResult{Release: c.release, ManifestSHA256: c.manSHA, EntrySHA256: c.entrySHA, Verdicts: map[string]string{}}}, nil
 }
 
