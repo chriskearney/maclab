@@ -1,4 +1,4 @@
-bin/
+/bin/
 # A lab's own handoff for its agents: hosts, users, house rules. Keep it local.
 LAB-FOR-AGENTS.md
 

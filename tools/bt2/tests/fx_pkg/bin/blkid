@@ -1,0 +1,5 @@
+#!/usr/bin/python3 -B
+# fake blkid -s TAG -o value DEV: fixed ESP identity for the guard tests
+import sys
+tag = sys.argv[sys.argv.index('-s') + 1] if '-s' in sys.argv else ''
+print({'UUID': '4F4D-5801', 'LABEL': 'EFI', 'PARTUUID': '159ecdaa-1ad2-4307-a721-44d69c3cb159'}.get(tag, ''))

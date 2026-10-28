@@ -1,0 +1,39 @@
+#!/usr/bin/python3 -IB
+"""Fake systemctl for bt2 tests. State = $BT2_TEST_ROOT/fake/systemd.json {"units": {unit: {prop: value}}}.
+Supported: show UNIT --property=A,B,... (unknown units report LoadState=not-found like systemd)."""
+import json
+import os
+import sys
+
+ROOT = os.environ.get('BT2_TEST_ROOT')
+if not ROOT or not os.path.isdir(ROOT) or ROOT.rstrip('/') in ('', '/'):
+    sys.stderr.write('fake systemctl: BT2_TEST_ROOT not set to a test root\n')
+    sys.exit(2)
+DEFAULTS = {'LoadState': 'not-found', 'ActiveState': 'inactive', 'SubState': 'dead', 'UnitFileState': '',
+            'FragmentPath': '', 'DropInPaths': ''}
+
+
+def main(argv):
+    if len(argv) >= 2 and argv[0] == 'show':
+        units = json.load(open(ROOT + '/fake/systemd.json'))['units']
+        props = None
+        names = []
+        for a in argv[1:]:
+            if a.startswith('--property='):
+                props = a.split('=', 1)[1].split(',')
+            elif a.startswith('-'):
+                continue
+            else:
+                names.append(a)
+        for i, n in enumerate(names):
+            u = dict(DEFAULTS, **units.get(n, {}))
+            if i:
+                print()
+            for p in props or sorted(u):
+                print('%s=%s' % (p, u.get(p, '')))
+        return 0
+    sys.stderr.write('fake systemctl: unsupported %s\n' % ' '.join(argv))
+    return 1
+
+
+sys.exit(main(sys.argv[1:]))
