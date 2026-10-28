@@ -154,9 +154,29 @@ def job_identity(env,cmdline,boot,kernel,machine,board,inp):
     tags=[t.split('=',1)[1] for t in cmdline.split() if t.startswith('maclab.job=')];need(tags==[job] and env.get('MACLAB_TEST')==TEST,'exact single current job tag/test')
     need(kernel==inp['expected_kernel'] and machine=='aarch64' and board==inp['board'] and str(uuid.UUID(boot))==boot,'actual candidate boot identity');return job
 def installed_cmdline(actual,base,job):
-    # internal/installed.Additions: installer tokens + job tag + panic=10 (+ serial console tokens).
-    additions=['maclab.job='+job,'panic=10'];normal=base+additions;serial=normal+['console=ttySAC0,115200','console=tty0','loglevel=7']
-    need(actual in (normal,serial),'actual job cmdline differs from frozen installer plus exact lab additions');return actual==serial
+    # labd's installed.Additions, followed by agent.withLabBootParams (0.8).
+    # Keep the frozen prefix exact; accept only the agent's missing parameters,
+    # appended once in its order. Legacy agents append neither parameter.
+    normal=base+['maclab.job='+job,'panic=10']
+    serial=normal+['console=ttySAC0,115200','console=tty0','loglevel=7']
+    for want,is_serial in ((normal,False),(serial,True)):
+        if actual==want:
+            return is_serial
+        if actual[:len(want)]!=want:
+            continue
+        names={t.split('=',1)[0] for t in want}
+        extra=actual[len(want):]
+        if 'watchdog.open_timeout' not in names:
+            if not extra or re.fullmatch(r'watchdog\.open_timeout=[0-9]+',extra[0]) is None:
+                continue
+            extra=extra[1:]
+        if 'maclab.lab_boot' not in names:
+            if not extra or extra[0]!='maclab.lab_boot=1':
+                continue
+            extra=extra[1:]
+        if not extra:
+            return is_serial
+    need(False,'actual job cmdline differs from frozen installer plus exact lab additions')
 def checker_manifest(template_raw,inp,board,boot,token):
     m=unique(template_raw)
     m.update(approved=True,source_review='accepted-by-root',device=inp['device'],board=board,expected_kernel=inp['expected_kernel'],expected_boot_id=boot,token=token,gui_user=inp['gui']['user'],gui_uid=inp['gui']['uid'],wifi_interface=inp['wifi']['interface'],wifi_mac=inp['wifi']['mac'],output_dir='/var/tmp/sf-rc-normal-session-'+token[:16],tools=json.loads(json.dumps(inp['tools'])),providers=json.loads(json.dumps(inp['providers'])))
