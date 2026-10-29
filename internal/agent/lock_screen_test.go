@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -115,5 +117,57 @@ func TestLockFallsBackToHyprlockOnOlderOmarchy(t *testing.T) {
 func TestNoLockCommandMeansNoLockCommand(t *testing.T) {
 	if argv, ok := lockCommand(func(string) bool { return false }); ok {
 		t.Errorf("lock command %v with neither lock installed", argv)
+	}
+}
+
+// What a current Omarchy shell answers, unlocked and once the compositor has
+// secured the lock.
+const (
+	shellUnlocked = `{"locked":false,"requested":false,"pending":false,"sessionLocked":false,"secure":false,"realScreens":1,"passwordPam":true,"lastEvent":"init","lastEventAt":""}`
+	shellSecured  = `{"locked":true,"requested":true,"pending":false,"sessionLocked":true,"secure":true,"realScreens":1,"passwordPam":true,"lastEvent":"locked","lastEventAt":""}`
+)
+
+func TestShellLockStatusParses(t *testing.T) {
+	for in, want := range map[string]bool{shellUnlocked: false, shellSecured: true} {
+		s, err := parseShellLock([]byte(in))
+		if err != nil || s.Secure != want {
+			t.Errorf("parse %s: secure %v, %v; want %v", in, s.Secure, err, want)
+		}
+	}
+	if _, err := parseShellLock([]byte("not json")); err == nil {
+		t.Error("garbage status parsed")
+	}
+}
+
+// omarchy-system-lock returns at once; the lock counts once the shell, which
+// may not be up yet, says the compositor secured it.
+func TestShellLockIsConfirmedOnceSecured(t *testing.T) {
+	answers := []func() (shellLock, error){
+		func() (shellLock, error) { return shellLock{}, errors.New("shell not running") },
+		func() (shellLock, error) { return shellLock{}, nil },
+		func() (shellLock, error) { return shellLock{Locked: true, Requested: true}, nil },
+		func() (shellLock, error) { return shellLock{Locked: true, Requested: true, Secure: true}, nil },
+	}
+	requests, i := 0, 0
+	err := confirmShellLock(func() { requests++ }, func() (shellLock, error) { i++; return answers[i-1]() }, time.Second, time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if i != len(answers) {
+		t.Errorf("confirmed after %d status calls, want %d", i, len(answers))
+	}
+	// asked once the shell answered unlocked, never while the lock was underway
+	if requests != 1 {
+		t.Errorf("%d lock requests, want 1", requests)
+	}
+}
+
+func TestShellLockNeverSecuredFails(t *testing.T) {
+	requested := false
+	err := confirmShellLock(func() { requested = true }, func() (shellLock, error) {
+		return shellLock{Locked: requested, Requested: requested, LastEvent: "pending"}, nil
+	}, 20*time.Millisecond, time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "pending") {
+		t.Errorf("err %v, want a failure naming the shell's last event", err)
 	}
 }
