@@ -240,6 +240,15 @@ image_key() {
 	if grep -qx "etc/cryptsetup-keys.d/$VOLUME.key" <<<"$list"; then echo yes; else echo no; fi
 }
 
+# A filename in an image isn't proof it contains the current key: snapshots
+# and old images can hold a different or dead key at that same path.
+image_current_key() {
+	local candidate
+	make_tmpd
+	candidate=$(extract_key "$1") || return 1
+	cmp -s -- "$KEY" "$candidate"
+}
+
 # yes, no or unreadable: whether a UKI's embedded command line has TOKEN.
 uki_token() {
 	local tmp line
@@ -298,10 +307,10 @@ all_images_keyed() {
 	local f e
 	[[ -n $(ukis) ]] || return 1
 	while read -r f; do
-		[[ -z $f ]] || [[ $(image_key "$f") == yes && $(uki_token "$f") == yes ]] || return 1
+		[[ -z $f ]] || { [[ $(image_key "$f") == yes && $(uki_token "$f") == yes ]] && image_current_key "$f"; } || return 1
 	done < <(ukis)
 	while read -r f; do
-		[[ -z $f ]] || [[ $(image_key "$f") == yes ]] || return 1
+		[[ -z $f ]] || { [[ $(image_key "$f") == yes ]] && image_current_key "$f"; } || return 1
 	done < <(initramfs_images)
 	e=$(limine_entries)
 	[[ -n $e ]] || return 1
@@ -652,15 +661,15 @@ EOF
 	[[ -n $(ukis) ]] || die "no UKI in $ESP/EFI/Linux matches ${UKI_NAME}_*.efi after the rebuild"
 	while read -r f; do
 		[[ -n $f ]] || continue
-		if [[ $(image_key "$f") == yes && $(uki_token "$f") == yes ]]; then
+		if [[ $(image_key "$f") == yes && $(uki_token "$f") == yes ]] && image_current_key "$f"; then
 			say "UKI $f: has the key and $TOKEN"
 		else
-			say "UKI $f: MISSING the key ($(image_key "$f")) or $TOKEN ($(uki_token "$f")); that entry asks for the passphrase"; bad=1
+			say "UKI $f: MISSING, DIFFERENT or UNREADABLE current key ($(image_key "$f")), or missing $TOKEN ($(uki_token "$f")); that entry isn't verified for unattended boot"; bad=1
 		fi
 	done < <(ukis)
 	while read -r f; do
 		[[ -n $f ]] || continue
-		if [[ $(image_key "$f") == yes ]]; then say "image $f: has the key"; else say "image $f: MISSING the key"; bad=1; fi
+		if [[ $(image_key "$f") == yes ]] && image_current_key "$f"; then say "image $f: has the current key"; else say "image $f: MISSING, DIFFERENT or UNREADABLE current key"; bad=1; fi
 	done < <(initramfs_images)
 	# The command line that boots: an entry's own cmdline: wins over the UKI's embedded one.
 	e=$(limine_entries)
@@ -684,57 +693,56 @@ EOF
 # ---- disable ---------------------------------------------------------------------------------
 
 disable() {
-	local f k e ok cand s r out slot slots n leftover=0 keyed=() tokened=() failed=() remove=() rslots=()
+	local f k t e ok cand s r out slot slots n leftover=0 keyed=() tokened=() remove=() rslots=()
 	probe_key
 	refuse_kept
 
 	# Every way this Mac could still unlock without the passphrase, before deciding anything.
 	while read -r f; do
 		[[ -n $f ]] || continue
-		[[ $(image_key "$f") != yes ]] || die "$f, a lab boot image lab-agent staged, holds the key. Take the lab off first: sudo lab-agent uninstall (or, on a Volunteer's Mac, leave) removes those images; then run disable again. Nothing changed"
+		case $(image_key "$f") in
+			no) ;;
+			yes) die "$f, a lab boot image lab-agent staged, holds the key. Take the lab off first: sudo lab-agent uninstall (or, on a Volunteer's Mac, leave) removes those images; then run disable again. Nothing changed" ;;
+			*) die "$f, a lab boot image lab-agent staged, couldn't be read to check for the key. Take the lab off first: sudo lab-agent uninstall (or, on a Volunteer's Mac, leave) removes those images; then run disable again. Nothing changed" ;;
+		esac
 	done < <(staged_ukis)
 	while read -r f; do
 		[[ -n $f ]] || continue
-		[[ $(image_key "$f") == no ]] || keyed+=("$f")
-		[[ $f != *.efi || $(uki_token "$f") == no ]] || tokened+=("$f")
+		case $(image_key "$f") in
+			no) ;;
+			yes) keyed+=("$f") ;;
+			*) die "$f couldn't be read to check for the key; nothing changed" ;;
+		esac
+		if [[ $f == *.efi ]]; then
+			t=$(uki_token "$f")
+			case $t in
+				no) ;;
+				yes) tokened+=("$f") ;;
+				*) die "$f couldn't be read to check its command line; nothing changed" ;;
+			esac
+		fi
 	done < <(ukis; initramfs_images)
 	e=$(limine_entries)
 	while IFS=$'\t' read -r f ok; do
 		[[ -n $f && $ok == yes ]] && tokened+=("boot entry \"$f\"")
 	done <<<"$e"
 
-	# The key file opens a slot: that is the one to remove. When it doesn't (it is gone, or a
-	# restored snapshot swapped it), a boot image can still hold a key that opens one: copy each
-	# out and use it.
+	# Inspect every retained image even when the current file opens a slot: an
+	# older image can contain a different live key. Unknown contents never prove
+	# revocation, whatever PBKDF the header happens to report.
 	if [[ -n $KEY_SLOT ]]; then
 		remove+=("$KEY_SLOT:$KEY"); rslots+=("$KEY_SLOT")
-	else
-		for f in "${keyed[@]}"; do
-			[[ $(image_key "$f") == yes ]] || continue
-			make_tmpd
-			if ! cand=$(extract_key "$f"); then failed+=("$f"); continue; fi
-			probe_file "$cand"
-			if [[ -z $PROBED ]]; then say "$f holds a dead key: it opens no key slot."; continue; fi
-			kept "$PROBED" && die "the key in $f opens key slot $PROBED, which $STATE records as the owner's or recovery slot; nothing changed"
-			[[ " ${rslots[*]} " == *" $PROBED "* ]] && continue
-			say "$f holds a key that still opens key slot $PROBED (the key file doesn't); disable removes that slot with it."
-			remove+=("$PROBED:$cand"); rslots+=("$PROBED")
-		done
-		if (( ${#failed[@]} )); then
-			orphan_slots "${rslots[@]}"
-			if (( ${#ORPHANS[@]} )); then
-				say "${failed[*]} hold(s) a key file this couldn't copy out (no bsdcpio, or lsinitcpio -x failed),"
-				say "so this can't tell which key slot it opens. Slots that look like this script's (pbkdf2,"
-				say "1000 iterations; passphrase slots use argon2id): ${ORPHANS[*]}."
-				(( ${#KEEP[@]} )) && say "The owner's and recovery slots ($STATE) are ${KEEP[*]}: never those."
-				say "  cryptsetup luksDump $DEVICE                              shows each slot's PBKDF"
-				say "  cryptsetup open --test-passphrase --verbose $DEVICE     shows the slot your passphrase opens"
-				say "  cryptsetup luksKillSlot $DEVICE <slot>                  removes the auto-unlock slot"
-				die "nothing changed; remove the auto-unlock slot as above, then run disable again"
-			fi
-			say "${failed[*]}: couldn't copy the key out, but no key slot looks like this script's (pbkdf2, 1000 iterations), so going on to clear the images."
-		fi
 	fi
+	for f in "${keyed[@]}"; do
+		make_tmpd
+		cand=$(extract_key "$f") || die "$f holds a key this couldn't copy out to check; nothing changed"
+		probe_file "$cand"
+		if [[ -z $PROBED ]]; then say "$f holds a dead key: it opens no key slot."; continue; fi
+		kept "$PROBED" && die "the key in $f opens key slot $PROBED, which $STATE records as the owner's or recovery slot; nothing changed"
+		[[ " ${rslots[*]} " == *" $PROBED "* ]] && continue
+		say "$f holds a key that still opens key slot $PROBED; disable removes that slot with it."
+		remove+=("$PROBED:$cand"); rslots+=("$PROBED")
+	done
 
 	if (( ${#remove[@]} == 0 && ${#keyed[@]} == 0 && ${#tokened[@]} == 0 )) && [[ ! -e $DROPIN && ! -e $KEY ]] && ! cmdfile_has_token; then
 		report_orphans

@@ -73,8 +73,9 @@ UKIs. It then:
    `KERNEL_CMDLINE[default]` line of `/etc/default/limine`;
 5. rebuilds the boot images (`omarchy-mac-boot-update`, or `limine-update`;
    and `mkinitcpio -P` first when `/boot` holds initramfs images);
-6. checks that every UKI holds the key file and the `rd.luks.key=` argument,
-   that every `/boot/initramfs-*.img` holds the key file, that every
+6. checks that every UKI holds the current key file's exact contents and the
+   `rd.luks.key=` argument, that every `/boot/initramfs-*.img` holds the same
+   current key (a matching filename alone is not enough), that every
    `limine.conf` entry booting those UKIs (snapshot entries and the maclab
    block aside) has the argument on its own `cmdline:` line, and that the key
    opens the volume. On an Omarchy Mac each entry carries its own `cmdline:`,
@@ -116,8 +117,15 @@ are built from this Mac's initramfs, so they hold the key too. `uninstall`
 is still there.
 
 `disable` asks for your passphrase and checks it opens another key slot. It
-refuses if the key's slot is the only one left. Then it removes that key slot
-using the key file **first**, so the copies of the key on this Mac (in the
+refuses if the identified auto-unlock slots are the only ones left. It also
+reads the key from every retained boot image, even when the current key file
+works: an older image can hold a different live key. It refuses before
+changing anything if a staged or ordinary boot image cannot be read, or if
+an image's key cannot be extracted and checked. A slot's PBKDF type cannot
+establish that an unreadable image holds no live key.
+
+Then it removes all the identified auto-unlock key slots **first**, using
+the current key file and any different keys recovered from images, so their copies on this Mac (in the
 boot images, in snapshots, in backups) open nothing. Only then does it delete
 the key file, the drop-in and the `rd.luks.key=` argument, rebuild the boot
 images and check that none still holds the key or the argument. As above,
@@ -127,10 +135,13 @@ volume key.
 If the key file is gone but a boot image still holds a key (a restored
 snapshot, or a key file deleted by hand), `disable` copies that key out of
 the image into a private temporary folder, removes the slot it opens with it,
-and shreds the copy. If it can't copy the key out, it refuses and says how to
-find the slot (`cryptsetup luksDump`: the auto-unlock slot uses pbkdf2 with
-1000 iterations, passphrase slots argon2id) and remove it with
-`cryptsetup luksKillSlot <device> <slot>`. It only reports the Mac as already
+and shreds the copy. If it can't copy the key out, it refuses without
+changing any slots. Use `cryptsetup luksDump` to inspect the slots before
+deciding what to do by hand: newly created slots use pbkdf2 with 1000
+iterations, but an adopted key can use another PBKDF. Do not assume that a
+slot with another PBKDF is unrelated to auto-unlock.
+`cryptsetup luksKillSlot <device> <slot>` removes a slot you have independently
+identified. It only reports the Mac as already
 disabled when no key slot, key file, drop-in, argument, boot image or boot
 entry is left.
 
