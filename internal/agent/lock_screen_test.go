@@ -171,3 +171,17 @@ func TestShellLockNeverSecuredFails(t *testing.T) {
 		t.Errorf("err %v, want a failure naming the shell's last event", err)
 	}
 }
+
+// omarchy-shell exits 1 without OMARCHY_PATH, so every status call failed and
+// the lock never came up (naeem-naeems-m3-max, job j1028-225951-4248).
+func TestOmarchyPathComesFromTheSession(t *testing.T) {
+	env := "HOME=/home/ada\nOMARCHY_PATH=/opt/omarchy\nPATH=/usr/bin\n"
+	if got := omarchyPath([]byte(env)); got != "/opt/omarchy" {
+		t.Errorf("OMARCHY_PATH %q, want the session's /opt/omarchy", got)
+	}
+	for _, env := range []string{"", "HOME=/home/ada\n", "OMARCHY_PATH=\n", "MY_OMARCHY_PATH=/x\n"} {
+		if got := omarchyPath([]byte(env)); got != "/usr/share/omarchy" {
+			t.Errorf("OMARCHY_PATH %q from %q, want Omarchy's own /usr/share/omarchy", got, env)
+		}
+	}
+}

@@ -181,9 +181,14 @@ func lockSession(user string, say func(string, ...any)) error {
 	}
 	if argv[0] == "omarchy-system-lock" {
 		// It asks Omarchy's shell to lock and returns at once, so the shell,
-		// not the process, says whether the lock is up.
-		err := confirmShellLock(func() { asUser(argv...).Run() }, func() (shellLock, error) {
-			out, err := asUser("omarchy-shell", "lock", "status").Output()
+		// not the process, says whether the lock is up. omarchy-shell refuses
+		// to run without the session's OMARCHY_PATH, which genv lacks.
+		inSession := func(args ...string) *exec.Cmd {
+			out, _ := asUser("systemctl", "--user", "show-environment").Output()
+			return asUser(append([]string{"OMARCHY_PATH=" + omarchyPath(out)}, args...)...)
+		}
+		err := confirmShellLock(func() { inSession(argv...).Run() }, func() (shellLock, error) {
+			out, err := inSession("omarchy-shell", "lock", "status").Output()
 			if err != nil {
 				return shellLock{}, err
 			}
@@ -222,6 +227,18 @@ type shellLock struct {
 	Requested bool   `json:"requested"` // the shell has started locking
 	Secure    bool   `json:"secure"`    // the compositor confirmed every output is covered
 	LastEvent string `json:"lastEvent"`
+}
+
+// omarchyPath is OMARCHY_PATH from the user manager's environment (`systemctl
+// --user show-environment`, where uwsm puts the session's), else where
+// Omarchy installs itself.
+func omarchyPath(showEnv []byte) string {
+	for _, l := range strings.Split(string(showEnv), "\n") {
+		if v, ok := strings.CutPrefix(l, "OMARCHY_PATH="); ok && v != "" {
+			return v
+		}
+	}
+	return "/usr/share/omarchy"
 }
 
 func parseShellLock(b []byte) (shellLock, error) {
