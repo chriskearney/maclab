@@ -815,3 +815,15 @@ func TestUninstallTakesBackItsLeave(t *testing.T) {
 		})
 	}
 }
+
+// The Lab-boot autologin link dangles outside a Lab boot; uninstall removes it.
+func TestUninstallRemovesTheLabBootAutologinLink(t *testing.T) {
+	m := newLabMac(t)
+	link := m.u.path(labBootAutologinLink)
+	os.MkdirAll(filepath.Dir(link), 0o755)
+	os.Symlink(labBootAutologinPath, link) // absolute: dangles under the temp root
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	m.gone(t, labBootAutologinLink)
+}

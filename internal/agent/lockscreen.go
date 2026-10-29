@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,13 +19,21 @@ import (
 // is decided per boot from the command line and lives under /run, so any boot
 // of the Volunteer's own entry (a deadline fallback, a power cut) can't have it.
 
+// SDDM reads /etc/sddm.conf.d, never /run/sddm.conf.d, so the drop-in is
+// reached through a link in /etc. On any other boot the link dangles, and SDDM
+// lists its config files with QDir::Files, which skips dangling links.
+
 // AutologinDropIn is the SDDM drop-in a Lab boot gets.
 type AutologinDropIn struct {
 	Path    string // under /run, so it never outlives the boot
+	Link    string // where SDDM reads it: a link to Path, named to sort after Omarchy's own
 	Content string
 }
 
-const labBootAutologinPath = "/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+const (
+	labBootAutologinPath = "/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+	labBootAutologinLink = "/etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+)
 
 // labBootAutologin is the drop-in a boot needs, if any: only a Lab boot of a
 // Volunteer's unencrypted Mac with a GUI user. A Lab-owned Mac keeps its
@@ -34,7 +43,7 @@ func labBootAutologin(cmdline, kind, guiUser string, encrypted bool) (AutologinD
 	if !IsLabBoot(cmdline) || kind != api.KindVolunteer || guiUser == "" || encrypted {
 		return AutologinDropIn{}, false
 	}
-	return AutologinDropIn{Path: labBootAutologinPath, Content: fmt.Sprintf(
+	return AutologinDropIn{Path: labBootAutologinPath, Link: labBootAutologinLink, Content: fmt.Sprintf(
 		"# maclab: this is a Lab boot, so the GUI user is logged in (and locked at once). Gone with the boot.\n[Autologin]\nUser=%s\nSession=%s\nRelogin=false\n",
 		guiUser, desktopSession())}, true
 }
@@ -134,8 +143,27 @@ func WriteLabBootAutologin(cfg *Config, say func(string, ...any)) error {
 	if err := os.WriteFile(d.Path, []byte(d.Content), 0o644); err != nil {
 		return err
 	}
-	say("Lab boot: %s logs in as %s, locked at once", d.Path, cfg.GUIUser)
+	if err := linkDropIn(d.Link, d.Path); err != nil {
+		os.Remove(d.Path) // no half-done autologin: the lock unit keys off this file
+		return err
+	}
+	say("Lab boot: %s (via %s) logs in as %s, locked at once", d.Path, d.Link, cfg.GUIUser)
 	return nil
+}
+
+// linkDropIn makes link a symlink to target, replacing whatever is at link.
+// Anything else there would be read by SDDM on every boot, not just this one.
+func linkDropIn(link, target string) error {
+	if got, err := os.Readlink(link); err == nil && got == target {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return err
+	}
+	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Symlink(target, link)
 }
 
 // labBootLockedPath is the lock unit's note of how locking went: "locked", or

@@ -57,7 +57,7 @@ func defaultLeaveLayout() leaveLayout {
 		Config:    ConfigPath,
 		Units:     []string{unitPath, labBootDeadlineUnitPath, labBootSessionUnitPath, labBootLockUnitPath},
 		UnitNames: []string{"lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName},
-		DropIns:   []string{labBootAutologinPath, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
+		DropIns:   []string{labBootAutologinPath, labBootAutologinLink, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
 		Stage:     stageDir(),
 		WorkDir:   "/var/lib/maclab",
 	}
