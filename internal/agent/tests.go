@@ -53,8 +53,12 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		return suspendDevices(ctx, t, outDir, l.GUIUser, quiet)
 	}
 
+	if err := t.PayloadError(); err != nil {
+		return fail(err)
+	}
 	script := filepath.Join(l.jobDir(job), "test-"+t.Name+".sh")
 	os.MkdirAll(filepath.Dir(script), 0o755)
+	inDir := filepath.Join(l.jobDir(job), "in-"+t.Name)
 	switch {
 	case t.Identity != nil && (t.Builtin != "" || t.Script != ""):
 		return fail(errors.New("an identity check runs lab-agent's own collector, not a builtin or a script"))
@@ -78,6 +82,9 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 			return fail(err)
 		}
 		os.Chmod(script, 0o755)
+		if err := fetchPayload(ctx, fetch, inDir, t.Payload); err != nil {
+			return fail(err)
+		}
 	default:
 		return fail(errors.New("test has neither builtin nor script"))
 	}
@@ -86,6 +93,9 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 	defer cancel()
 
 	env := append(os.Environ(), "MACLAB_OUT="+outDir, "MACLAB_JOB="+job, "MACLAB_TEST="+t.Name)
+	if len(t.Payload) > 0 {
+		env = append(env, "MACLAB_IN="+inDir)
+	}
 	skip := "MACLAB_SKIP_ON_SCREEN="
 	if t.SkipOnScreen {
 		skip += "1"
@@ -145,4 +155,26 @@ func (l *Linux) RunTest(ctx context.Context, job string, t api.TestSpec, fetch F
 		return fail(err)
 	}
 	return res
+}
+
+// fetchPayload puts a script test's payload files in a fresh dir, executable
+// so a binary can run from it. The dir is root's alone.
+func fetchPayload(ctx context.Context, fetch Fetcher, dir string, files []api.PayloadFile) error {
+	if len(files) == 0 {
+		return nil
+	}
+	os.RemoveAll(dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, p := range files {
+		dst := filepath.Join(dir, p.Name)
+		if err := fetch(ctx, p.SHA256, dst); err != nil {
+			return fmt.Errorf("payload file %s: %w", p.Name, err)
+		}
+		if err := os.Chmod(dst, 0o755); err != nil {
+			return err
+		}
+	}
+	return nil
 }

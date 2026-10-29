@@ -1519,6 +1519,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
 	}
+	if code, err := s.validatePayload(spec, d.Device); err != nil {
+		return nil, code, err
+	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {
 			return nil, 400, errors.New("baseline and crash-test jobs boot the known-good cmdline; drop --cmdline-base/--cmdline-strip")

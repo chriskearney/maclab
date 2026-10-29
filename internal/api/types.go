@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -515,6 +516,51 @@ type TestSpec struct {
 	// Identity makes the test the lab's own identity check of an Installed
 	// run: lab-agent runs its own read-only collector, not a script.
 	Identity *IdentityCheck `json:"identity,omitempty"`
+	// Payload is files the script needs beside it, by artifact sha256: each
+	// lands in $MACLAB_IN under its name before the script runs.
+	Payload []PayloadFile `json:"payload,omitempty"`
+}
+
+// MaxPayloadFiles is how many payload files one script test may carry.
+const MaxPayloadFiles = 16
+
+var (
+	rePayloadName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$`)
+	rePayloadSHA  = regexp.MustCompile(`^[0-9a-f]{64}$`)
+)
+
+// PayloadFile is one file a script test reads from $MACLAB_IN: a module, a
+// firmware blob, a binary. Name is a plain file name; SHA256 is the artifact.
+type PayloadFile struct {
+	Name   string `json:"name"`
+	SHA256 string `json:"sha256"`
+}
+
+// PayloadError is why the test's payload files cannot be used, or nil. labd
+// asks it at submit and lab-agent asks it again before it fetches anything.
+func (t TestSpec) PayloadError() error {
+	if len(t.Payload) == 0 {
+		return nil
+	}
+	if t.Script == "" || t.Builtin != "" || t.GUI {
+		return fmt.Errorf("payload files go only with a --script test, which runs as root")
+	}
+	if len(t.Payload) > MaxPayloadFiles {
+		return fmt.Errorf("at most %d payload files per test, got %d", MaxPayloadFiles, len(t.Payload))
+	}
+	seen := map[string]bool{}
+	for _, p := range t.Payload {
+		switch {
+		case !rePayloadName.MatchString(p.Name):
+			return fmt.Errorf("payload name %q must be a plain file name (letters, digits, . _ + -, no leading dot or slash)", p.Name)
+		case !rePayloadSHA.MatchString(p.SHA256):
+			return fmt.Errorf("payload file %s must be an artifact sha256 (upload it first)", p.Name)
+		case seen[p.Name]:
+			return fmt.Errorf("payload name %s given twice", p.Name)
+		}
+		seen[p.Name] = true
+	}
+	return nil
 }
 
 // IdentityCheck is what an Installed run's identity check observes: the
