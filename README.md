@@ -328,6 +328,14 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 
 No other job runs on a Mac until its baseline passes.
 
+A distro kernel update (`pacman -Syu`) removes the known-good kernel's package, and
+preflight then holds every job back with "known-good kernel ... is no longer
+installed"; `lab status` says so with the fix. Reboot the Mac onto the new kernel,
+then run `lab baseline <mac>` again: it records the running kernel as the Mac's
+known-good, and labd's once it passes. Until it passes, the Mac has no known-good
+kernel on labd and takes no other job. The baseline passes only if a plain reboot
+comes back on that kernel, so it must be the bootloader's default entry.
+
 To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made. First it
 tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, saying why, lists it as
 `left`, and from then on neither resets it nor asks for hands, as it otherwise would once the agent

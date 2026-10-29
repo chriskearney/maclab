@@ -1003,6 +1003,15 @@ func showDevices(ctx context.Context, c *client.Client) error {
 	}
 	w.Flush()
 	for _, d := range devs {
+		// jobs are refused until these are fixed, so say so before lab run does
+		for _, p := range d.Facts.Problems {
+			if api.StaleKnownGood(p) {
+				p += ": " + api.StaleKnownGoodFix(d.Name, d.Kernel)
+			}
+			fmt.Printf("%s fails preflight: %s\n", d.Name, p)
+		}
+	}
+	for _, d := range devs {
 		if d.Action != nil {
 			fmt.Printf("\n>>> %s\n%s\n", strings.ToUpper(d.Action.Title), indent(d.Action.Text()))
 		}
@@ -1052,6 +1061,9 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 		fmt.Printf("  preflight problems:\n")
 		for _, p := range d.Facts.Problems {
 			fmt.Printf("    - %s\n", p)
+			if api.StaleKnownGood(p) {
+				fmt.Printf("      %s\n", api.StaleKnownGoodFix(d.Name, d.Kernel))
+			}
 		}
 	}
 	if len(d.Facts.Warnings) > 0 {
