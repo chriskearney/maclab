@@ -367,6 +367,7 @@ func (u *uninstaller) uninstall() error {
 		u.journald,
 		u.serialGetty,
 		u.autologin,
+		func() error { return u.remove(u.path(labBootAutologinLink), " (the Lab-boot autologin link)") },
 		func() error { return u.remove(u.path(filepath.Dir(ConfigPath)), " (the device secret)") },
 		func() error { return u.remove(u.path(binPath+".new"), "") },
 		func() error { return u.remove(u.path(binPath), "") },
@@ -432,19 +433,38 @@ func (u *uninstaller) enrolled() error {
 	return nil
 }
 
-// service stops the agent first, so labd can't start anything mid-uninstall.
+// service stops the agent first, so labd can't start anything mid-uninstall,
+// then disables the lab's other units (the ones leave disables too) and
+// removes every unit file setup wrote.
 func (u *uninstaller) service() error {
-	unit := u.path(unitPath)
-	if !exists(unit) {
-		u.stopped = true
-		return nil
-	}
-	if err := u.systemctl("disable", "--now", "lab-agent.service"); err != nil {
-		return err
+	if exists(u.path(labUnitPaths[0])) {
+		if err := u.systemctl("disable", "--now", labUnitNames[0]); err != nil {
+			return err
+		}
 	}
 	u.stopped = true
-	if err := u.remove(unit, ""); err != nil {
-		return err
+	var others, files []string
+	for i, p := range labUnitPaths {
+		if !exists(u.path(p)) {
+			continue
+		}
+		files = append(files, u.path(p))
+		if i > 0 {
+			others = append(others, labUnitNames[i])
+		}
+	}
+	if len(others) > 0 {
+		if err := u.systemctl(append([]string{"disable", "--now"}, others...)...); err != nil {
+			return err
+		}
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	for _, f := range files {
+		if err := u.remove(f, ""); err != nil {
+			return err
+		}
 	}
 	return u.systemctl("daemon-reload")
 }

@@ -2,6 +2,8 @@ package agent
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -117,6 +119,67 @@ func TestLockFallsBackToHyprlockOnOlderOmarchy(t *testing.T) {
 func TestNoLockCommandMeansNoLockCommand(t *testing.T) {
 	if argv, ok := lockCommand(func(string) bool { return false }); ok {
 		t.Errorf("lock command %v with neither lock installed", argv)
+	}
+}
+
+// SDDM reads /etc/sddm.conf.d and never /run/sddm.conf.d: a drop-in only under
+// /run logs nobody in (seen on a real M3 Max, SDDM 0.21).
+func TestAutologinDropInIsLinkedFromWhereSDDMReads(t *testing.T) {
+	d, ok := labBootAutologin(labBootLine(), api.KindVolunteer, "ada", false)
+	if !ok {
+		t.Fatal("no drop-in")
+	}
+	if filepath.Dir(d.Link) != "/etc/sddm.conf.d" || filepath.Base(d.Link) != filepath.Base(d.Path) {
+		t.Errorf("link %q to %q: want the drop-in's name in /etc/sddm.conf.d", d.Link, d.Path)
+	}
+	// SDDM reads its drop-ins in name order, the last one winning
+	for _, omarchy := range []string{"autologin.conf", "99-omarchy-login.conf", "10-wayland.conf"} {
+		if filepath.Base(d.Link) <= omarchy {
+			t.Errorf("%s sorts before Omarchy's %s, which would override it", filepath.Base(d.Link), omarchy)
+		}
+	}
+}
+
+func TestDropInLinkResolvesOnlyWhileTheRunFileExists(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "run/sddm.conf.d/zz.conf")
+	link := filepath.Join(root, "etc/sddm.conf.d/zz.conf")
+	os.MkdirAll(filepath.Dir(target), 0o755)
+	os.WriteFile(target, []byte("[Autologin]\nUser=ada\n"), 0o644)
+	if err := linkDropIn(link, target); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := os.ReadFile(link); err != nil || !strings.Contains(string(b), "User=ada") {
+		t.Fatalf("on a Lab boot the link reads %q, %v", b, err)
+	}
+	// the next boot: /run is empty, so the link dangles and SDDM skips it
+	os.Remove(target)
+	if _, err := os.Stat(link); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("after the Lab boot the link still resolves: %v", err)
+	}
+	if err := linkDropIn(link, target); err != nil {
+		t.Errorf("relinking a dangling link: %v", err)
+	}
+}
+
+// Anything else under the link's name would autologin on every boot.
+func TestDropInLinkReplacesWhateverWasThere(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "run/zz.conf")
+	link := filepath.Join(root, "etc/zz.conf")
+	os.MkdirAll(filepath.Dir(link), 0o755)
+	for name, put := range map[string]func(){
+		"a regular file":         func() { os.WriteFile(link, []byte("[Autologin]\nUser=ada\n"), 0o644) },
+		"a link to another file": func() { os.Symlink(filepath.Join(root, "elsewhere.conf"), link) },
+	} {
+		os.Remove(link)
+		put()
+		if err := linkDropIn(link, target); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got, err := os.Readlink(link); err != nil || got != target {
+			t.Errorf("%s: link is %q, %v; want a link to %s", name, got, err, target)
+		}
 	}
 }
 

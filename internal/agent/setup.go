@@ -235,7 +235,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := os.WriteFile(labBootLockUnitPath, []byte(labBootLockUnit()), 0o644); err != nil {
 		return err
 	}
-	for _, args := range [][]string{{"daemon-reload"}, {"enable", "lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName}, {"restart", "lab-agent.service"}} {
+	for _, args := range [][]string{{"daemon-reload"}, append([]string{"enable"}, labUnitNames...), {"restart", "lab-agent.service"}} {
 		if out, err := exec.Command("systemctl", args...).CombinedOutput(); err != nil {
 			return fmt.Errorf("systemctl %s: %v: %s", strings.Join(args, " "), err, out)
 		}
