@@ -500,6 +500,12 @@ rebuild() {
 
 # ---- status ----------------------------------------------------------------------------------
 
+# mkinitcpio configs other than this script's drop-in that add a file from $KEYDIR
+# (an older auto-unlock setup, say), space-separated.
+foreign_key_configs() {
+	grep -lsF "$KEYDIR/" /etc/mkinitcpio.conf /etc/mkinitcpio.conf.d/*.conf 2>/dev/null | grep -vxF "$DROPIN" | paste -sd' ' || true
+}
+
 status() {
 	local f s slots n k t e other=() ct ok
 	probe_key
@@ -530,6 +536,8 @@ status() {
 		say "UNEXPLAINED key slots: ${ORPHANS[*]} use pbkdf2 with 1000 iterations, as this script's do, but the key file doesn't open them (an old auto-unlock key? disable removes it when a boot image still holds its key; otherwise cryptsetup luksKillSlot $DEVICE <slot>)"
 	fi
 	if [[ -f $DROPIN ]]; then say "drop-in: $DROPIN: $(tr '\n' ' ' <"$DROPIN")"; else say "drop-in: none"; fi
+	foreign=$(foreign_key_configs)
+	[[ -z $foreign ]] || say "OTHER mkinitcpio config putting a key from $KEYDIR into the images: $foreign (not this script's; move it aside before disable)"
 	if cmdfile_has_token; then say "command line: $CMDFILE has $TOKEN"; else say "command line: $CMDFILE has no $TOKEN"; fi
 	e=$(other_luks_keys)
 	[[ -z $e ]] || say "command line: $CMDFILE also has $e (enable refuses while it is there)"
@@ -746,6 +754,8 @@ disable() {
 	fi
 	check_cmdfile remove
 	need_rebuild_tools
+	foreign=$(foreign_key_configs)
+	[[ -z $foreign ]] || die "$foreign also puts a key from $KEYDIR into the boot images; this script didn't write it, and the rebuild would fail once the key file is gone. Move it aside, then run disable again"
 	confirm disable
 
 	# The key slots go first, so the copies of the key on this Mac (boot images, snapshots,
