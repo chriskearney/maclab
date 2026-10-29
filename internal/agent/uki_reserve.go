@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -233,3 +234,50 @@ func ukiScratchPath(p string) (string, error) {
 	}
 	return abs, nil
 }
+
+// ukiSizeGuess is the UKI size preflight assumes when the ESP has none of its
+// own to measure. Omarchy's Asahi UKIs are about 60 MiB.
+const ukiSizeGuess uint64 = 64 << 20
+
+// largestUKI is the biggest UKI under <esp>/EFI/Linux, where Limine's tools
+// put the Mac's own. A staged test kernel is built from the known-good kernel
+// and an initramfs like theirs, so it is about that size. "" and 0: none.
+func largestUKI(esp string) (string, uint64) {
+	var name string
+	var size uint64
+	filepath.WalkDir(filepath.Join(esp, "EFI", "Linux"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".efi") {
+			return nil
+		}
+		if info, err := d.Info(); err == nil && info.Mode().IsRegular() && uint64(info.Size()) > size {
+			name, size = p, uint64(info.Size())
+		}
+		return nil
+	})
+	return name, size
+}
+
+// limineStageProblem says why the ESP can't take a staged test kernel, or ""
+// if it can. free is what staging may use (staged jobs count as free: a job
+// cleans them up first); allocation is the ESP's allocation unit. The need is
+// what writeUKIWith checks before it copies a UKI: the UKI, rounded up, plus
+// the retained reserve and the metadata allowance.
+func limineStageProblem(esp, stage string, free, allocation uint64) string {
+	name, size := largestUKI(esp)
+	what := "the size of " + name
+	if size == 0 {
+		size, what = ukiSizeGuess, "a guess: there is no UKI in "+filepath.Join(esp, "EFI", "Linux")+" to measure"
+	}
+	need, err := ukiRequiredSpace(size, allocation)
+	if err != nil {
+		return fmt.Sprintf("can't work out the space staging a test kernel needs in %s: %v", stage, err)
+	}
+	if free >= need {
+		return ""
+	}
+	return fmt.Sprintf("not enough free space on the ESP to stage a test kernel in %s: staging needs %.1f MiB "+
+		"(a UKI of about %.1f MiB, %s, plus the %d MiB reserve and %d MiB for metadata), and %.1f MiB is free",
+		stage, mib(need), mib(size), what, limineMinFree>>20, ukiMetadataAllowance>>20, mib(free))
+}
+
+func mib(n uint64) float64 { return float64(n) / (1 << 20) }

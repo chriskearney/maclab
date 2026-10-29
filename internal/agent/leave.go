@@ -18,6 +18,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -51,12 +52,20 @@ const (
 	sddmAutologinConf = "/etc/sddm.conf.d/zz-maclab-autologin.conf"
 )
 
+// labUnitNames and labUnitPaths are every systemd unit setup installs and
+// enables, by name and by unit file, lab-agent.service first. Leaving and
+// uninstall both take all of them out.
+var (
+	labUnitNames = []string{"lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName}
+	labUnitPaths = []string{unitPath, labBootDeadlineUnitPath, labBootSessionUnitPath, labBootLockUnitPath}
+)
+
 // defaultLeaveLayout is the layout setup writes on a real Mac.
 func defaultLeaveLayout() leaveLayout {
 	l := leaveLayout{
 		Config:    ConfigPath,
-		Units:     []string{unitPath, labBootDeadlineUnitPath, labBootSessionUnitPath, labBootLockUnitPath},
-		UnitNames: []string{"lab-agent.service", labBootDeadlineUnitName, labBootSessionUnitName, labBootLockUnitName},
+		Units:     slices.Clone(labUnitPaths),
+		UnitNames: slices.Clone(labUnitNames),
 		DropIns:   []string{labBootAutologinPath, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
 		Stage:     stageDir(),
 		WorkDir:   "/var/lib/maclab",
