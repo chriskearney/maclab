@@ -1,7 +1,8 @@
 #!/bin/bash
 # lab-only-autounlock: let a lab-only Omarchy Mac with an encrypted root boot without the disk
-# passphrase, so lab-agent can reboot it unattended. For Lab-owned Macs and fresh lab-only installs
-# with nothing personal on them. See docs/encrypted-macs.md.
+# passphrase, so lab-agent can reboot it unattended. For Lab-owned Macs, fresh lab-only installs
+# with nothing personal on them, and a lab-only install a Volunteer lends the lab with their
+# explicit agreement. See docs/encrypted-macs.md.
 #
 #   sudo scripts/lab-only-autounlock status          what is set up now (changes nothing)
 #   sudo scripts/lab-only-autounlock enable [--yes]  add a key slot, put its key in the boot images
@@ -14,9 +15,11 @@
 # enable: a random 64-byte key in /etc/cryptsetup-keys.d/<volume>.key, a LUKS2 key slot for it
 # (pbkdf2, 1000 iterations: it is random, so a slow KDF buys nothing), FILES+=(<key>) in a
 # mkinitcpio drop-in, rd.luks.key=<uuid>=<key> on the kernel command line, and a rebuild of the
-# boot images. It then checks every boot image holds the key and the key opens the volume.
-# disable: removes the key slot with the key file first (that makes every copy of the key useless),
-# then the key file, the drop-in and the cmdline argument, rebuilds and checks.
+# boot images. It then checks every boot image and boot entry has it and the key opens the volume.
+# disable: removes the key slot first (with the key file, or with the key copied out of a boot
+# image when the key file is gone), so the copies left on this Mac open nothing; then the key
+# file, the drop-in and the cmdline argument, rebuilds and checks. It can't undo what someone who
+# had the Mac while it was enabled may have kept: the volume key never changes.
 set -euo pipefail
 export LC_ALL=C
 
@@ -26,10 +29,26 @@ KEYDIR=/etc/cryptsetup-keys.d
 STATE=/boot/omarchy/encrypt.state # Omarchy Mac: the owner's and recovery key slots
 LIMINE=/etc/default/limine
 GRUB=/etc/default/grub
+CRYPTTAB=/etc/crypttab.initramfs
 BACKUPS=/root/lab-only-autounlock-backups
+TMPD=
 
 die() { printf '%s: %s\n' "$PROG" "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
+
+# A private folder for keys copied out of boot images; shredded on exit.
+cleanup() {
+	[[ -n $TMPD && -d $TMPD ]] || return 0
+	find "$TMPD" -type f -exec shred -u -- {} + 2>/dev/null || true
+	rm -rf -- "$TMPD"
+}
+trap cleanup EXIT
+
+make_tmpd() {
+	[[ -n $TMPD ]] && return 0
+	TMPD=$(mktemp -d "/run/$PROG.XXXXXX") || die "couldn't make a private folder in /run"
+	chmod 700 "$TMPD"
+}
 
 # ---- the layout this supports ----------------------------------------------------------------
 
@@ -53,11 +72,40 @@ keyslots() {
 	awk '/^[^ \t]/ { k = ($0 == "Keyslots:") } k && /^ +[0-9]+: luks2/ { sub(":", "", $1); print $1 }' <<<"$dump"
 }
 
+# Sets PBKDF2_SLOTS to the key slots made the way this script makes them (pbkdf2, 1000
+# iterations). A passphrase slot gets argon2id, or pbkdf2 with a benchmarked iteration count far
+# above 1000, so these are how to tell an auto-unlock slot whose key is gone.
+pbkdf2_slots() {
+	local dump
+	dump=$(cryptsetup luksDump "$DEVICE") || die "couldn't read the LUKS header of $DEVICE"
+	mapfile -t PBKDF2_SLOTS < <(awk '
+		/^[^ \t]/ { k = ($0 == "Keyslots:"); next }
+		!k { next }
+		/^ +[0-9]+: luks2/ { s = $1; sub(":", "", s); p[s] = ""; it[s] = ""; next }
+		$1 == "PBKDF:" { p[s] = $2 }
+		$1 == "Iterations:" { it[s] = $2 }
+		END { for (x in p) if (p[x] == "pbkdf2" && it[x] == "1000") print x }
+	' <<<"$dump" | sort -n)
+}
+
+# Sets ORPHANS to the pbkdf2/1000 slots that are neither kept nor among the slots given.
+orphan_slots() {
+	local s
+	ORPHANS=()
+	pbkdf2_slots
+	for s in "${PBKDF2_SLOTS[@]}"; do
+		kept "$s" && continue
+		[[ " $* " == *" $s "* ]] && continue
+		ORPHANS+=("$s")
+	done
+}
+
 state_value() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$STATE"; }
 
-# Sets UUID, VOLUME, DEVICE, KEY, TOKEN, MODE, CMDFILE, CMDLINE_RE, REBUILD, ESP, UKI_NAME, KEEP.
+# Sets UUID, VOLUME, DEVICE, KEY, TOKEN, MODE, CMDFILE, CMDLINE_RE, REBUILD, ESP, UKI_NAME,
+# LIMINE_CONF, KEEP.
 check_layout() {
-	local args hooks root state_uuid slots s owner recovery
+	local args hooks root state_uuid slots s owner recovery c
 	mapfile -t args < <(tr ' ' '\n' </proc/cmdline | grep -E '^rd\.luks\.(name|uuid)=' || true)
 	(( ${#args[@]} == 1 )) || die "expected exactly one rd.luks.name= or rd.luks.uuid= on the kernel command line, found ${#args[@]}; this needs a LUKS2 root that the systemd initramfs unlocks"
 	case ${args[0]} in
@@ -87,11 +135,14 @@ check_layout() {
 	grep -qx sd-encrypt <<<"$hooks" || die "the initramfs has no sd-encrypt hook"
 	! grep -qx encrypt <<<"$hooks" || die "the initramfs uses the busybox encrypt hook, which reads neither rd.luks.key nor $KEYDIR"
 
-	# Where the kernel command line comes from. On an Omarchy Mac, omarchy-mac-limine-cmdline
-	# derives Limine's KERNEL_CMDLINE from GRUB_CMDLINE_LINUX in /etc/default/grub at every
-	# rebuild: an edit to /etc/default/limine never reaches limine.conf there.
+	# Where the kernel command line comes from. On an Omarchy Mac (the omarchy-mac tools are
+	# there), omarchy-mac-limine-cmdline derives Limine's KERNEL_CMDLINE from GRUB_CMDLINE_LINUX in
+	# /etc/default/grub at every rebuild: an edit to /etc/default/limine never reaches limine.conf.
 	[[ -r $LIMINE ]] || die "no $LIMINE: this handles Limine with UKIs only"
-	if [[ -f $GRUB ]] && command -v omarchy-mac-limine-cmdline >/dev/null && command -v omarchy-mac-boot-update >/dev/null; then
+	if command -v omarchy-mac-limine-cmdline >/dev/null || command -v omarchy-mac-boot-update >/dev/null; then
+		command -v omarchy-mac-limine-cmdline >/dev/null && command -v omarchy-mac-boot-update >/dev/null ||
+			die "this looks like an Omarchy Mac, but omarchy-mac-limine-cmdline or omarchy-mac-boot-update is missing; not guessing where the kernel command line comes from"
+		[[ -f $GRUB ]] || die "this is an Omarchy Mac, but there is no $GRUB: omarchy-mac-limine-cmdline takes the kernel command line from GRUB_CMDLINE_LINUX there, and an edit to $LIMINE wouldn't reach limine.conf. Put GRUB_CMDLINE_LINUX back (see omarchy-mac-limine-cmdline), then run this again"
 		omarchy-mac-limine-active || die "this Mac doesn't boot Limine (omarchy-mac-limine-active); this handles Limine with UKIs only"
 		MODE=omarchy-mac CMDFILE=$GRUB CMDLINE_RE='^GRUB_CMDLINE_LINUX=' REBUILD=omarchy-mac-boot-update
 	else
@@ -106,6 +157,11 @@ check_layout() {
 	[[ -n $ESP && -d $ESP/EFI/Linux ]] || die "ESP_PATH ($ESP) in $LIMINE has no EFI/Linux folder"
 	command -v objcopy >/dev/null || die "reading a UKI needs objcopy (binutils)"
 	command -v lsinitcpio >/dev/null || die "no lsinitcpio to read the boot images"
+	# The limine.conf Limine reads: the first of its own search paths on the ESP.
+	LIMINE_CONF=
+	for c in EFI/BOOT/limine.conf boot/limine/limine.conf boot/limine.conf limine/limine.conf limine.conf; do
+		[[ -f $ESP/$c ]] && { LIMINE_CONF=$ESP/$c; break; }
+	done
 
 	# Slots this never touches: the owner's and recovery key's, where encrypt.state records them.
 	KEEP=()
@@ -125,20 +181,24 @@ check_layout() {
 
 kept() { local s; for s in "${KEEP[@]}"; do [[ $1 == "$s" ]] && return 0; done; return 1; }
 
-# Sets KEY_SLOT to the slot the key file opens, or empty when it opens none (or there is no key
-# file). Any other cryptsetup failure stops the script: never guess "not enrolled".
-probe_key() {
+# Sets PROBED to the slot key file $1 opens, or empty when it opens none (or doesn't exist). Any
+# other cryptsetup failure stops the script: never guess "not enrolled".
+probe_file() {
 	local out status=0
-	KEY_SLOT=
-	[[ -f $KEY ]] || return 0
-	out=$(cryptsetup open --test-passphrase --verbose --token-type passphrase-only --key-file "$KEY" "$DEVICE" 2>&1) || status=$?
+	PROBED=
+	[[ -f $1 ]] || return 0
+	out=$(cryptsetup open --test-passphrase --verbose --token-type passphrase-only --key-file "$1" "$DEVICE" 2>&1) || status=$?
 	case $status in
-		0) KEY_SLOT=$(grep -o 'Key slot [0-9]* unlocked' <<<"$out" | grep -o '[0-9]*' | head -1) || true
-		   [[ -n $KEY_SLOT ]] || die "cryptsetup opened the disk with the key file but didn't say which slot" ;;
+		0) PROBED=$(grep -o 'Key slot [0-9]* unlocked' <<<"$out" | grep -o '[0-9]*' | head -1) || true
+		   [[ -n $PROBED ]] || die "cryptsetup opened the disk with $1 but didn't say which slot" ;;
 		2) ;;
-		*) die "couldn't check the key file against $DEVICE (cryptsetup exit $status): ${out##*$'\n'}" ;;
+		*) die "couldn't check $1 against $DEVICE (cryptsetup exit $status): ${out##*$'\n'}" ;;
 	esac
 }
+
+# Sets KEY_SLOT to the slot the key file opens, or empty when it opens none (or there is no key
+# file).
+probe_key() { probe_file "$KEY"; KEY_SLOT=$PROBED; }
 
 refuse_kept() {
 	[[ -n $KEY_SLOT ]] && kept "$KEY_SLOT" || return 0
@@ -155,6 +215,20 @@ ukis() {
 initramfs_images() {
 	local f
 	for f in /boot/initramfs-*.img; do [[ -f $f ]] && printf '%s\n' "$f"; done
+	return 0
+}
+
+# The test kernels lab-agent stages as UKIs under <esp>/maclab/<job>/. They are built from this
+# Mac's initramfs, so they hold the key too; lab-agent uninstall (or leave) removes them.
+staged_ukis() {
+	local d seen=" "
+	for d in "$ESP" /boot/efi /efi /boot; do
+		[[ -d $d/maclab ]] || continue
+		d=$(readlink -f "$d/maclab")
+		[[ $seen == *" $d "* ]] && continue
+		seen+="$d "
+		find "$d" -maxdepth 3 -type f -name '*.efi' 2>/dev/null || true
+	done
 	return 0
 }
 
@@ -177,8 +251,51 @@ uki_token() {
 	if has_word "$line" "$TOKEN"; then echo yes; else echo no; fi
 }
 
+# The limine.conf entries that boot this Mac's UKIs, one "<entry>\t<state>" line each, where
+# state is yes or no (the entry's own cmdline: has TOKEN or not) or none (no cmdline: line, so the
+# UKI's embedded one applies). Snapshot entries and the maclab block are left out: those still
+# ask for the passphrase. On an Omarchy Mac the entries carry their own cmdline: and systemd-stub
+# boots that one, so the UKI's .cmdline alone doesn't say what boots.
+limine_entries() {
+	[[ -n $LIMINE_CONF && -r $LIMINE_CONF ]] || return 0
+	TOK=$TOKEN UKI=$UKI_NAME awk '
+		function flush(   st, d, full) {
+			if (name != "" && !skip && path ~ ("/EFI/Linux/" uki "_[^/#]*\\.efi")) {
+				gsub(/[[:space:]]+/, " ", cmd)
+				st = !hascmd ? "none" : (index(" " cmd " ", " " tok " ") ? "yes" : "no")
+				print name "\t" st
+			}
+			name = ""; path = ""; cmd = ""; hascmd = 0
+		}
+		BEGIN { tok = ENVIRON["TOK"]; uki = ENVIRON["UKI"] }
+		/^[[:space:]]*# maclab: begin/ { flush(); inlab = 1; next }
+		/^[[:space:]]*# maclab: end/ { flush(); inlab = 0; next }
+		/^[[:space:]]*\// {
+			flush()
+			line = $0; sub(/^[[:space:]]*/, "", line)
+			depth = match(line, /[^\/]/) - 1
+			if (depth < 1) next
+			label = substr(line, depth + 1); sub(/^\+/, "", label)
+			names[depth] = label
+			skip = inlab; name = ""
+			for (d = 1; d <= depth; d++) {
+				if (tolower(names[d]) ~ /snapshot/) skip = 1
+				name = name (d > 1 ? " / " : "") names[d]
+			}
+			next
+		}
+		/^[[:space:]]*[A-Za-z_]+:/ {
+			key = $0; sub(/^[[:space:]]*/, "", key); val = key
+			sub(/:.*/, "", key); key = tolower(key); sub(/^[^:]*:[[:space:]]*/, "", val)
+			if (key == "path" || key == "image_path" || key == "kernel_path") path = val
+			else if (key == "cmdline" || key == "kernel_cmdline") { cmd = val; hascmd = 1 }
+		}
+		END { flush() }
+	' "$LIMINE_CONF"
+}
+
 all_images_keyed() {
-	local f
+	local f e
 	[[ -n $(ukis) ]] || return 1
 	while read -r f; do
 		[[ -z $f ]] || [[ $(image_key "$f") == yes && $(uki_token "$f") == yes ]] || return 1
@@ -186,6 +303,9 @@ all_images_keyed() {
 	while read -r f; do
 		[[ -z $f ]] || [[ $(image_key "$f") == yes ]] || return 1
 	done < <(initramfs_images)
+	e=$(limine_entries)
+	[[ -n $e ]] || return 1
+	! grep -q $'\tno$' <<<"$e"
 }
 
 has_word() { [[ " $1 " == *[[:space:]]"$2"[[:space:]]* ]]; }
@@ -193,6 +313,110 @@ has_word() { [[ " $1 " == *[[:space:]]"$2"[[:space:]]* ]]; }
 # Whether a command-line line of CMDFILE holds TOKEN. (No grep -q at the end of a pipe: it can
 # stop the first grep early, and pipefail then reports a miss.)
 cmdfile_has_token() { grep -E "$CMDLINE_RE" "$CMDFILE" | grep -F -- "$TOKEN" >/dev/null; }
+
+# Any other rd.luks.key= in CMDFILE's command line that applies to this volume: one for its UUID,
+# or one without a UUID (which applies to every volume).
+other_luks_keys() {
+	{ grep -E "$CMDLINE_RE" "$CMDFILE" || true; } | tr -s " \t\"'" '\n' | { grep -E '^rd\.luks\.key=' || true; } |
+		{ grep -vxF -- "$TOKEN" || true; } | { grep -iE "^rd\.luks\.key=(${UUID}=|[^0-9a-f])" || true; } | sort -u | paste -sd' '
+}
+
+# The entry for this volume in /etc/crypttab.initramfs, if any.
+crypttab_entry() {
+	[[ -r $CRYPTTAB ]] || return 0
+	awk -v vol="$VOLUME" -v uuid="${UUID,,}" '!/^[[:space:]]*(#|$)/ { if ($1 == vol || index(tolower($2), uuid)) { print; exit } }' "$CRYPTTAB"
+}
+
+# The checks edit_cmdline makes, run before anything changes, so a refusal there can't come after
+# the key slot is added or removed.
+check_cmdfile() {
+	local lines
+	[[ -w $CMDFILE ]] || die "can't write $CMDFILE"
+	if [[ $1 == add ]] && cmdfile_has_token; then return 0; fi
+	if [[ $1 == remove ]] && ! cmdfile_has_token; then return 0; fi
+	lines=$(grep -E "$CMDLINE_RE" "$CMDFILE" || true)
+	if [[ $1 == add && -z $lines && $MODE != omarchy-mac ]]; then
+		die "$CMDFILE has no command line to add to; nothing changed"
+	fi
+	if [[ -n $lines ]] && grep -vE '^[^"]*="[^"]*"[[:space:]]*$' <<<"$lines" >/dev/null; then
+		die "$CMDFILE has a command line that isn't one plain double-quoted value; $1 \"$TOKEN\" there by hand, then run this again. Nothing changed"
+	fi
+}
+
+# Whether users other than root can read file $1 (by its mode, or because a user owns it).
+others_can_read() {
+	local m o
+	read -r m o < <(stat -c '%a %u' "$1")
+	(( (8#$m & 8#044) || o != 0 ))
+}
+
+# Whether the ESP's FAT mount lets users other than root read its files: its fmask (or umask)
+# leaves group or other read on. With neither set, vfat takes the mounter's umask, usually 022.
+esp_open() {
+	local fs opts mask
+	read -r fs opts < <(findmnt -no FSTYPE,OPTIONS -T "$ESP/EFI/Linux") || return 1
+	[[ $fs == vfat ]] || return 1
+	mask=$(tr ',' '\n' <<<"$opts" | sed -n 's/^fmask=//p' | tail -1)
+	[[ -n $mask ]] || mask=$(tr ',' '\n' <<<"$opts" | sed -n 's/^umask=//p' | tail -1)
+	[[ -n $mask ]] || return 0
+	(( (8#$mask & 8#044) != 8#044 ))
+}
+
+# Loud warnings for every boot image that holds the key and users other than root can read: lab
+# jobs run their tools as the GUI user, so any of them could copy the key.
+readable_warnings() {
+	local f warned=0
+	if esp_open; then
+		say "WARNING: $ESP is mounted so that every user can read its files (fmask/umask leaves read on). The UKIs there hold the disk key while this is enabled, and lab jobs run tools as the GUI user. Mount it root-only: fmask=0077,dmask=0077 in /etc/fstab, then remount."
+		warned=1
+	fi
+	while read -r f; do
+		[[ -n $f && $(image_key "$f") == yes ]] || continue
+		if others_can_read "$f"; then
+			say "WARNING: $f holds the disk key and users other than root can read it ($(stat -c 'mode %a, owner %U' "$f"))."
+			warned=1
+		fi
+	done < <(ukis; initramfs_images; staged_ukis)
+	(( warned )) || return 0
+}
+
+# Copies the key file out of boot image $1 into the private folder and prints its path. From a
+# UKI: its .initrd section (objcopy), then bsdcpio for just that file; else lsinitcpio -x of the
+# whole image. Fails (returns 1) when neither works.
+extract_key() {
+	local dir rel=etc/cryptsetup-keys.d/$VOLUME.key
+	dir=$(mktemp -d "$TMPD/x.XXXXXX") || return 1
+	if command -v bsdcpio >/dev/null; then
+		if [[ $1 == *.efi ]]; then
+			if objcopy -O binary --only-section=.initrd "$1" "$dir/initrd" 2>/dev/null && [[ -s $dir/initrd ]]; then
+				(cd "$dir" && bsdcpio -i -d --quiet "$rel" <initrd) >/dev/null 2>&1 || true
+			fi
+		else
+			(cd "$dir" && bsdcpio -i -d --quiet "$rel" <"$1") >/dev/null 2>&1 || true
+		fi
+	fi
+	if [[ ! -s $dir/$rel ]]; then
+		(cd "$dir" && lsinitcpio -x "$1") >/dev/null 2>&1 || true
+	fi
+	[[ -f $dir/$rel && ! -L $dir/$rel && -s $dir/$rel ]] || return 1
+	chmod 600 "$dir/$rel"
+	printf '%s\n' "$dir/$rel"
+}
+
+# Says which pbkdf2/1000 slots nothing here opens and how to remove one, then exits 1. Slots given
+# are left out.
+report_orphans() {
+	orphan_slots "$@"
+	(( ${#ORPHANS[@]} )) || return 0
+	say "Key slots ${ORPHANS[*]} use pbkdf2 with 1000 iterations, as this script's do, but nothing on this"
+	say "Mac opens them: most likely an old auto-unlock key (from a snapshot restored after enable, or a"
+	say "key file deleted by hand). Anyone who kept a copy of that key could still open the disk."
+	(( ${#KEEP[@]} )) && say "The owner's and recovery slots ($STATE) are ${KEEP[*]}."
+	say "To remove one you are sure of:"
+	say "  cryptsetup luksKillSlot $DEVICE <slot>   (asks for a passphrase that opens another slot)"
+	say "then run this again."
+	exit 1
+}
 
 confirm() {
 	(( YES )) && return 0
@@ -258,6 +482,11 @@ edit_cmdline() {
 	say "$([[ $1 == add ]] && echo Added || echo Removed) $TOKEN $([[ $1 == add ]] && echo in || echo from) $CMDFILE"
 }
 
+need_rebuild_tools() {
+	[[ -z $(initramfs_images) || -x /usr/bin/mkinitcpio ]] || die "/boot holds initramfs images but there is no /usr/bin/mkinitcpio to rebuild them; nothing changed"
+	command -v "$REBUILD" >/dev/null || die "no $REBUILD to rebuild the boot images; nothing changed"
+}
+
 rebuild() {
 	# Initramfs images in /boot get the same treatment, so no image is left behind. mkinitcpio
 	# goes first and the Limine tools last, so the UKIs Limine boots are theirs.
@@ -272,7 +501,7 @@ rebuild() {
 # ---- status ----------------------------------------------------------------------------------
 
 status() {
-	local f s slots n k t other=()
+	local f s slots n k t e other=() ct ok
 	probe_key
 	slots=$(keyslots)
 	n=$(grep -c . <<<"$slots") || true
@@ -295,49 +524,94 @@ status() {
 		done <<<"$slots"
 		say "other key slots: ${other[*]:-none}$( (( ${#other[@]} )) && echo ' (neither kept nor opened by the key file: an old key from a restored snapshot? cryptsetup luksKillSlot removes one you are sure of)')"
 	fi
+	# With or without encrypt.state: slots made like this script's that the key file doesn't open.
+	orphan_slots "${KEY_SLOT:-}"
+	if (( ${#ORPHANS[@]} )); then
+		say "UNEXPLAINED key slots: ${ORPHANS[*]} use pbkdf2 with 1000 iterations, as this script's do, but the key file doesn't open them (an old auto-unlock key? disable removes it when a boot image still holds its key; otherwise cryptsetup luksKillSlot $DEVICE <slot>)"
+	fi
 	if [[ -f $DROPIN ]]; then say "drop-in: $DROPIN: $(tr '\n' ' ' <"$DROPIN")"; else say "drop-in: none"; fi
 	if cmdfile_has_token; then say "command line: $CMDFILE has $TOKEN"; else say "command line: $CMDFILE has no $TOKEN"; fi
+	e=$(other_luks_keys)
+	[[ -z $e ]] || say "command line: $CMDFILE also has $e (enable refuses while it is there)"
+	ct=$(crypttab_entry)
+	[[ -z $ct ]] || say "crypttab: $CRYPTTAB has an entry for this volume: $ct (enable refuses while it is there)"
 	if has_word "$(cat /proc/cmdline)" "$TOKEN"; then say "running boot: booted with it"; else say "running boot: booted without it"; fi
 	while read -r f; do
 		[[ -n $f ]] || continue
 		k=$(image_key "$f") t=$(uki_token "$f")
-		say "UKI $f: key file $k, $TOKEN on its command line $t$([[ $k == yes && -z $KEY_SLOT ]] && echo ' (a DEAD key: it opens nothing)')"
+		say "UKI $f: key file $k, $TOKEN on its command line $t$([[ $k == yes && -z $KEY_SLOT ]] && echo ' (a DEAD key, unless it is the one in an unexplained slot)')"
 	done < <(ukis)
 	while read -r f; do
 		[[ -n $f ]] || continue
 		k=$(image_key "$f")
-		say "image $f: key file $k$([[ $k == yes && -z $KEY_SLOT ]] && echo ' (a DEAD key: it opens nothing)')"
+		say "image $f: key file $k$([[ $k == yes && -z $KEY_SLOT ]] && echo ' (a DEAD key, unless it is the one in an unexplained slot)')"
 	done < <(initramfs_images)
+	while read -r f; do
+		[[ -n $f ]] || continue
+		say "lab boot UKI $f (staged by lab-agent): key file $(image_key "$f")"
+	done < <(staged_ukis)
+	if [[ -z $LIMINE_CONF ]]; then
+		say "boot menu: no limine.conf found on $ESP"
+	else
+		e=$(limine_entries)
+		[[ -n $e ]] || say "boot menu: no entry in $LIMINE_CONF boots ${UKI_NAME}_*.efi"
+		while IFS=$'\t' read -r f ok; do
+			[[ -n $f ]] || continue
+			case $ok in
+				none) say "boot entry \"$f\" ($LIMINE_CONF): no cmdline of its own, boots the UKI's" ;;
+				*) say "boot entry \"$f\" ($LIMINE_CONF): $TOKEN on its cmdline $ok" ;;
+			esac
+		done <<<"$e"
+	fi
+	readable_warnings
 }
 
 # ---- enable ----------------------------------------------------------------------------------
 
 enable() {
-	local tmp f bad=0 header line="FILES+=($KEY)"
+	local tmp f e ok bad=0 header line="FILES+=($KEY)"
 	probe_key
 	refuse_kept
 	if [[ -n $KEY_SLOT && -f $DROPIN && $(cat "$DROPIN") == "$line" ]] && cmdfile_has_token && all_images_keyed; then
-		say "Already enabled: the key file opens key slot $KEY_SLOT and every boot image has it. Nothing to do."
+		say "Already enabled: the key file opens key slot $KEY_SLOT and every boot image and entry has it. Nothing to do."
+		readable_warnings
 		return 0
 	fi
+
+	# Every refusal comes here, before the confirmation and before a key slot is added, so a
+	# refused enable leaves nothing behind.
+	e=$(crypttab_entry)
+	[[ -z $e ]] || die "$CRYPTTAB has an entry for this volume ($e). The initramfs would take its options from there; this script only handles rd.luks.* on the kernel command line. Nothing changed"
+	e=$(other_luks_keys)
+	[[ -z $e ]] || die "$CMDFILE already has $e for this volume; remove it (or set this up by hand) first. Nothing changed"
+	check_cmdfile add
+	need_rebuild_tools
+	[[ -n $LIMINE_CONF ]] || die "no limine.conf on $ESP, so there is no way to check what boots; nothing changed"
+	[[ -n $KEY_SLOT ]] || need_tty
+
 	cat <<EOF
 
   ==========================================================================================
    LAB-ONLY AUTO-UNLOCK. While it is enabled, ANYONE WHO HOLDS THIS MAC CAN READ ITS DISK:
    the disk key sits inside the boot images on the unencrypted EFI partition.
 
-   Only for a Lab-owned Mac, or a fresh lab-only install with nothing personal on it.
-   Never on a Volunteer's own Mac. The lab's maintainers already have root here.
+   Only for a Lab-owned Mac, a fresh lab-only install with nothing personal on it, or a
+   lab-only install a Volunteer lends the lab and has explicitly agreed to this. Never on
+   an install a Volunteer uses for anything of their own.
+
+   Lab jobs run tools as the GUI user: keep the EFI partition readable by root only.
+   disable protects the disk from whoever has the Mac after it; it can't take back what
+   anyone who had the Mac while this was enabled could have copied.
 
    Restoring a Snapper snapshot taken while this is enabled brings the key file back:
    run disable again after such a restore. When the Mac leaves the lab: lab-agent
    uninstall (or leave), then: sudo scripts/$PROG disable
   ==========================================================================================
 EOF
+	readable_warnings
 	confirm enable
 
 	if [[ -z $KEY_SLOT ]]; then
-		need_tty
 		install -d -m 700 "$BACKUPS"
 		header=$BACKUPS/luks-header-$VOLUME-$(date +%Y%m%d-%H%M%S).img
 		(umask 077; cryptsetup luksHeaderBackup "$DEVICE" --header-backup-file "$header")
@@ -380,43 +654,116 @@ EOF
 		[[ -n $f ]] || continue
 		if [[ $(image_key "$f") == yes ]]; then say "image $f: has the key"; else say "image $f: MISSING the key"; bad=1; fi
 	done < <(initramfs_images)
+	# The command line that boots: an entry's own cmdline: wins over the UKI's embedded one.
+	e=$(limine_entries)
+	[[ -n $e ]] || { say "boot menu: no entry in $LIMINE_CONF boots ${UKI_NAME}_*.efi, so this can't check what boots"; bad=1; }
+	while IFS=$'\t' read -r f ok; do
+		[[ -n $f ]] || continue
+		case $ok in
+			yes) say "boot entry \"$f\": has $TOKEN on its cmdline" ;;
+			none) say "boot entry \"$f\": no cmdline of its own, boots the UKI's (checked above)" ;;
+			*) say "boot entry \"$f\": its cmdline in $LIMINE_CONF has no $TOKEN; that entry asks for the passphrase"; bad=1 ;;
+		esac
+	done <<<"$e"
 	probe_key
 	[[ -n $KEY_SLOT ]] || die "the key file no longer opens the disk; run status"
-	(( !bad )) || die "not every boot image has the key; run status (disable undoes it all)"
-	say "Enabled: key slot $KEY_SLOT, in every boot image. Reboot: there should be no passphrase prompt."
+	(( !bad )) || die "not every boot image or entry has the key; run status (disable undoes it all)"
+	readable_warnings
+	say "Enabled: key slot $KEY_SLOT, in every boot image and entry. Reboot: there should be no passphrase prompt."
 	say "Then lab-agent preflight should no longer report the disk as encrypted."
 }
 
 # ---- disable ---------------------------------------------------------------------------------
 
 disable() {
-	local f out slot slots n leftover=0
+	local f k e ok cand s r out slot slots n leftover=0 keyed=() tokened=() failed=() remove=() rslots=()
 	probe_key
 	refuse_kept
-	if [[ -z $KEY_SLOT && ! -e $DROPIN && ! -e $KEY ]] && ! cmdfile_has_token; then
-		say "Already disabled: no key slot for $KEY, no key file, drop-in or $TOKEN in $CMDFILE."
+
+	# Every way this Mac could still unlock without the passphrase, before deciding anything.
+	while read -r f; do
+		[[ -n $f ]] || continue
+		[[ $(image_key "$f") != yes ]] || die "$f, a lab boot image lab-agent staged, holds the key. Take the lab off first: sudo lab-agent uninstall (or, on a Volunteer's Mac, leave) removes those images; then run disable again. Nothing changed"
+	done < <(staged_ukis)
+	while read -r f; do
+		[[ -n $f ]] || continue
+		[[ $(image_key "$f") == no ]] || keyed+=("$f")
+		[[ $f != *.efi || $(uki_token "$f") == no ]] || tokened+=("$f")
+	done < <(ukis; initramfs_images)
+	e=$(limine_entries)
+	while IFS=$'\t' read -r f ok; do
+		[[ -n $f && $ok == yes ]] && tokened+=("boot entry \"$f\"")
+	done <<<"$e"
+
+	# The key file opens a slot: that is the one to remove. When it doesn't (it is gone, or a
+	# restored snapshot swapped it), a boot image can still hold a key that opens one: copy each
+	# out and use it.
+	if [[ -n $KEY_SLOT ]]; then
+		remove+=("$KEY_SLOT:$KEY"); rslots+=("$KEY_SLOT")
+	else
+		for f in "${keyed[@]}"; do
+			[[ $(image_key "$f") == yes ]] || continue
+			make_tmpd
+			if ! cand=$(extract_key "$f"); then failed+=("$f"); continue; fi
+			probe_file "$cand"
+			if [[ -z $PROBED ]]; then say "$f holds a dead key: it opens no key slot."; continue; fi
+			kept "$PROBED" && die "the key in $f opens key slot $PROBED, which $STATE records as the owner's or recovery slot; nothing changed"
+			[[ " ${rslots[*]} " == *" $PROBED "* ]] && continue
+			say "$f holds a key that still opens key slot $PROBED (the key file doesn't); disable removes that slot with it."
+			remove+=("$PROBED:$cand"); rslots+=("$PROBED")
+		done
+		if (( ${#failed[@]} )); then
+			orphan_slots "${rslots[@]}"
+			if (( ${#ORPHANS[@]} )); then
+				say "${failed[*]} hold(s) a key file this couldn't copy out (no bsdcpio, or lsinitcpio -x failed),"
+				say "so this can't tell which key slot it opens. Slots that look like this script's (pbkdf2,"
+				say "1000 iterations; passphrase slots use argon2id): ${ORPHANS[*]}."
+				(( ${#KEEP[@]} )) && say "The owner's and recovery slots ($STATE) are ${KEEP[*]}: never those."
+				say "  cryptsetup luksDump $DEVICE                              shows each slot's PBKDF"
+				say "  cryptsetup open --test-passphrase --verbose $DEVICE     shows the slot your passphrase opens"
+				say "  cryptsetup luksKillSlot $DEVICE <slot>                  removes the auto-unlock slot"
+				die "nothing changed; remove the auto-unlock slot as above, then run disable again"
+			fi
+			say "${failed[*]}: couldn't copy the key out, but no key slot looks like this script's (pbkdf2, 1000 iterations), so going on to clear the images."
+		fi
+	fi
+
+	if (( ${#remove[@]} == 0 && ${#keyed[@]} == 0 && ${#tokened[@]} == 0 )) && [[ ! -e $DROPIN && ! -e $KEY ]] && ! cmdfile_has_token; then
+		report_orphans
+		say "Already disabled: no key slot opened by $KEY or by a boot image, no key file, drop-in or $TOKEN in $CMDFILE, and no boot image or entry holds the key or $TOKEN."
 		return 0
 	fi
-	if [[ -n $KEY_SLOT ]]; then
+
+	# Every refusal before the confirmation and before anything changes.
+	if (( ${#remove[@]} )); then
 		slots=$(keyslots)
 		n=$(grep -c . <<<"$slots") || true
-		(( n > 1 )) || die "the key file opens key slot $KEY_SLOT, the only key slot: removing it would lock the disk for good. Add a passphrase first (cryptsetup luksAddKey --key-file $KEY $DEVICE), then run disable again"
+		if (( n <= ${#remove[@]} )); then
+			[[ -n $KEY_SLOT ]] && die "the key file opens key slot $KEY_SLOT, the only key slot: removing it would lock the disk for good. Add a passphrase first (cryptsetup luksAddKey --key-file $KEY $DEVICE), then run disable again"
+			die "key slots ${rslots[*]} are the only ones: removing them would lock the disk for good. Add a passphrase first (cryptsetup luksAddKey $DEVICE), then run disable again"
+		fi
+		need_tty
 	fi
+	check_cmdfile remove
+	need_rebuild_tools
 	confirm disable
 
-	# The key slot goes first: that makes every copy of the key (boot images, snapshots, backups)
-	# useless. Before that, prove another slot still opens the disk.
-	if [[ -n $KEY_SLOT ]]; then
-		need_tty
-		say "Type your disk passphrase, to check it still opens the disk once key slot $KEY_SLOT is gone."
+	# The key slots go first, so the copies of the key on this Mac (boot images, snapshots,
+	# backups) open nothing. Before that, prove another slot still opens the disk.
+	if (( ${#remove[@]} )); then
+		say "Type your disk passphrase, to check it still opens the disk once key slot(s) ${rslots[*]} are gone."
 		out=$(cryptsetup open --test-passphrase --verbose --token-type passphrase-only "$DEVICE" </dev/tty) || die "that passphrase doesn't open the disk; nothing changed"
 		slot=$(grep -o 'Key slot [0-9]* unlocked' <<<"$out" | grep -o '[0-9]*' | head -1) || true
-		[[ -n $slot && $slot != "$KEY_SLOT" ]] || die "couldn't confirm the passphrase opens a slot other than $KEY_SLOT; nothing changed"
-		cryptsetup luksRemoveKey "$DEVICE" "$KEY"
-		f=$KEY_SLOT
+		[[ -n $slot && " ${rslots[*]} " != *" $slot "* ]] || die "couldn't confirm the passphrase opens a slot other than ${rslots[*]}; nothing changed"
+		for r in "${remove[@]}"; do
+			s=${r%%:*} cand=${r#*:}
+			cryptsetup luksRemoveKey "$DEVICE" "$cand"
+			probe_file "$cand"
+			[[ -z $PROBED ]] || die "the key still opens key slot $PROBED (the same key was in two slots); run disable again"
+			say "Removed key slot $s."
+		done
+		say "The passphrase in slot $slot opens the disk."
 		probe_key
-		[[ -z $KEY_SLOT ]] || die "the key file still opens key slot $KEY_SLOT (the same key was in two slots); run disable again"
-		say "Removed key slot $f. The passphrase in slot $slot opens the disk."
 	fi
 	# Only now, with cryptsetup saying the key opens nothing, do the key file and the rest go.
 	rm -f "$KEY" "$DROPIN"
@@ -432,11 +779,19 @@ disable() {
 		esac
 		[[ $f != *.efi || $(uki_token "$f") == no ]] || { say "UKI $f still has $TOKEN on its command line"; leftover=1; }
 	done < <(ukis; initramfs_images)
+	e=$(limine_entries)
+	while IFS=$'\t' read -r f ok; do
+		[[ -n $f && $ok == yes ]] || continue
+		say "boot entry \"$f\" in $LIMINE_CONF still has $TOKEN on its cmdline"; leftover=1
+	done <<<"$e"
 	slots=$(keyslots)
 	say "key slots now: $(paste -sd' ' <<<"$slots")"
 	(( !leftover )) || die "something is left over; run status"
+	report_orphans
 	say "Disabled. Reboot: the passphrase prompt is back."
 	say "If you restore a Snapper snapshot taken while this was enabled, run disable again."
+	say "This protects the disk from whoever has the Mac from now on. It doesn't change the volume key: if"
+	say "the Mac was out of your hands while this was enabled, reinstall or run cryptsetup reencrypt."
 }
 
 # ---- main ------------------------------------------------------------------------------------
