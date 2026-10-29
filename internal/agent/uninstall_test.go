@@ -35,6 +35,9 @@ var labMacFiles = map[string]string{
 	ConfigPath:                    `{"server":"http://labd:7770","name":"m1air","secret":"s3cret"}`,
 	binPath:                       "ELF",
 	unitPath:                      unit,
+	labBootDeadlineUnitPath:       labBootDeadlineUnit(),
+	labBootSessionUnitPath:        labBootSessionUnit(),
+	labBootLockUnitPath:           labBootLockUnit(),
 	sysctlPath:                    "kernel.panic = 10\n",
 	watchdogCfg:                   "[Manager]\nRuntimeWatchdogSec=30s\n",
 	journaldCfg:                   "[Journal]\nStorage=persistent\n",
@@ -142,11 +145,13 @@ func TestUninstallLimine(t *testing.T) {
 	if exists(m.lim.Stage) {
 		t.Error("stage directory is still there")
 	}
-	m.gone(t, "/etc/maclab", binPath, unitPath, sysctlPath, watchdogCfg, filepath.Dir(watchdogCfg), journaldCfg, filepath.Dir(journaldCfg),
+	m.gone(t, labUnitPaths...)
+	m.gone(t, "/etc/maclab", binPath, sysctlPath, watchdogCfg, filepath.Dir(watchdogCfg), journaldCfg, filepath.Dir(journaldCfg),
 		gettyDropIn, filepath.Dir(gettyDropIn), sddmConf, filepath.Dir(sddmConf), workDir, "/usr/lib/modules/7.2-lab")
 	m.kept(t, "/usr/lib/modules/7.1-good", "/usr/lib/modules/7.0-running", "/usr/lib/modules/6.9-arch", "/etc/sysctl.d/10-other.conf")
 	want := []string{
 		"systemctl disable --now lab-agent.service",
+		"systemctl disable --now maclab-lab-boot-deadlines.service maclab-lab-boot-session.service maclab-lab-boot-lock.service",
 		"systemctl daemon-reload",
 		"systemctl daemon-reexec",
 		"systemctl restart systemd-journald",
@@ -202,6 +207,73 @@ func TestUninstallDryRun(t *testing.T) {
 			t.Errorf("dry run %q, real run %q", dry[i], taken[i])
 		}
 	}
+}
+
+// The dry run lists every unit setup enabled, not just lab-agent.service.
+func TestUninstallDryRunListsEveryUnit(t *testing.T) {
+	m := newLabMac(t)
+	if err := m.again(true); err != nil {
+		t.Fatal(err)
+	}
+	out := strings.Join(m.out, "\n")
+	for _, want := range []string{
+		"would run systemctl disable --now lab-agent.service",
+		"would run systemctl disable --now maclab-lab-boot-deadlines.service maclab-lab-boot-session.service maclab-lab-boot-lock.service",
+	} {
+		if !slices.Contains(m.out, want) {
+			t.Errorf("the dry run doesn't say %q:\n%s", want, out)
+		}
+	}
+	for _, p := range labUnitPaths {
+		if !slices.Contains(m.out, "would remove "+m.u.path(p)) {
+			t.Errorf("the dry run doesn't remove %s:\n%s", p, out)
+		}
+	}
+}
+
+// Uninstall takes out the same units leave does, and setup enables: each
+// name matches its unit file.
+func TestUninstallAndLeaveShareTheUnits(t *testing.T) {
+	l := defaultLeaveLayout()
+	if !slices.Equal(l.UnitNames, labUnitNames) || !slices.Equal(l.Units, labUnitPaths) {
+		t.Errorf("leave's units %v %v aren't uninstall's %v %v", l.UnitNames, l.Units, labUnitNames, labUnitPaths)
+	}
+	if len(labUnitNames) != len(labUnitPaths) || labUnitNames[0] != "lab-agent.service" {
+		t.Fatalf("units %v, files %v", labUnitNames, labUnitPaths)
+	}
+	for i, name := range labUnitNames {
+		if filepath.Base(labUnitPaths[i]) != name {
+			t.Errorf("unit %s has file %s", name, labUnitPaths[i])
+		}
+	}
+}
+
+// Units left behind by an older uninstall, which took out only
+// lab-agent.service, go on the next run; a Mac set up before the Lab-boot
+// units existed has only the agent's to stop.
+func TestUninstallLeftoverAndMissingUnits(t *testing.T) {
+	m := newLabMac(t)
+	os.Remove(m.u.path(unitPath))
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(m.calls, "systemctl disable --now maclab-lab-boot-deadlines.service maclab-lab-boot-session.service maclab-lab-boot-lock.service") ||
+		slices.Contains(m.calls, "systemctl disable --now lab-agent.service") || !slices.Contains(m.calls, "systemctl daemon-reload") {
+		t.Errorf("leftover units: ran\n%s", strings.Join(m.calls, "\n"))
+	}
+	m.gone(t, labUnitPaths...)
+
+	m = newLabMac(t)
+	for _, p := range labUnitPaths[1:] {
+		os.Remove(m.u.path(p))
+	}
+	if err := m.u.uninstall(); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.calls) < 2 || m.calls[0] != "systemctl disable --now lab-agent.service" || m.calls[1] != "systemctl daemon-reload" {
+		t.Errorf("only the agent's unit: ran\n%s", strings.Join(m.calls, "\n"))
+	}
+	m.gone(t, unitPath)
 }
 
 // What was on before setup stays on: the getty it found enabled, and the

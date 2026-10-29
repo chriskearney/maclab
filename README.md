@@ -31,7 +31,9 @@ AI agents get the same operations over MCP (`lab mcp`).
    - **Limine** (Omarchy on Apple Silicon: U-Boot, then Limine, then a UKI on
      the ESP): a unified kernel image in `<esp>/maclab/<job>/uki.efi`, listed in
      a marked block at the end of `limine.conf`. Limine reads only FAT, so the
-     ESP needs about 120 MB free.
+     ESP needs room for one more UKI plus 121 MiB it keeps free (a 120 MiB
+     reserve and 1 MiB for metadata): about 180 MiB with Omarchy's ~60 MiB UKIs.
+     Preflight sizes the UKI by the largest one in `<esp>/EFI/Linux`.
 
    A failed staging is tried again, up to 3 attempts, 30 s and then 2 min
    apart, with the failed attempt's leftovers removed first. Only an attempt
@@ -344,8 +346,8 @@ runs the recovery ladder on it, out-of-band reset included, as for any Mac (a Ma
 mid-uninstall, say). Only labd's own recovery leaves a Mac that left alone. Don't `lab reset` a Mac
 whose uninstall finished: it brings back a Mac with no agent, which then goes through recovery,
 out-of-band resets and all, and ends in a call for hands. Use `lab forget` for it instead. Once the
-agent is stopped, uninstall removes it
-and its config (with the device secret), clears a lab one-shot, removes the
+agent is stopped, uninstall disables and removes it and the lab's other units
+(`maclab-lab-boot-deadlines`, `-session` and `-lock`, as `leave` does), then its config (with the device secret), clears a lab one-shot, removes the
 maclab block from `limine.conf` (or restores `custom.cfg` from its backup), the staged kernels and
 the modules the lab installed, and the panic, watchdog, serial-getty, autologin and stay-awake settings, and
 maclab's journald drop-in, if a newer setup wrote one. U-Boot's `ubootefi.var.pre-maclab` is kept,
