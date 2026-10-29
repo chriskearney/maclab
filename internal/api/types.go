@@ -545,6 +545,9 @@ func (t TestSpec) PayloadError() error {
 	if t.Script == "" || t.Builtin != "" || t.GUI {
 		return fmt.Errorf("payload files go only with a --script test, which runs as root")
 	}
+	if t.Name == "" || strings.ContainsAny(t.Name, "/ ") {
+		return fmt.Errorf("test name %q must be non-empty with no slashes or spaces", t.Name)
+	}
 	if len(t.Payload) > MaxPayloadFiles {
 		return fmt.Errorf("at most %d payload files per test, got %d", MaxPayloadFiles, len(t.Payload))
 	}

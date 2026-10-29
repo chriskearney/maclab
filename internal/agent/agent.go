@@ -825,14 +825,7 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		if t.Builtin != "" || t.Script == "" {
 			a.startBudget(tr)
 		}
-		left := 1 + len(t.Payload)
-		res := a.sys.RunTest(ctx, c.JobID, t, func(ctx context.Context, sha, dst string) error {
-			err := fetch(ctx, sha, dst)
-			if left--; left <= 0 || err != nil {
-				a.startBudget(tr)
-			}
-			return err
-		}, a.quiet, dir)
+		res := a.sys.RunTest(ctx, c.JobID, t, budgetFetch(fetch, 1+len(t.Payload), func() { a.startBudget(tr) }), a.quiet, dir)
 		a.endTest(tr)
 		res.Files = a.uploadDir(ctx, c.JobID, "test-"+t.Name, dir)
 		return res, nil, nil
@@ -1258,4 +1251,17 @@ func doJSON(c *http.Client, req *http.Request, secret string, out any) error {
 func tooLarge(err error) bool {
 	var se *statusError
 	return errors.As(err, &se) && se.Code == http.StatusRequestEntityTooLarge
+}
+
+// budgetFetch calls start once the last of downloads fetches is done, or at
+// the first one that fails: the test's budget runs from there.
+func budgetFetch(fetch Fetcher, downloads int, start func()) Fetcher {
+	left := downloads
+	return func(ctx context.Context, sha, dst string) error {
+		err := fetch(ctx, sha, dst)
+		if left--; left <= 0 || err != nil {
+			start()
+		}
+		return err
+	}
 }
