@@ -212,6 +212,10 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		v.d.NtfyOwnURL = ci.NtfyOwnURL
 		persist = true
 	}
+	if v.d.IsVolunteer() && ci.JobNotices != nil && v.d.JobNotices != *ci.JobNotices { // a check-in without it keeps the stored choice
+		v.d.JobNotices = *ci.JobNotices
+		persist = true
+	}
 	if ci.Facts != nil {
 		v.d.Facts = *ci.Facts
 	}

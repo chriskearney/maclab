@@ -2,11 +2,15 @@ package server
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/iconidentify/maclab/internal/api"
 )
 
 type Notification struct {
@@ -64,4 +68,38 @@ func (s *Server) notify(n Notification) {
 			}
 		}()
 	}
+}
+
+// tellVolunteerJobStarting tells a Volunteer, on their Mac's own topic, that a
+// job is about to take their Mac: its id, who asked, how long it can take at
+// most, and a request not to reboot until the done notice. Only when the
+// Volunteer asked (`notify --jobs on`); a Lab-owned Mac has no Volunteer to tell.
+func (r *jobRun) tellVolunteerJobStarting() {
+	d := r.v.snapshot()
+	if !d.IsVolunteer() || !d.JobNotices {
+		return
+	}
+	minutes := int(math.Ceil(r.expectedLength().Minutes()))
+	who := ""
+	if r.j.Maintainer != "" {
+		who = " for " + r.j.Maintainer
+	}
+	r.s.notify(Notification{Device: d.Name, Volunteer: true, MacTopic: r.s.macTopicURL(d.Enrollment), Priority: "default",
+		Title: fmt.Sprintf("job %s is starting on %s", r.j.ID, d.Name),
+		Body: fmt.Sprintf("Job %s%s is starting on %s. The Mac reboots into a lab kernel and the job takes at most about %d min. "+
+			"Please do not reboot or shut it down until you get the done notice. To stop it: sudo lab-agent pause.", r.j.ID, who, d.Name, max(minutes, 1))})
+	r.volunteerTold = true
+}
+
+// tellVolunteerJobDone is the notice that ends the heads-up: how the job ended
+// and that the Mac is free. It goes only after a starting notice, and not while
+// the Mac still needs hands or is being recovered, when it would not be true.
+func (r *jobRun) tellVolunteerJobDone(outcome string) {
+	d := r.v.snapshot()
+	if !r.volunteerTold || d.State == api.StateNeedsHands || d.State == api.StateRecovering {
+		return
+	}
+	r.s.notify(Notification{Device: d.Name, Volunteer: true, MacTopic: r.s.macTopicURL(d.Enrollment), Priority: "default",
+		Title: fmt.Sprintf("job %s on %s is done: %s", r.j.ID, d.Name, outcome),
+		Body:  fmt.Sprintf("Job %s ended (%s). The lab is finished with your Mac for now: you can reboot or use it.", r.j.ID, outcome)})
 }

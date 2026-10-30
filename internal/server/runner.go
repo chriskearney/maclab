@@ -38,6 +38,8 @@ type jobRun struct {
 
 	failedOwn  int  // tests that failed by themselves, not cut short by a cancel
 	noAppleWDT bool // the test kernel was built without apple_wdt
+
+	volunteerTold bool // a Volunteer was told this job is starting, so they are told when it is done
 }
 
 func (r *jobRun) ev(format string, args ...any) {
@@ -169,6 +171,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	v.setStateLocked(api.StateBusy, "job "+j.ID)
 	v.mu.Unlock()
 	r.started = s.now()
+	r.tellVolunteerJobStarting()
 	if r.serialEnabled() {
 		r.serial0 = s.serialOffset(v.d.Name)
 	}
@@ -331,6 +334,7 @@ func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
 		j.Events = append(j.Events, api.JobEvent{Time: at, Msg: "done: " + outcome + ": " + summary})
 	})
 	r.s.log.Printf("job %s done: %s: %s", r.j.ID, outcome, summary)
+	r.tellVolunteerJobDone(outcome)
 	if outcome != api.OutcomePass && outcome != api.OutcomeCanceled && outcome != api.OutcomeIncomplete {
 		r.s.notify(Notification{Device: r.j.Spec.Device, Title: fmt.Sprintf("job %s on %s: %s", r.j.ID, r.j.Spec.Device, outcome), Body: summary, Priority: "low"})
 	}

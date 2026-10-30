@@ -126,6 +126,9 @@ type Enrollment struct {
 	// NtfyOwnURL is the topic the Volunteer chose with `notify --topic`, as
 	// the Mac's check-ins carried it; it replaces the generated one.
 	NtfyOwnURL string `json:"ntfy_own_url,omitempty"`
+	// JobNotices is whether the Volunteer asked, with `notify --jobs on`, to be told on the Mac's topic
+	// when a job starts on it and when it is done. Off until they do.
+	JobNotices bool `json:"job_notices,omitempty"`
 }
 
 func (e Enrollment) IsVolunteer() bool { return e.Kind == KindVolunteer }
@@ -197,6 +200,8 @@ type Checkin struct {
 	Window *window.Settings `json:"window,omitempty"`
 	// NtfyOwnURL is the topic the Volunteer set with `notify --topic`, if any.
 	NtfyOwnURL string `json:"ntfy_own_url,omitempty"`
+	// JobNotices is the Volunteer's `notify --jobs` choice; nil when the Mac could not read it, so labd keeps its copy.
+	JobNotices *bool `json:"job_notices,omitempty"`
 	// AccessLevel and Publish are a Volunteer's Mac's Access level and
 	// publishing opt-in; a Lab-owned Mac sends no AccessLevel.
 	AccessLevel string `json:"access_level,omitempty"`
