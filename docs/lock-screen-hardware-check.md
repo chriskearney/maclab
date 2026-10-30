@@ -15,13 +15,15 @@ about 30 minutes. Start from the Volunteer's own boot.
 ```sh
 systemctl is-enabled maclab-lab-boot-session.service maclab-lab-boot-lock.service   # enabled, enabled
 systemctl show -p Before maclab-lab-boot-session.service   # lists sddm.service
-ls /etc/sddm.conf.d /run/sddm.conf.d                       # no maclab autologin file in either
+ls -l /etc/sddm.conf.d /run/sddm.conf.d                    # no maclab file in /run; in /etc at most a dangling zz-maclab-lab-boot-autologin.conf link
 ```
 
 ## 2. The Volunteer's own boot cannot autologin
 
 Reboot into the Mac's default entry. Expect the SDDM password greeter.
-`/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` does not exist.
+`/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` does not exist, so the
+`/etc/sddm.conf.d` link to it (left by an earlier Lab boot) dangles, and SDDM
+skips it.
 
 ## 3. A Lab boot logs in, locked
 
@@ -34,7 +36,8 @@ Expect, on the screen:
 - No password greeter: the GUI user's session starts, and the lock screen
   (Omarchy's `omarchy-system-lock`, else hyprlock) is up within seconds, before
   the desktop is usable.
-- `/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` exists, with
+- `/etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` is a link to
+  `/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf`, which exists, with
   `User=<gui-user>`.
 - The job passes, and its omarchy-m-test report has no `video` section checks
   (`omarchy-m-test --skip video` ran), neither in the baseline nor the test run.
@@ -43,8 +46,10 @@ Expect, on the screen:
 - The lock screen is still up when the job ends; the Volunteer's password
   unlocks it.
 
-If SDDM ignores the drop-in under `/run`, the unit's path is wrong for this
-SDDM: note the config directories `sddm --example-config` lists.
+SDDM 0.21 reads `/etc/sddm.conf.d` and `/usr/lib/sddm/sddm.conf.d`, never
+`/run/sddm.conf.d`, which is why the drop-in is reached through the link. If
+the password greeter still shows, check the link resolves (`cat` it) and that
+no `/etc/sddm.conf` overrides `[Autologin]`: SDDM reads that file last.
 
 Then make the lock fail (`sudo chmod -x $(command -v omarchy-system-lock hyprlock)`)
 and run a job again. Expect the session to be terminated, the job to fail

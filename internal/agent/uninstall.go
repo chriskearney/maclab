@@ -367,6 +367,7 @@ func (u *uninstaller) uninstall() error {
 		u.journald,
 		u.serialGetty,
 		u.autologin,
+		func() error { return u.remove(u.path(labBootAutologinLink), " (the Lab-boot autologin link)") },
 		func() error { return u.remove(u.path(filepath.Dir(ConfigPath)), " (the device secret)") },
 		func() error { return u.remove(u.path(binPath+".new"), "") },
 		func() error { return u.remove(u.path(binPath), "") },

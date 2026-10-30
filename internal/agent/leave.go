@@ -66,7 +66,7 @@ func defaultLeaveLayout() leaveLayout {
 		Config:    ConfigPath,
 		Units:     slices.Clone(labUnitPaths),
 		UnitNames: slices.Clone(labUnitNames),
-		DropIns:   []string{labBootAutologinPath, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
+		DropIns:   []string{labBootAutologinPath, labBootAutologinLink, sysctlPath, watchdogCfg, serialGettyDropIn, sddmAutologinConf},
 		Stage:     stageDir(),
 		WorkDir:   "/var/lib/maclab",
 	}
