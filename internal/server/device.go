@@ -27,9 +27,11 @@ type dev struct {
 	// volunteer's Macs under s.mu alone, without each Mac's mu.
 	volunteeredBy string
 
-	mu            sync.Mutex
-	d             api.Device
-	owedDone      *Notification // a job's done notice that waited for the Mac to be back (needs hands or recovering at the job's end)
+	mu sync.Mutex
+	d  api.Device
+	// owedDone is a job's done notice that waited for the Mac to be back (needs hands or recovering at the job's end). It is memory
+	// only: if labd restarts while one is held, the job is already closed and that notice is lost.
+	owedDone      *Notification
 	pending       []api.Command
 	inflight      map[string]time.Time
 	sent          map[string]api.Command
