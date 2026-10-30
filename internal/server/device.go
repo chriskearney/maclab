@@ -29,6 +29,7 @@ type dev struct {
 
 	mu            sync.Mutex
 	d             api.Device
+	owedDone      *Notification // a job's done notice that waited for the Mac to be back (needs hands or recovering at the job's end)
 	pending       []api.Command
 	inflight      map[string]time.Time
 	sent          map[string]api.Command
@@ -249,6 +250,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		}
 		v.setStateLocked(back, "")
 		v.restore = ""
+		v.sendOwedDoneLocked()
 		if was == api.StateNeedsHands {
 			v.s.notify(Notification{Device: v.d.Name, Title: v.d.Name + " is back", Body: "Checked in on " + ci.Kernel + ". Nothing else to do.", Priority: "default"})
 		}

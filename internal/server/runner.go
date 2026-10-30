@@ -184,6 +184,7 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		if v.d.State == api.StateBusy || v.d.State == api.StateRecovering {
 			v.setStateLocked(v.idleStateLocked(), "")
 		}
+		v.sendOwedDoneLocked()
 		v.saveLocked()
 		v.mu.Unlock()
 	}()

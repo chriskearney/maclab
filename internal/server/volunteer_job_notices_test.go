@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -201,5 +202,133 @@ func TestStatusShowsWhetherJobNoticesAreOn(t *testing.T) {
 	st, err := n.volunteer("status")
 	if err != nil || !strings.Contains(st, "job notices:    on") {
 		t.Fatalf("status = %q, %v; want job notices on", st, err)
+	}
+}
+
+// A check-in without the setting (an old agent, or a Mac that could not read
+// its file) must keep the Volunteer's choice, not turn the notices off.
+func TestACheckInWithoutTheSettingKeepsTheVolunteersChoice(t *testing.T) {
+	n := newJobNoticeLab(t, true)
+	v := n.s.dev(n.name)
+	d := v.snapshot()
+	v.heartbeat(api.Checkin{BootID: d.BootID, Kernel: d.Kernel, Cmdline: d.Cmdline, Health: d.Health, SnapshotEligible: d.SnapshotEligible})
+	if !v.snapshot().JobNotices {
+		t.Fatal("a check-in with no job-notices setting turned the notices off")
+	}
+}
+
+func countDone(n *noticeLab, topic, id string) int {
+	c := 0
+	for _, p := range forJob(n.ntfy.at(topic), id) {
+		if p.jobDone(id) {
+			c++
+		}
+	}
+	return c
+}
+
+// labd restarting while a job held the Mac closes that job with nothing left
+// to send the done notice, so the restart sends it.
+func TestARestartDuringAJobSendsTheDoneNoticeTheJobOwed(t *testing.T) {
+	n := newJobNoticeLab(t, true)
+	topic := n.macTopic()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	for _, id := range []string{"lost-testing", "lost-booting"} {
+		if err := n.s.store.saveJob(&api.Job{ID: id, Spec: api.JobSpec{Device: n.name}, State: api.JobTesting, Created: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"lost-building"} {
+		if err := n.s.store.saveJob(&api.Job{ID: id, Spec: api.JobSpec{Device: n.name}, State: api.JobBuilding, Created: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := New(ctx, n.s.cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !n.waitPosts(topic, 5*time.Second, anyPost(func(p ntfyPost) bool { return p.jobDone("lost-testing") })) {
+		t.Fatalf("no done notice for the job labd lost: %+v", n.ntfy.at(topic))
+	}
+	time.Sleep(300 * time.Millisecond)
+	got := forJob(n.ntfy.at(topic), "lost-testing")
+	if len(got) != 1 || !strings.Contains(got[0].text(), "infra") {
+		t.Fatalf("the lost job's notice: %+v", got)
+	}
+	if countDone(n, topic, "lost-booting") != 1 {
+		t.Fatalf("no done notice for the lost booting job: %+v", n.ntfy.at(topic))
+	}
+	if countDone(n, topic, "lost-building") != 0 {
+		t.Fatalf("a job that never reached the Mac got a done notice: %+v", forJob(n.ntfy.at(topic), "lost-building"))
+	}
+}
+
+func TestARestartSendsNothingToAVolunteerWhoDidNotAsk(t *testing.T) {
+	n := newJobNoticeLab(t, false)
+	topic := n.macTopic()
+	if err := n.s.store.saveJob(&api.Job{ID: "lost-quiet", Spec: api.JobSpec{Device: n.name}, State: api.JobTesting, Created: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := New(ctx, n.s.cfg, nil); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(500 * time.Millisecond)
+	if got := forJob(n.ntfy.at(topic), "lost-quiet"); len(got) != 0 {
+		t.Fatalf("a Volunteer who did not ask got %+v", got)
+	}
+}
+
+// A done notice that falls while the Mac is being recovered or needs hands is
+// held, not dropped, and goes once the Mac is back.
+func TestADoneNoticeHeldWhileTheMacIsBeingRecoveredGoesWhenItIsBack(t *testing.T) {
+	n := newJobNoticeLab(t, true)
+	topic := n.macTopic()
+	v := n.s.dev(n.name)
+	r := &jobRun{s: n.s, v: v, j: &api.Job{ID: "held-1", Spec: api.JobSpec{Device: n.name}}, volunteerTold: true}
+	v.setState(api.StateRecovering, "test")
+	r.tellVolunteerJobDone("pass")
+	time.Sleep(500 * time.Millisecond)
+	if got := countDone(n, topic, "held-1"); got != 0 {
+		t.Fatalf("the done notice went while the Mac was being recovered: %+v", n.ntfy.at(topic))
+	}
+	v.mu.Lock()
+	v.sendOwedDoneLocked() // still being recovered: still held
+	v.mu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	if got := countDone(n, topic, "held-1"); got != 0 {
+		t.Fatalf("the held notice went while the Mac was still being recovered: %+v", n.ntfy.at(topic))
+	}
+	v.setState(api.StateReady, "")
+	v.mu.Lock()
+	v.sendOwedDoneLocked()
+	v.mu.Unlock()
+	if !n.waitPosts(topic, 5*time.Second, anyPost(func(p ntfyPost) bool { return p.jobDone("held-1") })) {
+		t.Fatalf("the held done notice never went: %+v", n.ntfy.at(topic))
+	}
+	v.mu.Lock()
+	v.sendOwedDoneLocked() // nothing owed any more
+	v.mu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	if got := countDone(n, topic, "held-1"); got != 1 {
+		t.Fatalf("%d done notices for held-1, want 1", got)
+	}
+}
+
+func TestADoneNoticeHeldWhileTheMacNeedsHandsGoesAtTheBackCheckIn(t *testing.T) {
+	n := newJobNoticeLab(t, true)
+	topic := n.macTopic()
+	v := n.s.dev(n.name)
+	r := &jobRun{s: n.s, v: v, j: &api.Job{ID: "held-2", Spec: api.JobSpec{Device: n.name}}, volunteerTold: true}
+	v.setState(api.StateNeedsHands, "test")
+	r.tellVolunteerJobDone("pass")
+	// the Mac checks in again: that is the "back" moment
+	if !n.waitPosts(topic, 5*time.Second, anyPost(func(p ntfyPost) bool { return p.jobDone("held-2") })) {
+		t.Fatalf("the held done notice never went at the back check-in: %+v", n.ntfy.at(topic))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := countDone(n, topic, "held-2"); got != 1 {
+		t.Fatalf("%d done notices for held-2, want 1", got)
 	}
 }
