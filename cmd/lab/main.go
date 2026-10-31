@@ -158,14 +158,18 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		model := fs.String("model", api.ModelLaptop, "laptop or desktop")
 		volunteer := fs.String("volunteer", "", "the Volunteer whose Mac this is (with --contact); none makes a Lab-owned Mac")
 		contact := fs.String("contact", "", "how to reach the Volunteer")
+		login := fs.String("login", "", "the Volunteer's tailnet login, so they see their Mac in labd")
 		pos := parse(fs, args)
-		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact>]`); err != nil {
+		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact> [--login <tailnet login>]]`); err != nil {
 			return err
 		}
 		if (strings.TrimSpace(*volunteer) == "") != (strings.TrimSpace(*contact) == "") {
 			return fmt.Errorf("a Volunteer's Mac needs both --volunteer and --contact")
 		}
-		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model, VolunteerName: *volunteer, Contact: *contact})
+		if strings.TrimSpace(*login) != "" && strings.TrimSpace(*volunteer) == "" {
+			return fmt.Errorf("--login is a Volunteer's: give --volunteer and --contact too")
+		}
+		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model, VolunteerName: *volunteer, Contact: *contact, VolunteerLogin: *login})
 		if err != nil {
 			return err
 		}

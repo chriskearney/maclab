@@ -371,9 +371,16 @@ enrollment token decides which, and changing it means enrolling again.
 
 ```sh
 lab enroll ada-mbp --volunteer "Ada Lovelace" --contact ada@example.org
+lab enroll ada-mbp --volunteer "Ada Lovelace" --contact ada@example.org --login ada@github
 ```
 
-Either flag without the other is refused. labd gives the Mac its own
+Either flag without the other is refused. `--login` names the Volunteer's
+tailnet login as well (`volunteer_login` on `POST /api/enroll-tokens`): it
+becomes the Mac's `volunteered_by` when it enrolls, so with `--tailscale` that
+Volunteer sees their Mac in labd without a token (see
+[Tailscale](#tailscale)). `--login` without `--volunteer` and `--contact` is
+refused; without `--login`, a Mac enrolled this way is seen only by
+Maintainers. labd gives the Mac its own
 unguessable ntfy topic when it enrolls (on the server `--ntfy` posts to), and
 `setup` prints it with a QR code to subscribe from a phone. On a Volunteer's
 Mac `setup` refuses `--autologin` and `--stay-awake`. Setup and every
@@ -867,12 +874,13 @@ skips the search and the question.
 The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
 keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
 Then they share the labd machine with each volunteer's Tailscale account (admin
-console, Machines, Share), or invite them to the tailnet. Any person labd lets
-look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
+console, Machines, Share), or invite them to the tailnet. Any person on the
+tailnet may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
 name made from `<user>-<hostname>` and the volunteer's login as its label, and
 is marked a volunteer's: `lab gate` leaves its results out unless asked (see
-[Release gate](#release-gate)). Tagged tailnet devices, lab Macs under `tag:maclab`
-among them, are machines and get no token. Each person holds at most one unused
+[Release gate](#release-gate)), and in labd only its Volunteer and the
+Maintainers see it (see [Tailscale](#tailscale)). Tagged tailnet devices, lab
+Macs under `tag:maclab` among them, are machines and get no token. Each person holds at most one unused
 token: asking again replaces it, so running `./volunteer` again after a setup
 that stopped half way just works. At most 20 people hold one at once; the next
 gets a 429 until one is used or expires a day later. Each person may have at
@@ -886,8 +894,8 @@ comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 
 Open `http://<labd-host>:7770` and enter your Maintainer token; the UI keeps
 it. Every change needs a Maintainer's token, whatever network it comes from;
-with `--tailscale`, tailnet peers may look without one (see
-[Tailscale](#tailscale)). On a phone the UI
+with `--tailscale`, a Volunteer on the tailnet sees their own Macs without one
+(see [Tailscale](#tailscale)). On a phone the UI
 switches to a bottom tab bar and can be added to the home screen.
 
 A browser on the tailnet carries its access to every page it opens, so labd
@@ -925,9 +933,24 @@ labd --listen <labd tailnet IP>:7770 --tailscale
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5
-seconds). Every peer, tagged devices included, may look with no token: the
-dashboard, Macs, jobs, builds, logs and saved screens, including the console
-output in the live view and in each job's logs. Anything that changes the
+seconds). Each request is scoped to what its caller may see. A Maintainer's
+token sees the whole lab. A person on the tailnet without one sees only the
+Macs they volunteered (see [Volunteer a Mac](#volunteer-a-mac)) and those a
+Maintainer enrolled for them with `lab enroll --login` (see [A Volunteer's
+Mac](#a-volunteers-mac)), while those
+stay enrolled: their records, jobs, job files, logs and saved screens,
+including the console output in each job's logs, and their events on
+`/api/stream`, which leaves out the live console lines. Any other Mac answers 404, as if it weren't
+there. Builds, builders, Installed run status and the lab's capabilities
+(`/api/recovery`, `/api/mesa`) are Maintainers' only and answer 403.
+Volunteering a Mac (`POST /api/volunteer`) stays open to any person on the
+tailnet. Tagged devices, lab Macs under `tag:maclab` and the labd host among
+them, get nothing without a token (401); a Mac reaches labd with its own
+device secret on `/api/agent/*`. With it a Mac fetches only the artifacts
+labd sent it for its active job (the kernel it stages, test scripts, Mesa
+packages, a Release's packages), and only until that job ends; any other
+`GET /api/agent/artifacts/{sha}` answers 404. The builder fetches any
+artifact with its own token, on `GET /api/builder/artifacts/{sha}`. Anything that changes the
 lab, the console itself (`lab shell`), the Mac's stored serial log and new
 screenshots need a Maintainer's token and answer 403 without one, and device
 views never carry the controller's token. A Maintainer's token works from
@@ -948,8 +971,8 @@ Setup refuses a key file that group or others may read: make a new key
 then, since anyone could have read that one. `--tailscale-authkey -` reads
 the key from stdin instead, and asks for it when stdin is a terminal. A key
 given straight to `--tailscale-authkey` is refused: by the time setup sees
-it, the process list and sudo's journal entry show it, and tailnet viewers
-can read that journal through labd. Revoke such a key and make a new one.
+it, the process list and sudo's journal entry show it, and whoever sees the
+Mac in labd can read that journal through it. Revoke such a key and make a new one.
 
 Before anything else, setup runs `tailscale up --auth-key=file:... --advertise-tags=tag:maclab
 --ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup
@@ -973,7 +996,8 @@ Re-joining can cut a Tailscale SSH session, and tailscale may refuse to do
 it from one; run setup from the console or over plain SSH then.
 
 A minimal policy: Macs reach only labd, admins reach labd and SSH into the
-Macs as root, and the rest of the tailnet may view labd.
+Macs as root, and the rest of the tailnet reaches labd to volunteer a Mac
+and see their own.
 
 ```hujson
 {

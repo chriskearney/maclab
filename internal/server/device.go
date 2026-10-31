@@ -33,6 +33,7 @@ type dev struct {
 	inflight      map[string]time.Time
 	sent          map[string]api.Command
 	target        map[string]string // command ID -> the boot it was issued for
+	grants        map[string]string // artifact sha256 -> the job labd sent it for (see grantLocked)
 	results       map[string]api.CommandResult
 	changed       chan struct{}
 	events        []api.KernelEvent
@@ -408,24 +409,27 @@ func nextCmdID() string {
 }
 
 // send queues a command for the Mac on behalf of the job's Maintainer.
-func (v *dev) send(kind, job string, args any) string { return v.sendFor("", kind, job, args) }
+func (v *dev) send(kind, job string, args any) string { return v.sendFor(caller{}, kind, job, args) }
 
-// sendFor queues a command for the Mac on behalf of maintainer, or when that
-// is "" of whoever submitted the job; the Mac records who in its Audit log.
-func (v *dev) sendFor(maintainer, kind, job string, args any) string {
-	if maintainer == "" && job != "" {
+// sendFor queues a command for the Mac on behalf of c: a Maintainer, the
+// Mac's own Volunteer, or when neither whoever submitted the job. The Mac
+// records who in its Audit log.
+func (v *dev) sendFor(c caller, kind, job string, args any) string {
+	maintainer := c.maintainer
+	if maintainer == "" && c.login == "" && job != "" {
 		if j, err := v.s.store.job(job); err == nil {
 			maintainer = j.Maintainer
 		}
 	}
 	b, _ := json.Marshal(args)
-	c := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Maintainer: maintainer, Args: b}
+	cmd := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Maintainer: maintainer, VolunteerLogin: c.login, Args: b}
 	v.mu.Lock()
-	v.pending = append(v.pending, c)
-	v.target[c.ID] = v.d.BootID
+	v.grantLocked(cmd)
+	v.pending = append(v.pending, cmd)
+	v.target[cmd.ID] = v.d.BootID
 	v.bump()
 	v.mu.Unlock()
-	return c.ID
+	return cmd.ID
 }
 
 // waitFor blocks until cond (called with mu held) returns true, the timeout
@@ -524,7 +528,7 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 	boot := v.d.BootID
 	name := v.d.Name
 	v.mu.Unlock()
-	id := v.sendFor(maintainerOf(ctx), kind, job, args)
+	id := v.sendFor(callerOfCtx(ctx), kind, job, args)
 	deadline := v.s.now().Add(timeout)
 	var (
 		res            api.CommandResult

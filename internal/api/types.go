@@ -225,10 +225,11 @@ type Quiet struct {
 // AuditEntry is one line of a Volunteer Mac's Audit log: a Maintainer action
 // that reached the Mac, written there before lab-agent acted on it.
 type AuditEntry struct {
-	Time       time.Time `json:"time"`
-	Maintainer string    `json:"maintainer,omitempty"` // "" when labd acted on its own
-	Job        string    `json:"job,omitempty"`
-	Action     string    `json:"action"` // what was done, with the command or script text
+	Time           time.Time `json:"time"`
+	Maintainer     string    `json:"maintainer,omitempty"`      // "" when labd acted on its own
+	VolunteerLogin string    `json:"volunteer_login,omitempty"` // the Mac's own Volunteer asked, through labd
+	Job            string    `json:"job,omitempty"`
+	Action         string    `json:"action"` // what was done, with the command or script text
 	// Refused is why lab-agent refused the action instead; "" when it acted.
 	Refused string `json:"refused,omitempty"`
 	// End is where the entry ends in the Mac's own log, in bytes: labd's copy
@@ -240,7 +241,10 @@ type AuditEntry struct {
 // time zone of loc.
 func (e AuditEntry) Line(loc *time.Location) string {
 	who := e.Maintainer
-	if who == "" {
+	switch {
+	case e.VolunteerLogin != "":
+		who = "Volunteer " + e.VolunteerLogin
+	case who == "":
 		who = "labd"
 	}
 	job := ""
@@ -327,8 +331,11 @@ type Command struct {
 	JobID string `json:"job_id,omitempty"`
 	// Maintainer is who the command acts for: the Maintainer who asked, or
 	// whose job it is; "" when labd acts on its own.
-	Maintainer string          `json:"maintainer,omitempty"`
-	Args       json.RawMessage `json:"args,omitempty"`
+	Maintainer string `json:"maintainer,omitempty"`
+	// VolunteerLogin is the tailnet login of the Mac's own Volunteer when
+	// they asked for it through labd, such as reading its live journal.
+	VolunteerLogin string          `json:"volunteer_login,omitempty"`
+	Args           json.RawMessage `json:"args,omitempty"`
 }
 
 type CommandResult struct {
@@ -827,13 +834,21 @@ type EnrollTokenRequest struct {
 	// Volunteer makes the Mac a volunteer's (see Device.Volunteer). labd sets
 	// it on every POST /api/volunteer token, whatever the request says.
 	Volunteer bool `json:"volunteer,omitempty"`
-	// VolunteeredBy is the login that asked for a volunteer token, set by
-	// labd only (see Device.VolunteeredBy).
+	// VolunteeredBy is the login that asked for a volunteer token, or the
+	// one a Maintainer named (VolunteerLogin), set by labd only (see
+	// Device.VolunteeredBy). SelfServe is true when that person asked for
+	// the token themselves (./volunteer), and their Mac counts toward the
+	// limit on how many one person may volunteer.
 	VolunteeredBy string `json:"-"`
+	SelfServe     bool   `json:"-"`
 	// VolunteerName and Contact make the token a Volunteer's: both or
 	// neither. Either makes Volunteer true too.
 	VolunteerName string `json:"volunteer_name,omitempty"`
 	Contact       string `json:"contact,omitempty"`
+	// VolunteerLogin is the Volunteer's tailnet login, which a Maintainer
+	// may name on a Volunteer's token: it becomes the Mac's VolunteeredBy, so
+	// that Volunteer sees their Mac in labd.
+	VolunteerLogin string `json:"volunteer_login,omitempty"`
 }
 
 type EnrollTokenResponse struct {

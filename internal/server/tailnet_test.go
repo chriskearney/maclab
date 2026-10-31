@@ -69,7 +69,7 @@ func TestTailnetRoles(t *testing.T) {
 		{"admin submits a job", "POST", "/api/jobs", admin, "adm_secret", past},
 		{"viewer lists Macs", "GET", "/api/devices", viewer, "", 200},
 		{"viewer over IPv6", "GET", "/api/jobs", "[fd7a:115c:a1e0::10]:1", "", 200},
-		{"viewer reads builds", "GET", "/api/builds", viewer, "", 200},
+		{"a person may not read builds", "GET", "/api/builds", viewer, "", 403},
 		{"viewer submits a job", "POST", "/api/jobs", viewer, "", 403},
 		{"viewer enrolls a Mac", "POST", "/api/enroll-tokens", viewer, "", 403},
 		{"viewer resets a Mac", "POST", "/api/devices/m/reset", viewer, "", 403},
@@ -79,15 +79,15 @@ func TestTailnetRoles(t *testing.T) {
 		{"viewer reads the serial log", "GET", "/api/devices/m/serial", viewer, "", 403},
 		{"viewer releases a lease", "DELETE", "/api/devices/m/lease", viewer, "", 403},
 		{"viewer with the token", "POST", "/api/jobs", viewer, "adm_secret", past},
-		{"tagged device only looks", "GET", "/api/devices", tagged, "", 200},
-		{"tagged device can't change", "POST", "/api/jobs", tagged, "", 403},
+		{"tagged device gets nothing", "GET", "/api/devices", tagged, "", 401},
+		{"tagged device can't change", "POST", "/api/jobs", tagged, "", 401},
 		{"unknown tailnet address", "GET", "/api/devices", unknown, "", 401},
 		{"off the tailnet", "GET", "/api/devices", "192.168.7.3:5000", "", 401},
 		{"trusted network still admin", "POST", "/api/jobs", "10.1.1.42:1", "adm_secret", past},
 		{"token from anywhere", "POST", "/api/jobs", "192.168.7.3:5000", "adm_secret", past},
 		{"agents keep device secrets", "POST", "/api/agent/checkin", admin, "", 401},
-		{"viewer reads a release", "GET", "/api/installed/aurora-1", viewer, "", 200},
-		{"viewer can't leave the frozen stores", "GET", "/api/installed/..%2F..%2F..%2Fetc", viewer, "", 404},
+		{"a person may not read a release", "GET", "/api/installed/aurora-1", viewer, "", 403},
+		{"nor reach the frozen stores", "GET", "/api/installed/..%2F..%2F..%2Fetc", viewer, "", 403},
 		{"nor can an admin", "GET", "/api/installed/..%2F..%2F..%2Fetc", admin, "adm_secret", 404},
 	}
 	for _, c := range cases {
@@ -131,9 +131,26 @@ func TestTailnetRoles(t *testing.T) {
 	if a := auth("192.168.7.3:5000"); !a.TokenRequired || a.Role != "" {
 		t.Errorf("outsider's /api/auth: %+v", a)
 	}
+	if a := auth(tagged); !a.TokenRequired || a.Role != "" {
+		t.Errorf("tagged device's /api/auth: %+v", a)
+	}
 
-	// The live stream leaves serial lines out for viewers: they carry the
-	// console, which only admins may see.
+	// The viewer volunteers Mac m, so their stream carries its events.
+	var vol api.EnrollTokenResponse
+	r := httptest.NewRequest("POST", labdAt+"/api/volunteer", strings.NewReader(`{"name":"m"}`))
+	r.RemoteAddr = viewer
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	json.Unmarshal(w.Body.Bytes(), &vol)
+	r = httptest.NewRequest("POST", labdAt+"/api/agent/enroll", strings.NewReader(`{"token":"`+vol.Token+`"}`))
+	r.RemoteAddr = viewer
+	w = httptest.NewRecorder()
+	if h.ServeHTTP(w, r); w.Code != 200 || vol.Name != "m" {
+		t.Fatalf("volunteer m: %+v, enroll %d %s", vol, w.Code, w.Body)
+	}
+
+	// The live stream leaves serial lines out for viewers, even of their own
+	// Mac: they carry the console, which only Maintainers may see.
 	stream := func(remote string, token ...string) string {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			r.RemoteAddr = remote
