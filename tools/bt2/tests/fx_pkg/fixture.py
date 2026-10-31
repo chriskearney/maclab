@@ -17,7 +17,14 @@ import time
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.abspath(__file__))
-BIN = os.path.join(HERE, 'bin')
+import importlib.util as _ilu
+_interp = sys.modules.get('fx_interp')   # one instance, so every fixture shares the same bound directories
+if _interp is None:
+    _s = _ilu.spec_from_file_location('fx_interp', os.path.join(os.path.dirname(HERE), 'fx_interp.py'))
+    _interp = sys.modules['fx_interp'] = _ilu.module_from_spec(_s)
+    _s.loader.exec_module(_interp)
+FAKE_BIN = os.path.join(HERE, 'bin')
+BIN = _interp.bound(FAKE_BIN)   # the fake tools, run by this very interpreter (fx_interp.py, CI run 41229895120)
 # the target tree under test: BT2_TARGET, else this checkout's own target/ (never a historical copy)
 TARGET = os.environ.get('BT2_TARGET') or os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'target')
 SCRATCH = '/dev/shm/maclab-bt2-tests'
