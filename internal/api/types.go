@@ -1164,10 +1164,13 @@ type BuilderRequest struct {
 	Kinds []string `json:"kinds,omitempty"` // default: kernel
 }
 
-// NewBuilder carries a new builder's token, the only time labd shows it.
+// NewBuilder carries a new builder's token, the only time labd shows it, and
+// its generation: removing the builder with it removes only this one, never a
+// builder added under the same name since.
 type NewBuilder struct {
 	Builder
-	Token string `json:"token"`
+	Token      string `json:"token"`
+	Generation string `json:"generation"`
 }
 
 // RemovedBuilder answers a builder's removal: the builds it was running,

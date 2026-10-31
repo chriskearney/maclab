@@ -616,6 +616,7 @@ Any other builder is added by a Maintainer and gets a token of its own:
 lab builder add m5mbp --kinds kernel -o m5mbp.token   # the token goes only into this new file (mode 0600)
 lab builder list                                       # named builders, shared-token hosts, last seen, current build
 lab builder remove m5mbp                                # its token stops working; what it was building fails
+lab builder remove m5mbp --generation G                 # only while it is the builder that add printed as G
 ```
 
 A named builder may only build:

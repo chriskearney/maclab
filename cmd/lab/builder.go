@@ -19,7 +19,7 @@ import (
 // token of its own that may only build. A builder's kernels boot as root on
 // lab Macs, so add only builders whose operators you trust with that.
 func builderCmd(ctx context.Context, c *client.Client, args []string) error {
-	const use = "lab builder add <name> [--kinds kernel[,package]] [-o FILE] | remove <name> | list"
+	const use = "lab builder add <name> [--kinds kernel[,package]] [-o FILE] | remove <name> [--generation G] | list"
 	if len(args) < 1 {
 		return errors.New(use)
 	}
@@ -34,10 +34,13 @@ func builderCmd(ctx context.Context, c *client.Client, args []string) error {
 		}
 		return addBuilder(ctx, c, pos[0], strings.Split(*kinds, ","), *out, os.Stdout)
 	case "remove":
-		if err := need(args[1:], 1, "lab builder remove <name>"); err != nil {
+		fs := flag.NewFlagSet("builder remove", flag.ExitOnError)
+		gen := fs.String("generation", "", "remove it only while it is this generation (lab builder add prints it)")
+		pos := parse(fs, args[1:])
+		if err := need(pos, 1, "lab builder remove <name> [--generation G]"); err != nil {
 			return err
 		}
-		r, err := c.RemoveBuilder(ctx, args[1])
+		r, err := c.RemoveBuilderGeneration(ctx, pos[0], *gen)
 		if err != nil {
 			return err
 		}
@@ -114,9 +117,11 @@ func addBuilder(ctx context.Context, c *client.Client, name string, kinds []stri
 		}
 		if werr != nil {
 			os.Remove(file)
-			if _, rerr := c.RemoveBuilder(ctx, name); rerr != nil {
-				return fmt.Errorf("writing the token to %s failed (%v), and removing builder %s again failed too (%v): remove it with lab builder remove %s",
-					file, werr, name, rerr, name)
+			// Only the builder this command made: a builder added under the
+			// same name since is someone else's and stays.
+			if _, rerr := c.RemoveBuilderGeneration(ctx, name, b.Generation); rerr != nil {
+				return fmt.Errorf("writing the token to %s failed (%v), and removing the builder %s this command added failed too (%v); "+
+					"if lab builder list still shows the one added by you, remove it with lab builder remove %s", file, werr, name, rerr, name)
 			}
 			return fmt.Errorf("writing the token to %s failed (%v); builder %s was removed again", file, werr, name)
 		}
@@ -125,6 +130,7 @@ func addBuilder(ctx context.Context, c *client.Client, name string, kinds []stri
 	}
 	fmt.Fprintf(stdout, "On the builder Mac, keep the token in a file only root can read, and run lab-builder as root with\n\n"+
 		"  --server %s --token-file <that file>\n\n"+
-		"(see \"Builders\" in the README). Remove the builder with: lab builder remove %s\n", c.URL, b.Name)
+		"(see \"Builders\" in the README). Remove the builder with: lab builder remove %s\n"+
+		"Generation %s: lab builder remove %s --generation %s removes only this one.\n", c.URL, b.Name, b.Generation, b.Name, b.Generation)
 	return nil
 }

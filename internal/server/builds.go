@@ -636,14 +636,12 @@ func (s *Server) hCancelBuild(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("canceling\n"))
 }
 
-// buildMonitor fails builds whose builder went silent, and on start fails
-// builds that were running when labd stopped.
-func (s *Server) buildMonitor() {
-	// A build that was running when labd stopped is usually still running on its
-	// builder, which keeps reporting to the new labd. Give it the same silence
-	// window as any build instead of failing it at once.
-	// A named builder's claim is not kept across a restart (builders.go), so
-	// what it was running fails instead.
+// reconcileRunningBuilds settles, when labd starts and before it serves, the
+// builds that were running when it stopped. A named builder's claim is not
+// kept across a restart (builders.go), so what it was running fails. Anything
+// else is usually still running on its builder, which keeps reporting to the
+// new labd: it gets the same silence window as any build.
+func (s *Server) reconcileRunningBuilds() {
 	running, _ := s.store.builds(`state='running'`)
 	var orphaned []*api.Build
 	s.builds.mu.Lock()
@@ -659,6 +657,10 @@ func (s *Server) buildMonitor() {
 		b.State, b.Error, b.ETA = api.BuildFailed, "labd restarted while builder "+b.Builder+" was running it", 0
 		s.saveBuild(b)
 	}
+}
+
+// buildMonitor fails builds whose builder went silent.
+func (s *Server) buildMonitor() {
 	t := s.clock().NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {

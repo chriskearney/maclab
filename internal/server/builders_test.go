@@ -364,32 +364,32 @@ func TestRemovingABuilder(t *testing.T) {
 	}
 }
 
-// Removing a builder while its upload streams in records nothing.
+// Removing a builder ends its upload at once, even one whose sender has
+// stalled mid-body and sends nothing more, and records nothing.
 func TestRemovingABuilderMidUpload(t *testing.T) {
 	b := newBuilderLab(t)
 	a := b.addBuilder("a")
 	k := b.queue("")
 	b.poll(a, "", 5*time.Second)
 	pr, pw := io.Pipe()
+	defer pw.Close()
 	answered := make(chan int, 1)
 	go func() {
 		code, _ := b.do(b.ctx, "POST", "/api/builder/artifacts?build="+k.ID, a, pr)
 		answered <- code
 	}()
 	pw.Write(bytes.Repeat([]byte("k"), 1<<16))
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond) // labd has read that and waits for more
 	if code := b.call("DELETE", "/api/builders/a", "mtok", nil, nil); code != 200 {
 		t.Fatalf("remove: %d", code)
 	}
-	pw.Write(bytes.Repeat([]byte("k"), 1<<16))
-	pw.Close()
 	select {
 	case code := <-answered:
 		if code == 200 {
 			t.Fatal("a removed builder's upload was accepted")
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("the upload never ended")
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stalled upload outlived its builder")
 	}
 	b.s.builds.state.Lock()
 	cl := b.s.builds.claims[k.ID]
@@ -399,6 +399,36 @@ func TestRemovingABuilderMidUpload(t *testing.T) {
 	}
 	if bd := b.build(k.ID); bd.State != api.BuildFailed {
 		t.Fatalf("build %s", bd.State)
+	}
+}
+
+// Removing by generation removes only that generation, never a builder
+// added under the same name since.
+func TestRemovingABuilderByGeneration(t *testing.T) {
+	b := newBuilderLab(t)
+	var first api.NewBuilder
+	b.call("POST", "/api/builders", "mtok", api.BuilderRequest{Name: "a"}, &first)
+	if len(first.Generation) != 32 {
+		t.Fatalf("generation %q", first.Generation)
+	}
+	b.call("DELETE", "/api/builders/a", "mtok", nil, nil)
+	second := b.addBuilder("a")
+	if code := b.call("DELETE", "/api/builders/a?generation="+first.Generation, "mtok", nil, nil); code != 409 {
+		t.Fatalf("stale generation: %d", code)
+	}
+	if code := b.call("GET", "/api/builder/self", second, nil, nil); code != 200 {
+		t.Fatalf("the newer builder after a stale removal: %d", code)
+	}
+	if code := b.call("DELETE", "/api/builders/zz?generation="+first.Generation, "mtok", nil, nil); code != 404 {
+		t.Fatalf("no such builder: %d", code)
+	}
+	var nb api.NewBuilder
+	b.call("POST", "/api/builders", "mtok", api.BuilderRequest{Name: "c"}, &nb)
+	if code := b.call("DELETE", "/api/builders/c?generation="+nb.Generation, "mtok", nil, nil); code != 200 {
+		t.Fatalf("own generation: %d", code)
+	}
+	if code := b.call("GET", "/api/builder/self", nb.Token, nil, nil); code != 401 {
+		t.Fatalf("removed by generation, token still works: %d", code)
 	}
 }
 
@@ -501,9 +531,20 @@ func TestNamedClaimsEndOnRestart(t *testing.T) {
 	b.poll(a, "", 5*time.Second)
 	b.poll("bld", "host=controller", 5*time.Second)
 	b.start()
-	time.Sleep(200 * time.Millisecond) // buildMonitor's startup pass
+	// Settled before labd serves: no later pass can touch a new claim.
 	if bd := b.build(named.ID); bd.State != api.BuildFailed || !strings.Contains(bd.Error, "labd restarted") {
 		t.Fatalf("named build after restart: %s %q", bd.State, bd.Error)
+	}
+	fresh := b.queue("")
+	if got, code := b.poll(a, "", 5*time.Second); code != 200 || got.Build.ID != fresh.ID {
+		t.Fatalf("claim after restart: %d %+v", code, got.Build)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if bd := b.build(fresh.ID); bd.State != api.BuildRunning {
+		t.Fatalf("a claim made after the restart: %s %q", bd.State, bd.Error)
+	}
+	if code := b.call("POST", "/api/builder/builds/"+fresh.ID+"/progress", a, api.BuildProgress{Lines: []string{"x"}}, nil); code != 200 {
+		t.Fatalf("progress on the fresh claim: %d", code)
 	}
 	if bd := b.build(shared.ID); bd.State != api.BuildRunning {
 		t.Fatalf("shared build after restart: %s %q", bd.State, bd.Error)

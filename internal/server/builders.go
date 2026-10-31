@@ -29,6 +29,8 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"sync"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -225,6 +227,29 @@ func (c ctxReader) Read(p []byte) (int, error) {
 	return c.ReadCloser.Read(p)
 }
 
+// interruptReadsOnCancel makes a read of r's body that is waiting for the
+// sender return at once when ctx ends (a builder removed mid-upload), by
+// moving the connection's read deadline to now. The returned func, deferred
+// by the handler, stops that before the handler returns.
+func interruptReadsOnCancel(w http.ResponseWriter, ctx context.Context) (stop func()) {
+	rc := http.NewResponseController(w)
+	var mu sync.Mutex
+	over := false
+	cancel := context.AfterFunc(ctx, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if !over {
+			rc.SetReadDeadline(time.Now())
+		}
+	})
+	return func() {
+		cancel()
+		mu.Lock()
+		over = true
+		mu.Unlock()
+	}
+}
+
 // namedUpload stores a named builder's upload for the build it names
 // (?build=), capped while it streams, and records it for that build only if
 // the builder still holds the build once the body is in.
@@ -240,6 +265,7 @@ func (s *Server) namedUpload(w http.ResponseWriter, r *http.Request, c builderCr
 		httpErr(w, 403, "an upload must name a build this builder is running (?build=): %v", err)
 		return
 	}
+	defer interruptReadsOnCancel(w, r.Context())()
 	sha, n, err := s.storeArtifact(http.MaxBytesReader(w, ctxReader{r.Context(), r.Body}, builderUploadMax))
 	switch {
 	case errors.As(err, new(*http.MaxBytesError)):
@@ -301,8 +327,9 @@ func (s *Server) hAddBuilder(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
-	nb := api.NewBuilder{Builder: api.Builder{Name: req.Name, Kinds: kinds, Added: s.now(), AddedBy: maintainerName(r)}, Token: newBuilderToken()}
-	if err := s.store.addBuilder(nb.Builder, randHex(16), hashSecret(nb.Token)); err != nil {
+	nb := api.NewBuilder{Builder: api.Builder{Name: req.Name, Kinds: kinds, Added: s.now(), AddedBy: maintainerName(r)},
+		Token: newBuilderToken(), Generation: randHex(16)}
+	if err := s.store.addBuilder(nb.Builder, nb.Generation, hashSecret(nb.Token)); err != nil {
 		if s.store.hasBuilder(req.Name) {
 			httpErr(w, 409, "there is already a builder named %s", req.Name)
 			return
@@ -315,17 +342,22 @@ func (s *Server) hAddBuilder(w http.ResponseWriter, r *http.Request) {
 }
 
 // hRemoveBuilder removes a named builder: its token stops working, its open
-// requests end, and the builds it was running fail.
+// requests end, and the builds it was running fail. ?generation= removes it
+// only if it is still that generation (lab builder add undoing its own add),
+// never one added under the same name since.
 func (s *Server) hRemoveBuilder(w http.ResponseWriter, r *http.Request) {
-	name := r.PathValue("name")
+	name, only := r.PathValue("name"), r.URL.Query().Get("generation")
 	by := maintainerName(r)
 	s.builds.state.Lock()
-	gen, ok, err := s.store.removeBuilder(name)
+	gen, ok, err := s.store.removeBuilder(name, only)
 	if err != nil || !ok {
 		s.builds.state.Unlock()
-		if err != nil {
+		switch {
+		case err != nil:
 			httpErr(w, 500, "%v", err)
-		} else {
+		case only != "" && s.store.hasBuilder(name):
+			httpErr(w, 409, "builder %s is another generation now; nothing was removed", name)
+		default:
 			httpErr(w, 404, "no builder %s", name)
 		}
 		return

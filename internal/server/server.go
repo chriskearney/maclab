@@ -288,6 +288,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		st.saveJob(j)
 	}
 	s.builds = newBuildMgr(s)
+	s.reconcileRunningBuilds()
 	go s.monitor()
 	go s.buildMonitor()
 	go s.gcLoop()

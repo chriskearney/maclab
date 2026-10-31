@@ -403,9 +403,10 @@ func (s *store) builders() ([]api.Builder, error) {
 }
 
 // removeBuilder deletes a named builder and its token, returning the
-// generation that ended; ok is false when there was no such builder.
-func (s *store) removeBuilder(name string) (gen string, ok bool, err error) {
-	err = s.db.QueryRow(`DELETE FROM builders WHERE name=? RETURNING gen`, name).Scan(&gen)
+// generation that ended; only, if set, deletes it only while it is that
+// generation. ok is false when nothing was deleted.
+func (s *store) removeBuilder(name, only string) (gen string, ok bool, err error) {
+	err = s.db.QueryRow(`DELETE FROM builders WHERE name=? AND (?='' OR gen=?) RETURNING gen`, name, only, only).Scan(&gen)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}

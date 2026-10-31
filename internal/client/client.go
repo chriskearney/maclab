@@ -203,8 +203,18 @@ func (c *Client) AddBuilder(ctx context.Context, name string, kinds []string) (*
 
 // RemoveBuilder stops a named builder's token and fails the builds it was running.
 func (c *Client) RemoveBuilder(ctx context.Context, name string) (*api.RemovedBuilder, error) {
+	return c.RemoveBuilderGeneration(ctx, name, "")
+}
+
+// RemoveBuilderGeneration removes a named builder only while it is still the
+// generation AddBuilder returned; "" removes whatever builder has the name.
+func (c *Client) RemoveBuilderGeneration(ctx context.Context, name, generation string) (*api.RemovedBuilder, error) {
 	var out api.RemovedBuilder
-	return &out, c.do(ctx, "DELETE", "/api/builders/"+url.PathEscape(name), nil, &out)
+	path := "/api/builders/" + url.PathEscape(name)
+	if generation != "" {
+		path += "?generation=" + url.QueryEscape(generation)
+	}
+	return &out, c.do(ctx, "DELETE", path, nil, &out)
 }
 
 // EndEnrollment ends a Mac's enrollment: labd forgets it and revokes its device secret at once.

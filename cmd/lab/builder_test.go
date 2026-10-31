@@ -17,23 +17,29 @@ import (
 	"github.com/iconidentify/maclab/internal/client"
 )
 
-const testBuilderToken = "bldr_0123456789abcdef0123456789abcdef01234567"
+const (
+	testBuilderToken = "bldr_0123456789abcdef0123456789abcdef01234567"
+	testGeneration   = "0123456789abcdef0123456789abcdef"
+)
 
 // fakeBuilderLabd answers lab builder add and remove, recording each request.
-func fakeBuilderLabd(t *testing.T, addCode int) (*client.Client, *[]string) {
+// replaced makes a removal by generation find a newer builder (409).
+func fakeBuilderLabd(t *testing.T, addCode int, replaced ...bool) (*client.Client, *[]string) {
 	var mu sync.Mutex
 	var seen []string
 	labd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
-		seen = append(seen, r.Method+" "+r.URL.Path)
+		seen = append(seen, strings.TrimSuffix(r.Method+" "+r.URL.Path+"?"+r.URL.RawQuery, "?"))
 		mu.Unlock()
 		switch {
 		case r.Method == "POST" && r.URL.Path == "/api/builders" && addCode == 200:
 			var req api.BuilderRequest
 			json.NewDecoder(r.Body).Decode(&req)
-			json.NewEncoder(w).Encode(api.NewBuilder{Builder: api.Builder{Name: req.Name, Kinds: []string{"kernel"}}, Token: testBuilderToken})
+			json.NewEncoder(w).Encode(api.NewBuilder{Builder: api.Builder{Name: req.Name, Kinds: []string{"kernel"}}, Token: testBuilderToken, Generation: testGeneration})
 		case r.Method == "POST" && r.URL.Path == "/api/builders":
 			http.Error(w, "there is already a builder named m5mbp", addCode)
+		case r.Method == "DELETE" && len(replaced) > 0 && replaced[0]:
+			http.Error(w, "builder m5mbp is another generation now; nothing was removed", 409)
 		case r.Method == "DELETE" && strings.HasPrefix(r.URL.Path, "/api/builders/"):
 			json.NewEncoder(w).Encode(api.RemovedBuilder{Removed: strings.TrimPrefix(r.URL.Path, "/api/builders/"), FailedBuilds: []string{}})
 		default:
@@ -65,7 +71,8 @@ func TestBuilderAddWritesTheTokenOnlyToItsFile(t *testing.T) {
 	if raw, _ := os.ReadFile(file); string(raw) != testBuilderToken {
 		t.Fatalf("file holds %q", raw)
 	}
-	if strings.Contains(out.String(), testBuilderToken) || !strings.Contains(out.String(), "--token-file") {
+	if strings.Contains(out.String(), testBuilderToken) || !strings.Contains(out.String(), "--token-file") ||
+		!strings.Contains(out.String(), "--generation "+testGeneration) {
 		t.Fatalf("output: %s", out.String())
 	}
 	if strings.Join(*seen, "|") != "POST /api/builders" {
@@ -119,7 +126,35 @@ func TestBuilderAddUndoneWhenTheFileFails(t *testing.T) {
 	if _, err := os.Stat(file); !os.IsNotExist(err) {
 		t.Fatalf("file left behind: %v", err)
 	}
-	if strings.Join(*seen, "|") != "POST /api/builders|DELETE /api/builders/m5mbp" {
+	if strings.Join(*seen, "|") != "POST /api/builders|DELETE /api/builders/m5mbp?generation="+testGeneration {
+		t.Fatalf("requests %q", *seen)
+	}
+}
+
+// Undoing its own add never removes a builder added under the same name since.
+func TestBuilderAddUndoLeavesAReplacementAlone(t *testing.T) {
+	c, seen := fakeBuilderLabd(t, 200, true)
+	old := writeToken
+	writeToken = func(*os.File, string) error { return errors.New("no space left on device") }
+	defer func() { writeToken = old }()
+	err := addBuilder(context.Background(), c, "m5mbp", nil, filepath.Join(t.TempDir(), "t"), &bytes.Buffer{})
+	if err == nil || strings.Contains(err.Error(), testBuilderToken) || !strings.Contains(err.Error(), "another generation") {
+		t.Fatalf("error: %v", err)
+	}
+	if strings.Join(*seen, "|") != "POST /api/builders|DELETE /api/builders/m5mbp?generation="+testGeneration {
+		t.Fatalf("requests %q", *seen)
+	}
+}
+
+func TestBuilderRemoveByGeneration(t *testing.T) {
+	c, seen := fakeBuilderLabd(t, 200)
+	if err := dispatch(context.Background(), c, "builder", []string{"remove", "m5mbp", "--generation", testGeneration}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatch(context.Background(), c, "builder", []string{"remove", "m5mbp"}); err != nil {
+		t.Fatal(err)
+	}
+	if want := "DELETE /api/builders/m5mbp?generation=" + testGeneration + "|DELETE /api/builders/m5mbp"; strings.Join(*seen, "|") != want {
 		t.Fatalf("requests %q", *seen)
 	}
 }
