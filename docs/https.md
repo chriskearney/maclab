@@ -128,8 +128,6 @@ Apply in this order:
   - If setup is interrupted, re-running it on the same Mac works until its first check-in, and only while labd keeps running: the
     activation state is in labd's memory.
   - After a labd restart, `lab forget <name>` and send a new invite.
-  - The same remedy covers a known limit: if labd stops in the moment between using up the invite and saving the new Mac, the invite is
-    spent and no Mac is recorded. Send a new invite.
   - The Mac keeps its activation key in `/var/lib/maclab`, renamed into place. The rename is atomic, but the file isn't flushed to
     disk first, so a power cut right after setup may lose it; then the same remedy applies.
 - `lab enroll <name> --revoke` withdraws an unused invite.
@@ -181,6 +179,15 @@ Move only from a stopped, consistent state. Never run the old and new labd at th
      - it restarts only `lab-agent.service`.
 
      The Mac keeps its enrollment (ID and secret), its GUI settings and its recovery state.
+   - What `move` answers:
+     - **Refused, ending "Nothing was changed":** run inside lab-agent's service, the new labd doesn't know this Mac, or the URL or
+       CA is refused. agent.json is as it was.
+     - **"agent.json was not changed: …":** writing the new file failed before it replaced the old one. agent.json is as it was.
+     - **"…/agent.json was replaced, but syncing its directory failed, so a power cut could undo it: … lab-agent was not
+       restarted":** agent.json already names the new labd, but lab-agent still runs with the old one. Fix the cause, then
+       `systemctl restart lab-agent.service`, or run `move` again.
+     - **"lab-agent restarted; the move is done when this Mac checks in to …":** done on the Mac. The move counts once the check-in
+       happens.
    - **Before the cutover** the new labd isn't answering yet, so use `--no-check`. The URL policy and the CA are still checked, and
      the agent keeps retrying until the new labd answers.
    - **After the cutover**, use the checked form, without `--no-check`.
