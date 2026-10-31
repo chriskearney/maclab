@@ -65,6 +65,7 @@ type omtReport struct {
 			Outcome string `json:"outcome"`
 		} `json:"classification"`
 	} `json:"checks"`
+	Unattended bool `json:"unattended"` // --unattended: only the automatic checks ran
 }
 
 // omtBaseline is the known-good report a Mac's other runs are compared with.
@@ -158,6 +159,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		// never becomes a reference
 		res.KnownGood = false
 		r.ir.omt(tr, res, data)
+		tr.Error += omtFrozenSkipNote(r.ir.c.omtUnattended, rep.Unattended, res.Regressions)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
 		r.ev("omarchy-m-test %s: %d pass, %d fail, %d skipped; %s vs %s", res.Tool, res.Pass, res.Fail, res.Skip, r.ir.res.OMT, res.ComparedTo)
 		return
@@ -191,6 +193,11 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		res.ComparedTo, res.BaselineJob = "known-good run "+base.Job+" on "+base.Kernel, base.Job
 		if base.Tool != res.Tool {
 			res.ComparedTo += fmt.Sprintf(" (omarchy-m-test %s then, %s now)", base.Tool, res.Tool)
+		}
+	}
+	if base != nil {
+		if missed := omtNotRun(rep.Unattended, base.Status, status); len(missed) > 0 {
+			res.ComparedTo += "; not compared, as this unattended run skipped what that one passed: " + strings.Join(missed, ", ")
 		}
 	}
 	r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
@@ -299,6 +306,49 @@ func omtDiff(before, after map[string]string, byID map[string]api.OMTCheck) (reg
 		}
 	}
 	return
+}
+
+// omtNotRun lists the checks a reference passed that an unattended run skipped.
+// omtDiff rightly calls them neither regressed nor fixed, so without this a
+// lab kernel looks checked for what nothing ran on it. It only shows until a
+// known-good unattended run replaces an attended reference.
+func omtNotRun(unattended bool, before, after map[string]string) []string {
+	if !unattended {
+		return nil
+	}
+	var ids []string
+	for id, was := range before {
+		if was == "pass" && after[id] == "skip" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// omtFrozenSkipNote names what an unattended Installed run regressed by
+// skipping, and what to do: a frozen pass that is now a skip stays a regression
+// (CompareOMT). Only a report frozen from an attended run can have run more than
+// this mode does, so only then is taking the references again any use.
+func omtFrozenSkipNote(frozenUnattended, unattended bool, regressed []api.OMTCheck) string {
+	if !unattended {
+		return ""
+	}
+	var ids []string
+	for _, c := range regressed {
+		if c.Outcome == "pass -> skip" {
+			ids = append(ids, c.ID)
+		}
+	}
+	switch {
+	case len(ids) == 0:
+		return ""
+	case frozenUnattended:
+		return "; this unattended run skipped what the unattended pre-install report passed: " + strings.Join(ids, ", ") +
+			": see their evidence, and if the screen was locked or covered run it again"
+	}
+	return "; this unattended run skipped what the attended pre-install report passed: " + strings.Join(ids, ", ") +
+		": if the screen was locked or covered run it again, otherwise take the preinstall references again"
 }
 
 // unclaimedNodes counts a report's unclaimed device-tree nodes per

@@ -25,7 +25,7 @@ _Avoid_: Type, class
 The user on a Mac whose Wayland session GUI tests run in; on a Volunteer's Mac it is the Volunteer's own account, logged in and locked on a Lab boot.
 
 **On-screen check**:
-A check of omarchy-m-test that needs the screen visible (the `video` section's test card). It runs on Lab-owned Macs and is left out on a Volunteer's Mac, which is locked while a test runs.
+A check of omarchy-m-test that needs the screen visible (the `video` section's test card). A Lab-owned Mac's unattended run takes it where its tool can and the screen isn't locked or covered. A Volunteer's Mac, locked while a test runs, always leaves it out.
 
 **Known-good kernel**:
 The kernel a Mac returns to after every lab boot, recorded on both labd and the Mac. On a Volunteer's Mac, it is the kernel the Volunteer's own system boots by default.
