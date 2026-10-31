@@ -92,7 +92,8 @@ They follow the cluster's existing conventions (the chonkbase and slopblender na
 1. **The image, by digest.**
    - Publish a commit on main with `gh workflow run publish.yml -f commit=<full sha>` (Actions > publish > Run workflow). It:
      - builds that commit for linux/amd64 and runs the image smoke at both URLs;
-     - pushes `ghcr.io/chriskearney/maclab:<full sha>` (there's no moving tag, and it refuses to re-push a tag that exists);
+     - pushes a tag of that run's own, `ghcr.io/chriskearney/maclab:<full sha>-<run id>-<run attempt>`, so no run pushes over another's
+       (there's no bare-sha or moving tag);
      - reads it back and prints `ghcr.io/chriskearney/maclab@sha256:<digest>` in the job summary.
    - Pin that digest, not a tag:
      `cd deploy/k8s/base && kustomize edit set image maclab=ghcr.io/chriskearney/maclab@sha256:<digest>`, or put `digest:` in place

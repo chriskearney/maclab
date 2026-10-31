@@ -1,13 +1,14 @@
 name: publish
 # Publishes labd's image, built from one commit already on main, as
-# ghcr.io/chriskearney/maclab:<the commit's full sha>, once it passes the smoke
-# test the image workflow runs. Only by hand, from main:
+# ghcr.io/chriskearney/maclab:<the commit's full sha>-<run id>-<run attempt>,
+# once it passes the smoke test the image workflow runs. Only by hand, from main:
 #
 #   gh workflow run publish.yml --ref main -f commit=<full sha of a commit on main>
 #
 # Deploy what it prints, ghcr.io/chriskearney/maclab@sha256:<digest>; nothing
-# here deploys. A tag that is already published is never pushed again, and
-# there is no moving tag such as latest.
+# here deploys. Each run and attempt pushes a tag of its own, so no run pushes
+# over another's; there is no bare-sha tag and no moving tag such as latest.
+# This workflow is the package's only publisher.
 on:
   workflow_dispatch:
     inputs:
@@ -43,6 +44,12 @@ jobs:
             echo "::error::commit must be a full 40-character lowercase sha"
             exit 1
           fi
+          if ! [[ $GITHUB_RUN_ID =~ ^[1-9][0-9]{0,19}$ && $GITHUB_RUN_ATTEMPT =~ ^[1-9][0-9]{0,4}$ ]]; then
+            echo "::error::the run id and attempt must be numbers"
+            exit 1
+          fi
+          # This run's own tag: the commit, the run, the attempt.
+          echo "REF=$IMAGE:$COMMIT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >>"$GITHUB_ENV"
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ inputs.commit }}
@@ -61,30 +68,25 @@ jobs:
           docker build --platform linux/amd64 \
             --label org.opencontainers.image.source=https://github.com/chriskearney/maclab \
             --label org.opencontainers.image.revision="$COMMIT" \
-            -t "$IMAGE:$COMMIT" .
-          [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE:$COMMIT")" = linux/amd64 ]
-          echo "BUILT=$(docker image inspect --format '{{.Id}}' "$IMAGE:$COMMIT")" >>"$GITHUB_ENV"
+            -t "$REF" .
+          [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$REF")" = linux/amd64 ]
+          echo "BUILT=$(docker image inspect --format '{{.Id}}' "$REF")" >>"$GITHUB_ENV"
       # The commit's own smoke test, at both public URLs, before any login.
       - name: Smoke test, on its own host
-        run: bash .github/scripts/image-smoke.sh "$IMAGE:$COMMIT" https://maclab.chonkbase.net
+        run: bash .github/scripts/image-smoke.sh "$REF" https://maclab.chonkbase.net
       - name: Smoke test, under a prefix
-        run: bash .github/scripts/image-smoke.sh "$IMAGE:$COMMIT" https://chonkbase.net/maclab
+        run: bash .github/scripts/image-smoke.sh "$REF" https://chonkbase.net/maclab
       - name: Push, and read it back
         id: push
         env:
           TOKEN: ${{ github.token }}
         run: |
           export DOCKER_CONFIG=$RUNNER_TEMP/ghcr  # this job's login only; the last step removes it
-          ref=$IMAGE:$COMMIT
           docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$TOKEN"
           unset TOKEN
-          if docker buildx imagetools inspect --raw "$ref" >/dev/null 2>&1; then
-            echo "::error::$ref is already published: deploy the digest the run that published it printed"
-            exit 1
-          fi
-          docker push "$ref"
+          docker push "$REF"
           # The digest is the sha256 of the manifest the registry now serves for the tag.
-          digest=sha256:$(docker buildx imagetools inspect --raw "$ref" | sha256sum | cut -d' ' -f1)
+          digest=sha256:$(docker buildx imagetools inspect --raw "$REF" | sha256sum | cut -d' ' -f1)
           # Pulled back from the registry by that digest, it is the image tested above.
           docker image rm -f "$BUILT" >/dev/null
           docker pull -q "$IMAGE@$digest" >/dev/null
@@ -97,7 +99,7 @@ jobs:
             echo "### Published"
             echo
             echo "- Image: \`$IMAGE@$digest\` (deploy by this digest)"
-            echo "- Tag: \`$ref\`"
+            echo "- Tag: \`$REF\`"
             echo "- Built from: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$COMMIT"
             echo "- linux/amd64, smoke-tested at https://maclab.chonkbase.net and https://chonkbase.net/maclab"
           } >>"$GITHUB_STEP_SUMMARY"
