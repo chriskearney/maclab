@@ -1290,8 +1290,8 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
 		return
 	}
-	if v.d.IsVolunteer() && v.openUntilLocked().IsZero() {
-		httpErr(w, 409, "%s's Availability window is closed: a lease on a Volunteer's Mac lasts only inside it", v.d.Name)
+	if err := s.mayDoLocked(callerOf(r), v, actLease); err != nil {
+		httpErr(w, 409, "%v", err)
 		return
 	}
 	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
@@ -1579,7 +1579,7 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 		}
 	}
 	if why := needsFull(spec); why != "" {
-		if err := refuseAtAccessLevel(v.snapshot(), "Maintainer's script ("+why+")"); err != nil {
+		if err := s.mayDo(callerFor(maintainer), v, actScript(why)); err != nil {
 			return nil, 403, err
 		}
 	}

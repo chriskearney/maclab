@@ -254,7 +254,7 @@ func (s *Server) hUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	v := agentDev(r)
 	j, err := s.store.job(job)
-	if err != nil || !v.ownsActiveJob(j) {
+	if err != nil || s.mayDo(callerOf(r), s.dev(j.Spec.Device), actUpload) != nil || !v.ownsActiveJob(j) {
 		httpErr(w, 404, "no such job for this device")
 		return
 	}
