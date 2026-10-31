@@ -301,7 +301,10 @@ it stops, unless `--accept-terms <sha256>` names the exact terms you read
 (`GET <labd>/api/join/terms` with the token). labd keeps the sha256 of the
 terms each Mac accepted, and takes no enrollment that accepted others. With
 `--tailscale-authkey`, which joins the tailnet before labd can be reached,
-`--accept-terms` is required.
+`--accept-terms` is required: the join happens on that acceptance, and if
+labd's terms then turn out to differ, setup stops before enrolling (the join
+stays). The one-liner holds the token, so keep it private; the token stays
+out of URLs, labd's log and the arguments of the curl and sudo it starts.
 
 `setup` makes these changes. Each one is idempotent and backed up:
 
