@@ -413,6 +413,14 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 		result.Error = "kbuild: " + err.Error()
 		return
 	}
+	b.collect(ctx, bd, dir, pkg, &result, push)
+}
+
+// collect reads what a finished build left in its scratch dir and uploads
+// it. kbuild always writes the release; pkgbuild writes one only when a
+// package holds a kernel, so a package build without one (Mesa, m1n1)
+// reports none.
+func (b *builder) collect(ctx context.Context, bd api.Build, dir string, pkg bool, result *api.BuildResult, push func(string)) {
 	out, err := openOutputs(dir)
 	if err != nil {
 		result.Error = err.Error()
@@ -420,14 +428,17 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 	}
 	defer out.Close()
 	rel, err := out.small("release")
-	if err != nil {
+	switch {
+	case err == nil:
+		result.Release = rel
+	case pkg && errors.Is(err, fs.ErrNotExist):
+	default:
 		result.Error = err.Error()
 		return
 	}
-	result.Release = rel
 	push("@@stage upload")
 	if pkg {
-		b.uploadPackages(ctx, bd, out, &result, push)
+		b.uploadPackages(ctx, bd, out, result, push)
 		return
 	}
 	f, _, err := out.regular("kernel.tar.zst")

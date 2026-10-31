@@ -1,11 +1,23 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
+
+	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 func TestBuilderToken(t *testing.T) {
@@ -121,5 +133,134 @@ func TestOutputsReadNoLinks(t *testing.T) {
 	if f, _, err := o.regular("hardlink"); err == nil {
 		f.Close()
 		t.Error("read a hard-linked output")
+	}
+}
+
+// fakeLabd records every upload a builder makes.
+type fakeLabd struct {
+	mu   sync.Mutex
+	got  [][]byte
+	srv  *httptest.Server
+	path []string
+}
+
+func newFakeLabd(t *testing.T) *fakeLabd {
+	f := &fakeLabd{}
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.got = append(f.got, body)
+		f.path = append(f.path, r.URL.Path+"?"+r.URL.RawQuery)
+		f.mu.Unlock()
+		sum := sha256.Sum256(body)
+		json.NewEncoder(w).Encode(map[string]any{"sha256": hex.EncodeToString(sum[:]), "size": len(body)})
+	}))
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+func (f *fakeLabd) builder() *builder {
+	rt := f.srv.Client().Transport
+	return &builder{server: f.srv.URL, token: "t", rt: rt, http: labhttp.Client(rt, time.Minute)}
+}
+
+func (f *fakeLabd) uploaded(content string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, g := range f.got {
+		if bytes.Contains(g, []byte(content)) {
+			return true
+		}
+	}
+	return false
+}
+
+// collect is what run does once a build ends: these are its callers' cases.
+func TestCollect(t *testing.T) {
+	host := t.TempDir()
+	marker := filepath.Join(host, "token")
+	os.WriteFile(marker, []byte("HOST-ONLY-MARKER"), 0o600)
+	scratch := func(files map[string]string, links map[string]string) string {
+		d := t.TempDir()
+		for name, content := range files {
+			os.MkdirAll(filepath.Dir(filepath.Join(d, name)), 0o755)
+			os.WriteFile(filepath.Join(d, name), []byte(content), 0o644)
+		}
+		for name, target := range links {
+			os.MkdirAll(filepath.Dir(filepath.Join(d, name)), 0o755)
+			os.Symlink(target, filepath.Join(d, name))
+		}
+		return d
+	}
+	bd := api.Build{ID: "b1031-120000-abcd", Kind: api.BuildPackage}
+	push := func(string) {}
+
+	// A Mesa package build: no release, no kernel, two packages and the PKGBUILD.
+	f := newFakeLabd(t)
+	var res api.BuildResult
+	f.builder().collect(context.Background(), bd, scratch(map[string]string{
+		"out/mesa-aurora-1:26.3.0-1-aarch64.pkg.tar.zst":   "mesa",
+		"out/vulkan-aurora-1:26.3.0-1-aarch64.pkg.tar.zst": "vulkan",
+		"out/PKGBUILD": "pkgbuild",
+	}, nil), true, &res, push)
+	if res.Error != "" || res.Release != "" || res.Artifact != "" || len(res.Files) != 3 {
+		t.Fatalf("Mesa package build: %+v", res)
+	}
+	for _, p := range f.path {
+		if p != "/api/builder/artifacts?build="+bd.ID {
+			t.Errorf("upload %s", p)
+		}
+	}
+
+	// A kernel package build: release and kernel name, the kernel package is the artifact.
+	f = newFakeLabd(t)
+	res = api.BuildResult{}
+	f.builder().collect(context.Background(), bd, scratch(map[string]string{
+		"release": "7.2.11-6-2-ARCH\n", "kernel": "linux-aurora-7.2.11-2-aarch64.pkg.tar.zst\n",
+		"out/linux-aurora-7.2.11-2-aarch64.pkg.tar.zst": "kernel pkg",
+	}, nil), true, &res, push)
+	if res.Error != "" || res.Release != "7.2.11-6-2-ARCH" || res.Artifact == "" || len(res.Files) != 1 {
+		t.Fatalf("kernel package build: %+v", res)
+	}
+
+	// A kernel-kind build needs its release.
+	f = newFakeLabd(t)
+	res = api.BuildResult{}
+	f.builder().collect(context.Background(), api.Build{ID: bd.ID}, scratch(map[string]string{"kernel.tar.zst": "k"}, nil), false, &res, push)
+	if res.Error == "" || len(f.got) != 0 {
+		t.Fatalf("kernel build without a release: %+v, %d uploads", res, len(f.got))
+	}
+	f = newFakeLabd(t)
+	res = api.BuildResult{}
+	f.builder().collect(context.Background(), api.Build{ID: bd.ID}, scratch(map[string]string{"kernel.tar.zst": "k", "release": "7.2.11-lab1-ab12"}, nil), false, &res, push)
+	if res.Error != "" || res.Release != "7.2.11-lab1-ab12" || res.Artifact == "" {
+		t.Fatalf("kernel build: %+v", res)
+	}
+
+	// Links to a host file, anywhere among the outputs, fail the build and upload nothing of it.
+	for name, c := range map[string]struct {
+		pkg   bool
+		files map[string]string
+		links map[string]string
+	}{
+		"package leaf":     {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"out/z-1-1-aarch64.pkg.tar.zst": marker}},
+		"package release":  {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"release": marker}},
+		"package kernel":   {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"kernel": marker}},
+		"package out dir":  {true, nil, map[string]string{"out": host}},
+		"kernel tarball":   {false, map[string]string{"release": "r"}, map[string]string{"kernel.tar.zst": marker}},
+		"kernel release":   {false, map[string]string{"kernel.tar.zst": "k"}, map[string]string{"release": marker}},
+		"dangling release": {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"release": filepath.Join(host, "none")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFakeLabd(t)
+			var res api.BuildResult
+			f.builder().collect(context.Background(), bd, scratch(c.files, c.links), c.pkg, &res, push)
+			if res.Error == "" {
+				t.Errorf("no error: %+v", res)
+			}
+			if f.uploaded("HOST-ONLY-MARKER") || strings.Contains(res.Release, "MARKER") {
+				t.Error("the host marker left the host")
+			}
+		})
 	}
 }
