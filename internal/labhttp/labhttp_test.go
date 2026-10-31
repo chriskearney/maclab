@@ -200,19 +200,20 @@ func writeFile(t *testing.T, p, s string) {
 }
 
 // Requests go straight to labd, whatever the environment says about proxies.
+// (Go never proxies a loopback address, so labd here has a name: reached
+// directly it doesn't resolve, through the proxy it would.)
 func TestEnvironmentProxiesAreNotUsed(t *testing.T) {
 	var viaProxy atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { viaProxy.Add(1) }))
 	defer proxy.Close()
-	labd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer labd.Close()
-	t.Setenv("HTTP_PROXY", proxy.URL)
-	t.Setenv("http_proxy", proxy.URL)
-	t.Setenv("HTTPS_PROXY", proxy.URL)
+	for _, k := range []string{"HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy"} {
+		t.Setenv(k, proxy.URL)
+	}
 	t.Setenv("NO_PROXY", "")
+	t.Setenv("no_proxy", "")
 	c, _ := Policy{AllowPlainHTTP: true}.Client(5 * time.Second)
-	if _, err := get(t, c, labd.URL); err != nil {
-		t.Fatal(err)
+	if _, err := get(t, c, "http://labd.example.invalid/api/devices"); err == nil {
+		t.Error("a name that doesn't resolve was reached")
 	}
 	if n := viaProxy.Load(); n != 0 {
 		t.Errorf("%d requests went through the environment's proxy", n)

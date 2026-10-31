@@ -1,0 +1,31 @@
+name: image
+# Builds the labd image from the Dockerfile and smoke-tests it on an empty
+# data volume, as served at /maclab behind a proxy. Nothing is pushed.
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - run: docker build -t maclab:ci .
+      - run: bash .github/scripts/image-smoke.sh maclab:ci https://maclab.chonkbase.net
+      - run: bash .github/scripts/image-smoke.sh maclab:ci https://chonkbase.net/maclab
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labd-smoke-log
+          path: ${{ runner.temp }}/labd-smoke.log
+          if-no-files-found: ignore
+  python:
+    # The Python callers' transport policy and the Kubernetes manifests.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - run: python3 -I -m unittest discover -s tools/bt2/tests -t tools/bt2 -v
+      - run: python3 -I scripts/boot-test/test_https_runtime.py -v
+      - run: python3 -I scripts/workflow/m1/test_https_controller.py -v
+      - run: python3 -I deploy/k8s/test_manifests.py -v

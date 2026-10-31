@@ -139,8 +139,13 @@ func TestTLSListenerReloadsItsCertificate(t *testing.T) {
 	// An old protocol version is refused.
 	pool := x509.NewCertPool()
 	pool.AppendCertsFromPEM(ca.PEM)
-	if c, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: pool, MaxVersion: tls.VersionTLS11}); err == nil {
+	// A client that really offers TLS 1.0 and 1.1 (Go's own floor is 1.2) is
+	// refused by labd.
+	c, err := tls.Dial("tcp", ln.Addr().String(), &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS10, MaxVersion: tls.VersionTLS11})
+	if err == nil {
 		c.Close()
 		t.Error("TLS 1.1 was accepted")
+	} else if !strings.Contains(err.Error(), "protocol version") {
+		t.Errorf("TLS 1.1 refused, but not by labd's version floor: %v", err)
 	}
 }
