@@ -85,3 +85,89 @@ func TestOMTNodeCounts(t *testing.T) {
 		t.Errorf("unclaimedNodes %v", got)
 	}
 }
+
+// omtModeReport is a report of an attended run (video runs, brightness can
+// fail) or an unattended one (both skipped), with Wi-Fi as given.
+func omtModeReport(kernel string, unattended bool, wifi string) []byte {
+	mode, video, brightness := "", "pass", "fail"
+	if unattended {
+		mode, video, brightness = `"unattended":true,`, "skip", "skip"
+	}
+	return []byte(fmt.Sprintf(`{"tool":{"version":"0.1.15"},"machine":{"kernel":%q},%s"checks":[
+{"id":"wifi.connected","status":%q},{"id":"video.h264-on-screen","status":%q},{"id":"display.brightness-steps","status":%q}]}`,
+		kernel, mode, wifi, video, brightness))
+}
+
+// The first unattended run on a lab kernel, against a reference an attended run
+// left: what it newly skips is neither regressed nor fixed, the job isn't failed
+// for it, and the comparison says what it didn't cover. A real regression in
+// what it did run still fails the job.
+func TestOMTUnattendedRunAgainstAttendedReference(t *testing.T) {
+	l := newLab(t, true)
+	l.s.cfg.OMT = true
+	l.sim.OMTReport = func(kernel string) []byte {
+		switch {
+		case strings.HasPrefix(kernel, "7.2-attended"):
+			return omtModeReport(kernel, false, "pass")
+		case strings.HasPrefix(kernel, "7.2-bad"):
+			return omtModeReport(kernel, true, "fail")
+		case strings.HasPrefix(kernel, "7.2-"):
+			return omtModeReport(kernel, true, "pass")
+		}
+		return omtModeReport(kernel, false, "pass")
+	}
+	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
+	l.baseline()
+
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	o := j.Result.OMT
+	if len(o.Regressions) != 0 || len(o.Fixed) != 0 || o.Skip != 2 {
+		t.Fatalf("unattended omt %+v", o)
+	}
+	if !omtCompared(j) || !strings.HasSuffix(o.ComparedTo, "skipped what that one passed: video.h264-on-screen") {
+		t.Fatalf("compared to %q", o.ComparedTo)
+	}
+
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-bad behavior=ok")})
+	l.expect(j, api.OutcomeTestsFailed)
+	if o := j.Result.OMT; len(o.Regressions) != 1 || o.Regressions[0].ID != "wifi.connected" {
+		t.Fatalf("regressed omt %+v", o)
+	}
+
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-attended behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	if o := j.Result.OMT; strings.Contains(o.ComparedTo, "not compared") {
+		t.Fatalf("an attended run says it skipped: %q", o.ComparedTo)
+	}
+}
+
+func TestOMTNotRun(t *testing.T) {
+	before := map[string]string{"a": "pass", "b": "pass", "c": "fail", "d": "skip", "e": "pass"}
+	after := map[string]string{"a": "skip", "b": "pass", "c": "skip", "d": "skip", "z": "skip"}
+	if got := omtNotRun(true, before, after); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Errorf("unattended: %v", got)
+	}
+	if got := omtNotRun(false, before, after); got != nil {
+		t.Errorf("attended: %v", got)
+	}
+	regressed, fixed := omtDiff(before, after, nil)
+	if len(regressed) != 0 || len(fixed) != 0 {
+		t.Errorf("a skip changed the comparison: regressed %v, fixed %v", regressed, fixed)
+	}
+}
+
+// An Installed run stays strict about a frozen pass that is now a skip, and says
+// when that's the run's mode rather than the Release.
+func TestOMTFrozenSkipNote(t *testing.T) {
+	skipped := []api.OMTCheck{{ID: "wifi.connected", Outcome: "pass -> fail"}, {ID: "video.h264-on-screen", Outcome: "pass -> skip"}}
+	if got := omtFrozenSkipNote(true, skipped); !strings.Contains(got, "take the preinstall references again") {
+		t.Errorf("unattended: %q", got)
+	}
+	if got := omtFrozenSkipNote(false, skipped); got != "" {
+		t.Errorf("attended: %q", got)
+	}
+	if got := omtFrozenSkipNote(true, skipped[:1]); got != "" {
+		t.Errorf("a real failure: %q", got)
+	}
+}

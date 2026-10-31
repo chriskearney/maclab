@@ -585,10 +585,18 @@ On a Mac with a desktop user, every job also runs
 [omarchy-m-test](https://github.com/maralcbr/omarchy-m-testing) in the desktop
 session: about 70 checks of the boot chain, drivers, GPU, video decode, display,
 audio, Wi-Fi, power and CPU, and short benchmarks. The agent installs or upgrades
-the tool with its own installer, which checks the release signature. It answers
-the disclaimer and then gives no more input, so every question meant for a person
-(look at the screen, close the lid, reload Wi-Fi, upload) is skipped, never
-answered yes. The run takes 1 to 3 minutes.
+the tool with its own installer, which checks the release signature. It runs with
+`--unattended`: it answers the disclaimer and gets no more input, every check meant
+for a person is skipped, and the speaker tone, brightness steps, camera window,
+full-screen video test card and disruptive sections (lid, Wi-Fi reload) don't
+happen. The run takes 1 to 3 minutes.
+
+- **What it still touches:** it reads the built-in microphone for 3 seconds and 30
+  camera frames, measured and discarded, on every Mac including a Volunteer's,
+  and, where passwordless sudo works, sets the battery charge limit and puts it
+  back. A tool older than 0.1.15 (a failed upgrade) has no `--unattended`: the job
+  logs that and runs without it, so the tone, brightness steps and camera window
+  happen on that run.
 
 - **Known-good runs** (`lab baseline`, `lab run <mac>` with no kernel) become the
   Mac's reference report.
@@ -604,6 +612,12 @@ answered yes. The run takes 1 to 3 minutes.
   test kernel than on the known-good one (none then, or 3 against 1) regress as
   `hardware.drivers:<compatible>`, and fewer count as fixed. A reference
   recorded before the lab counted nodes compares compatibles only.
+- **Skipped checks:** a skip on either side compares as nothing. Against a reference
+  from an attended run, an unattended run names what it skipped that the reference
+  passed (`video.*-on-screen`) in "compared with", until a known-good unattended
+  run replaces the reference. An Installed run is stricter: a frozen pass that is
+  now a skip is a regression, so preinstall references frozen from an attended run
+  have to be taken again.
 - **Publishing:** `lab run <mac> --publish`, `lab publish <job>`, or the job page's
   Publish button uploads the signed report to omarchy-m-testing.org. Only
   known-good runs qualify, because the site names a report's build from the

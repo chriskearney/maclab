@@ -510,7 +510,8 @@ type TestSpec struct {
 	TimeoutSec int    `json:"timeout_sec,omitempty"`
 	GUI        bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
 	// SkipOnScreen leaves out the checks that need the screen visible: a
-	// Volunteer's Mac is locked while a test runs.
+	// Volunteer's Mac is locked while a test runs. An unattended omarchy-m-test
+	// skips them on every Mac; this covers a run on a tool too old for that.
 	SkipOnScreen bool `json:"skip_on_screen,omitempty"`
 	// Identity makes the test the lab's own identity check of an Installed
 	// run: lab-agent runs its own read-only collector, not a script.
