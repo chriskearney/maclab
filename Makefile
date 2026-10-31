@@ -13,6 +13,7 @@ all:
 test:
 	$(GO) vet ./...
 	$(GO) test -race ./...
+	python3 -B -m unittest discover -s builder -p 'test_*.py'
 
 .PHONY: all test
 
