@@ -575,6 +575,20 @@ depth-1 git store, one reused worktree, at most two build dirs, and an 8 GB ccac
 dir is emptied after every build. labd's artifact store is garbage-collected to a budget
 (`--artifact-budget-gb`, default 20).
 
+Future `kbuild-2` builds also publish `module-build.tar.zst` as a named output.
+`lab build-get <build-id> -o ./build` fetches it through the existing artifact store.
+It contains the kernel's external-module header installation, `Module.symvers`,
+`vmlinux`, the generated config, and the original input config. `IDENTITY.json`
+records the actual source commit, compiled compiler/linker string, release, and
+file hashes, including generated headers. This archive targets external C modules
+on the builder architecture; it does not bundle a toolchain.
+The builder refuses missing completed-kernel inputs or changed source files.
+The kernel source must provide `scripts/package/install-extmod-build`; a missing
+installer fails the build rather than publishing incomplete headers.
+Deploy the matching builder image and controller together; older builder outputs
+cannot satisfy the new recipe. Existing builds retain their original identity.
+No new archive proves compatibility with an older build, or proves a module loads.
+
 Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first build 9 minutes;
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
 live on `/api/stream` (`build`, `buildlog`) and `/api/builds/{id}/log?follow=1`.

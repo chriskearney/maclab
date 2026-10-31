@@ -317,20 +317,11 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 	rel, _ := os.ReadFile(filepath.Join(dir, "release"))
 	result.Release = strings.TrimSpace(string(rel))
 	push("@@stage upload")
-	if pkg {
-		b.uploadPackages(ctx, dir, &result, push)
-		return
-	}
-	sha, err := b.upload(ctx, filepath.Join(dir, "kernel.tar.zst"))
-	if err != nil {
-		result.Error = err.Error()
-		return
-	}
-	result.Artifact = sha
+	b.uploadPackages(ctx, dir, &result, push)
 }
 
-// uploadPackages uploads everything pkgbuild left in out/. The package that
-// holds a vmlinuz becomes the build's artifact, so `lab run` can boot it.
+// uploadPackages uploads packaged outputs from out/. The file named in kernel
+// becomes the boot artifact; the other files remain named build outputs.
 func (b *builder) uploadPackages(ctx context.Context, dir string, result *api.BuildResult, push func(string)) {
 	kernel, _ := os.ReadFile(filepath.Join(dir, "kernel"))
 	ents, err := os.ReadDir(filepath.Join(dir, "out"))
@@ -360,7 +351,7 @@ func (b *builder) uploadPackages(ctx context.Context, dir string, result *api.Bu
 		}
 	}
 	if len(result.Files) == 0 {
-		result.Error = "makepkg made no packages"
+		result.Error = "build made no outputs"
 	}
 }
 

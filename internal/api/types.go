@@ -917,7 +917,7 @@ const (
 // tarball it was built from, exactly as uploaded.
 const RecipeFile = "recipe.tar"
 
-// BuildFile is one output of a package build.
+// BuildFile is one named output of a kernel or package build.
 type BuildFile struct {
 	Name   string `json:"name"`
 	SHA256 string `json:"sha256"`
@@ -935,7 +935,7 @@ type Build struct {
 	Recipe     string      `json:"recipe,omitempty"`      // package builds: artifact sha256 of the recipe tarball
 	RecipeDir  string      `json:"recipe_dir,omitempty"`  // where the recipe came from, for people
 	Pkgrel     string      `json:"pkgrel,omitempty"`      // pkgrel set on the recipe, if any
-	Files      []BuildFile `json:"files,omitempty"`       // package builds: the packages and the PKGBUILD as built
+	Files      []BuildFile `json:"files,omitempty"`       // named build outputs
 	State      BuildState  `json:"state"`
 	Stage      string      `json:"stage,omitempty"`    // fetch, checkout, configure, build, package, upload
 	Progress   float64     `json:"progress,omitempty"` // 0..1 when known

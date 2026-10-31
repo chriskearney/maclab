@@ -12,4 +12,5 @@ RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile mini
       --default-toolchain 1.93.1 --component rust-src --component rustfmt \
   && rustc --version && bindgen --version
 COPY kbuild /usr/local/bin/kbuild
+COPY module-build.py /usr/local/bin/module-build.py
 ENTRYPOINT ["/usr/local/bin/kbuild"]

@@ -1265,10 +1265,10 @@ func followBuild(ctx context.Context, c *client.Client, b *api.Build, noWait boo
 	return nil
 }
 
-// getBuildFiles downloads a package build's files and checks each sha256.
+// getBuildFiles downloads named build outputs and checks each sha256.
 func getBuildFiles(ctx context.Context, c *client.Client, b *api.Build, dir string) error {
 	if len(b.Files) == 0 {
-		return fmt.Errorf("build %s has no files to download (only package builds do; %s is %s)", b.ID, b.ID, orDash(b.Kind, "a kernel build"))
+		return fmt.Errorf("build %s has no named files to download", b.ID)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err

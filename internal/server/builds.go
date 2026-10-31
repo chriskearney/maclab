@@ -30,7 +30,7 @@ import (
 // recipe changes whenever kbuild changes what it produces, so old artifacts
 // stop matching; pkgRecipe does the same for the package builder.
 const (
-	recipe    = "kbuild-1"
+	recipe    = "kbuild-2"
 	pkgRecipe = "pkgbuild-1"
 )
 
@@ -453,6 +453,21 @@ func (s *Server) hBuilderDone(w http.ResponseWriter, r *http.Request) {
 	case d.Error != "":
 		b.State, b.Error = api.BuildFailed, d.Error
 	default:
+		if b.Kind != api.BuildPackage && b.Key == buildKey(b.Source, b.ConfigSHA) {
+			var kernel, inputs string
+			for _, f := range d.Files {
+				switch f.Name {
+				case "kernel.tar.zst":
+					kernel = f.SHA256
+				case "module-build.tar.zst":
+					inputs = f.SHA256
+				}
+			}
+			if kernel == "" || kernel != d.Artifact || inputs == "" {
+				b.State, b.Error = api.BuildFailed, "kernel build missing boot-bound external-module inputs"
+				break
+			}
+		}
 		var size int64
 		missing := false
 		for _, f := range d.Files {
@@ -496,7 +511,7 @@ func (s *Server) hCreateBuild(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, b)
 }
 
-// hBuildFile serves one output of a package build under its file name.
+// hBuildFile serves one named build output.
 func (s *Server) hBuildFile(w http.ResponseWriter, r *http.Request) {
 	b, err := s.getBuild(r.PathValue("id"))
 	if err != nil {
