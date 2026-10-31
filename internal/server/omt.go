@@ -159,7 +159,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		// never becomes a reference
 		res.KnownGood = false
 		r.ir.omt(tr, res, data)
-		tr.Error += omtFrozenSkipNote(rep.Unattended, res.Regressions)
+		tr.Error += omtFrozenSkipNote(r.ir.c.omtUnattended, rep.Unattended, res.Regressions)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
 		r.ev("omarchy-m-test %s: %d pass, %d fail, %d skipped; %s vs %s", res.Tool, res.Pass, res.Fail, res.Skip, r.ir.res.OMT, res.ComparedTo)
 		return
@@ -326,18 +326,29 @@ func omtNotRun(unattended bool, before, after map[string]string) []string {
 	return ids
 }
 
-// omtFrozenSkipNote says what to do when an unattended Installed run regressed
-// by skipping: a frozen pass that is now a skip stays a regression (CompareOMT),
-// whether the mode skipped it or a locked or covered screen did.
-func omtFrozenSkipNote(unattended bool, regressed []api.OMTCheck) string {
-	if unattended {
-		for _, c := range regressed {
-			if c.Outcome == "pass -> skip" {
-				return "; this unattended run skipped what the pre-install report passed: if the screen was locked or covered run it again, otherwise take the preinstall references again"
-			}
+// omtFrozenSkipNote names what an unattended Installed run regressed by
+// skipping, and what to do: a frozen pass that is now a skip stays a regression
+// (CompareOMT). Only a report frozen from an attended run can have run more than
+// this mode does, so only then is taking the references again any use.
+func omtFrozenSkipNote(frozenUnattended, unattended bool, regressed []api.OMTCheck) string {
+	if !unattended {
+		return ""
+	}
+	var ids []string
+	for _, c := range regressed {
+		if c.Outcome == "pass -> skip" {
+			ids = append(ids, c.ID)
 		}
 	}
-	return ""
+	switch {
+	case len(ids) == 0:
+		return ""
+	case frozenUnattended:
+		return "; this unattended run skipped what the unattended pre-install report passed: " + strings.Join(ids, ", ") +
+			": see their evidence, and if the screen was locked or covered run it again"
+	}
+	return "; this unattended run skipped what the attended pre-install report passed: " + strings.Join(ids, ", ") +
+		": if the screen was locked or covered run it again, otherwise take the preinstall references again"
 }
 
 // unclaimedNodes counts a report's unclaimed device-tree nodes per

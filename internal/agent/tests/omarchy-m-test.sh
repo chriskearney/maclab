@@ -31,7 +31,7 @@ args=(--dry-run)
 # the brightness steps and the camera window happen as they did before.
 case "$(omarchy-m-test --help 2>/dev/null)" in
     *--unattended*) args+=(--unattended) ;;
-    *) echo "omarchy-m-test $running has no --unattended: running without it (tone, brightness steps, camera window)" ;;
+    *) echo "omarchy-m-test $running: --help doesn't name --unattended, running without it (tone, brightness steps, camera window)" ;;
 esac
 
 # A Volunteer's Mac is locked while this runs (MACLAB_SKIP_ON_SCREEN=1), so the

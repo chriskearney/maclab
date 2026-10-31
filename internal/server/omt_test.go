@@ -1,8 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -157,17 +160,74 @@ func TestOMTNotRun(t *testing.T) {
 	}
 }
 
-// An Installed run stays strict about a frozen pass that is now a skip, and says
-// when that's the run's mode rather than the Release.
+// An Installed run stays strict about a frozen pass that is now a skip. The note
+// names those checks, and says to take the references again only when the frozen
+// report was attended.
 func TestOMTFrozenSkipNote(t *testing.T) {
-	skipped := []api.OMTCheck{{ID: "wifi.connected", Outcome: "pass -> fail"}, {ID: "video.h264-on-screen", Outcome: "pass -> skip"}}
-	if got := omtFrozenSkipNote(true, skipped); !strings.Contains(got, "take the preinstall references again") {
-		t.Errorf("unattended: %q", got)
+	const again = "take the preinstall references again"
+	skipped := []api.OMTCheck{{ID: "wifi.connected", Outcome: "pass -> skip"}, {ID: "audio.sound-cards", Outcome: "pass -> fail"}, {ID: "gpu.driver", Outcome: "pass -> skip"}}
+	got := omtFrozenSkipNote(false, true, skipped)
+	if !strings.Contains(got, ": wifi.connected, gpu.driver:") || !strings.Contains(got, again) {
+		t.Errorf("attended frozen report: %q", got)
 	}
-	if got := omtFrozenSkipNote(false, skipped); got != "" {
-		t.Errorf("attended: %q", got)
+	got = omtFrozenSkipNote(true, true, skipped)
+	if !strings.Contains(got, ": wifi.connected, gpu.driver:") || strings.Contains(got, again) {
+		t.Errorf("unattended frozen report: %q", got)
 	}
-	if got := omtFrozenSkipNote(true, skipped[:1]); got != "" {
+	if got := omtFrozenSkipNote(false, false, skipped); got != "" {
+		t.Errorf("attended run: %q", got)
+	}
+	if got := omtFrozenSkipNote(false, true, skipped[1:2]); got != "" {
 		t.Errorf("a real failure: %q", got)
+	}
+}
+
+// An unattended Installed run that skips a check the frozen report passed fails
+// as a regression, and its error says what to do, by what the frozen report was.
+func TestInstalledJobUnattendedSkip(t *testing.T) {
+	const again = "take the preinstall references again"
+	for _, c := range []struct {
+		name             string
+		frozenUnattended bool
+	}{{"attended frozen report", false}, {"unattended frozen report", true}} {
+		t.Run(c.name, func(t *testing.T) {
+			l, msha, _ := installedLab(t, nil)
+			if c.frozenUnattended {
+				dir := l.s.frozenDir("9.9")
+				p := filepath.Join(dir, "preinstall", "sim-mac", "omt-report.json")
+				rep, _ := os.ReadFile(p)
+				changed := bytes.Replace(rep, []byte(`{"schema_version"`), []byte(`{"unattended":true,"schema_version"`), 1)
+				if bytes.Equal(rep, changed) {
+					t.Fatalf("frozen report %s", rep)
+				}
+				pins := filepath.Join(dir, "PINS.preinstall")
+				os.Remove(p)
+				os.Remove(pins)
+				os.WriteFile(p, changed, 0o444)
+				os.WriteFile(pins, []byte(pinsFor(dir, "preinstall/sim-mac/omt-report.json", "preinstall/sim-mac/omt-status.json",
+					"preinstall/sim-mac/dmesg-errors.txt", "preinstall/sim-mac/baseline-job.json")), 0o444)
+			}
+			l.sim.OMTReport = func(kernel string) []byte {
+				return []byte(fmt.Sprintf(`{"tool":{"version":"0.1.15"},"machine":{"kernel":%q},"unattended":true,"checks":[
+{"id":"boot.kernel-package","status":"pass"},{"id":"hardware.drivers","status":"pass"},{"id":"wifi.connected","status":"skip"},{"id":"system.snapshots","status":"fail"}]}`, kernel))
+			}
+			j := l.run(api.JobSpec{InstalledManifest: msha, Holder: "tester"})
+			l.expect(j, api.OutcomeTestsFailed)
+			if ir := j.Result.Installed; ir == nil || ir.OMT != "REGRESSION" {
+				t.Fatalf("installed result %+v", ir)
+			}
+			var msg string
+			for _, tr := range j.Result.Tests {
+				if tr.Name == omtTest {
+					msg = tr.Error
+				}
+			}
+			if !strings.Contains(msg, "wifi.connected (pass -> skip)") || !strings.Contains(msg, "report passed: wifi.connected:") {
+				t.Fatalf("test error %q", msg)
+			}
+			if strings.Contains(msg, again) == c.frozenUnattended {
+				t.Fatalf("test error %q", msg)
+			}
+		})
 	}
 }

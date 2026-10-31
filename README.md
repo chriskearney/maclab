@@ -592,9 +592,8 @@ disruptive sections (lid, Wi-Fi reload) don't happen. The run takes 1 to 3 minut
 
 - **On-screen video checks:** on 0.1.15, Lab-owned Macs skip `video.h264-on-screen`
   and `video.hevc-on-screen` in an unattended run. Once
-  maralcbr/omarchy-m-testing#61 ships they run again on an unlocked session, and
-  skip under a lock or a full-screen overlay. A Volunteer's Mac leaves them out
-  either way (`--skip video`).
+  maralcbr/omarchy-m-testing#61 ships they run again, and skip under a lock or a
+  full-screen overlay. A Volunteer's Mac leaves them out either way (`--skip video`).
 - **What else it uses:** the built-in microphone for 3 seconds and 30 camera frames,
   measured and not kept. Where passwordless sudo works, it sets the battery charge
   limit and puts it back.
