@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/mesa"
 	"github.com/iconidentify/maclab/internal/window"
 )
 
@@ -342,5 +343,138 @@ func TestScopeActions(t *testing.T) {
 	}
 	if err := s.mayDo(maintainer, s.devs["held"], actScript("test t is a --script")); err == nil || !strings.Contains(err.Error(), "test t is a --script") {
 		t.Errorf("a script refusal names the script: %v", err)
+	}
+}
+
+// A Mac fetches only the artifacts labd sent it for its active job, and only
+// until that job ends: a kernel to stage, test scripts, Mesa packages and a
+// Release's packages.
+func TestArtifactGrants(t *testing.T) {
+	s := &Server{devs: map[string]*dev{}}
+	sha := func(c byte) string { return strings.Repeat(string(c), 64) }
+	m := &dev{s: s, d: api.Device{Name: "m", ActiveJob: "j1"}}
+	other := &dev{s: s, d: api.Device{Name: "other", ActiveJob: "j2"}}
+	s.devs["m"], s.devs["other"] = m, other
+	cmd := func(kind, job string, args any) api.Command {
+		b, _ := json.Marshal(args)
+		return api.Command{Kind: kind, JobID: job, Args: b}
+	}
+	m.mu.Lock()
+	for _, c := range []api.Command{
+		cmd(api.CmdStage, "j1", api.StageArgs{Artifact: sha('a')}),
+		cmd(api.CmdRunTest, "j1", api.TestSpec{Name: "t", Script: sha('b')}),
+		cmd(api.CmdBootOnce, "j1", api.BootOnceArgs{Tests: []api.TestSpec{{Name: "u", Script: sha('c')}}}),
+		cmd(api.CmdInstall, "j1", api.InstallArgs{Packages: []api.InstallPackage{{Name: "linux", SHA256: sha('d')}}}),
+		cmd(api.CmdMesaStage, "j1", api.MesaStageArgs{Spec: api.MesaSpec{Packages: []api.MesaPackage{{Name: "mesa", SHA256: sha('e')}}}}),
+		cmd(api.CmdExec, "", api.ExecArgs{Command: strings.Repeat("f", 64)}),
+	} {
+		m.grantLocked(c)
+	}
+	m.mu.Unlock()
+
+	self := caller{mac: "m"}
+	for _, c := range []byte("abcde") {
+		if err := s.mayDo(self, m, actFetch(sha(c))); err != nil {
+			t.Errorf("the job's own artifact %c: %v", c, err)
+		}
+	}
+	// Staging Mesa also fetches the lab's GL and Vulkan probes.
+	for _, p := range []string{mesa.GLProbeSHA, mesa.VKProbeSHA} {
+		if err := s.mayDo(self, m, actFetch(p)); err != nil {
+			t.Errorf("a Mesa job's probe %s: %v", short(p), err)
+		}
+	}
+	for _, c := range []struct {
+		name string
+		who  caller
+		on   *dev
+		sha  string
+	}{
+		{"an artifact labd never sent it", self, m, sha('9')},
+		{"a word in a command that isn't an artifact", self, m, sha('f')},
+		{"another Mac fetching this Mac's kernel", caller{mac: "other"}, m, sha('a')},
+		{"another Mac, through its own grants", caller{mac: "other"}, other, sha('a')},
+		{"a Maintainer through the Mac's route", caller{maintainer: "ada"}, m, sha('a')},
+	} {
+		if err := s.mayDo(c.who, c.on, actFetch(c.sha)); err == nil {
+			t.Errorf("%s: allowed", c.name)
+		}
+	}
+
+	// The job ends: its grants go with it, and the next job's are its own.
+	m.mu.Lock()
+	m.d.ActiveJob = "j3"
+	m.grantLocked(cmd(api.CmdStage, "j3", api.StageArgs{Artifact: sha('1')}))
+	m.mu.Unlock()
+	if err := s.mayDo(self, m, actFetch(sha('a'))); err == nil {
+		t.Error("the ended job's kernel is still fetchable")
+	}
+	if err := s.mayDo(self, m, actFetch(sha('1'))); err != nil {
+		t.Errorf("the next job's kernel: %v", err)
+	}
+}
+
+// Through labd's routes: a Mac's device secret fetches nothing it wasn't
+// sent, and a Maintainer can name a Volunteer's tailnet login on their Mac's
+// enrollment token, so that Volunteer sees it.
+func TestMaintainerNamedLoginAndUngrantedArtifacts(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	whois := func(_ context.Context, ip string) (*TailnetPeer, error) {
+		return &TailnetPeer{Login: "visitor@github", Node: "laptop"}, nil
+	}
+	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", Tailscale: true, WhoIs: whois},
+		log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := s.Handler()
+	do := func(method, path, remote, token, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		r := httptest.NewRequest(method, labdAt+path, strings.NewReader(body))
+		r.RemoteAddr = remote
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w
+	}
+	const (
+		lan    = "10.1.1.42:1"
+		person = "100.64.0.2:40000"
+	)
+	if w := do("POST", "/api/enroll-tokens", lan, "adm_secret", `{"name":"nameless","volunteer_login":"visitor@github"}`); w.Code != 400 {
+		t.Errorf("a login on a Lab-owned Mac's token: %d %s", w.Code, w.Body)
+	}
+	// The person already has as many Macs as they may volunteer themselves:
+	// a Maintainer is outside that limit.
+	for i := range maxVolunteerMacs {
+		var own api.EnrollTokenResponse
+		json.Unmarshal(do("POST", "/api/volunteer", person, "", fmt.Sprintf(`{"name":"own-%d"}`, i)).Body.Bytes(), &own)
+		if w := do("POST", "/api/agent/enroll", lan, "", `{"token":"`+own.Token+`"}`); w.Code != 200 {
+			t.Fatalf("the person's own Mac %d: %d %s", i, w.Code, w.Body)
+		}
+	}
+	var tok api.EnrollTokenResponse
+	w := do("POST", "/api/enroll-tokens", lan, "adm_secret", `{"name":"linked","volunteer_name":"Visitor","contact":"visitor@example.com","volunteer_login":"Visitor@GitHub"}`)
+	if json.Unmarshal(w.Body.Bytes(), &tok); w.Code != 200 {
+		t.Fatalf("a Volunteer's token with their login: %d %s", w.Code, w.Body)
+	}
+	var enrolled api.EnrollResponse
+	w = do("POST", "/api/agent/enroll", lan, "", `{"token":"`+tok.Token+`"}`)
+	if json.Unmarshal(w.Body.Bytes(), &enrolled); w.Code != 200 {
+		t.Fatalf("enroll: %d %s", w.Code, w.Body)
+	}
+	var ds []api.Device
+	json.Unmarshal(do("GET", "/api/devices", person, "", "").Body.Bytes(), &ds)
+	if i := slices.IndexFunc(ds, func(d api.Device) bool { return d.Name == "linked" }); len(ds) != maxVolunteerMacs+1 || i < 0 || ds[i].VolunteeredBy != "visitor@github" {
+		t.Errorf("the named Volunteer sees %+v, want their own Macs and the linked one", ds)
+	}
+
+	var art struct{ SHA256 string }
+	json.Unmarshal(do("POST", "/api/artifacts", lan, "adm_secret", "a kernel").Body.Bytes(), &art)
+	if w := do("GET", "/api/agent/artifacts/"+art.SHA256, lan, enrolled.Secret, ""); w.Code != 404 {
+		t.Errorf("a Mac fetching an artifact it wasn't sent: %d", w.Code)
 	}
 }

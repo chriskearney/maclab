@@ -40,8 +40,9 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 	if err := addColumn(db, "tokens", "requester", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
-	// A labd from before Volunteer enrollment has tokens without these.
-	for _, col := range []string{"volunteer_name", "contact"} {
+	// A labd from before Volunteer enrollment, or before a Maintainer could
+	// name a Volunteer's login, has tokens without these.
+	for _, col := range []string{"volunteer_name", "contact", "volunteer_login"} {
 		if err := addColumn(db, "tokens", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return nil, err
 		}
@@ -98,10 +99,12 @@ func (s *store) devices() ([]deviceRow, error) {
 	return out, rows.Err()
 }
 
-const insertToken = `INSERT INTO tokens(token_hash,name,label,model,volunteer,requester,volunteer_name,contact,expires) VALUES(?,?,?,?,?,?,?,?,?)`
+const insertToken = `INSERT INTO tokens(token_hash,name,label,model,volunteer,requester,volunteer_name,contact,volunteer_login,expires) VALUES(?,?,?,?,?,?,?,?,?,?)`
 
+// addToken stores a Maintainer's token. A Volunteer's login on it is kept
+// apart from requester, which only ./volunteer's own tokens have.
 func (s *store) addToken(hash string, req api.EnrollTokenRequest, exp time.Time) error {
-	_, err := s.db.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, "", req.VolunteerName, req.Contact, exp.Unix())
+	_, err := s.db.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, "", req.VolunteerName, req.Contact, req.VolunteerLogin, exp.Unix())
 	return err
 }
 
@@ -112,7 +115,8 @@ var errVolunteerTokens = errors.New("too many volunteers hold unused enrollment 
 
 // addVolunteerToken stores a token for who, the tailnet viewer who asked for
 // it, in place of any unused one they still hold: nobody holds two, and
-// asking again after a setup that stopped half way just works. It refuses
+// asking again after a setup that stopped half way just works. A token a
+// Maintainer made for them has no requester, so it is never replaced. It refuses
 // with errVolunteerTokens while max others hold unused ones.
 func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who string, exp, now time.Time, max int) error {
 	tx, err := s.db.Begin()
@@ -130,24 +134,28 @@ func (s *store) addVolunteerToken(hash string, req api.EnrollTokenRequest, who s
 	if n >= max {
 		return errVolunteerTokens
 	}
-	if _, err := tx.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, who, req.VolunteerName, req.Contact, exp.Unix()); err != nil {
+	if _, err := tx.Exec(insertToken, hash, req.Name, req.Label, req.Model, req.Volunteer, who, req.VolunteerName, req.Contact, "", exp.Unix()); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
 // token looks up an enrollment token that has not expired. VolunteeredBy is
-// the login that asked for a volunteer token.
+// the login that asked for a volunteer token, or the one a Maintainer named.
 func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, error) {
 	var r api.EnrollTokenRequest
 	var exp int64
-	err := s.db.QueryRow(`SELECT name,label,model,volunteer,requester,volunteer_name,contact,expires FROM tokens WHERE token_hash=?`, hash).
-		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &r.VolunteerName, &r.Contact, &exp)
+	var login string
+	err := s.db.QueryRow(`SELECT name,label,model,volunteer,requester,volunteer_login,volunteer_name,contact,expires FROM tokens WHERE token_hash=?`, hash).
+		Scan(&r.Name, &r.Label, &r.Model, &r.Volunteer, &r.VolunteeredBy, &login, &r.VolunteerName, &r.Contact, &exp)
 	if err != nil {
 		return nil, err
 	}
 	if now.Unix() > exp {
 		return nil, sql.ErrNoRows
+	}
+	if r.SelfServe = r.VolunteeredBy != ""; !r.SelfServe {
+		r.VolunteeredBy = login
 	}
 	return &r, nil
 }

@@ -834,13 +834,21 @@ type EnrollTokenRequest struct {
 	// Volunteer makes the Mac a volunteer's (see Device.Volunteer). labd sets
 	// it on every POST /api/volunteer token, whatever the request says.
 	Volunteer bool `json:"volunteer,omitempty"`
-	// VolunteeredBy is the login that asked for a volunteer token, set by
-	// labd only (see Device.VolunteeredBy).
+	// VolunteeredBy is the login that asked for a volunteer token, or the
+	// one a Maintainer named (VolunteerLogin), set by labd only (see
+	// Device.VolunteeredBy). SelfServe is true when that person asked for
+	// the token themselves (./volunteer), and their Mac counts toward the
+	// limit on how many one person may volunteer.
 	VolunteeredBy string `json:"-"`
+	SelfServe     bool   `json:"-"`
 	// VolunteerName and Contact make the token a Volunteer's: both or
 	// neither. Either makes Volunteer true too.
 	VolunteerName string `json:"volunteer_name,omitempty"`
 	Contact       string `json:"contact,omitempty"`
+	// VolunteerLogin is the Volunteer's tailnet login, which a Maintainer
+	// may name on a Volunteer's token: it becomes the Mac's VolunteeredBy, so
+	// that Volunteer sees their Mac in labd.
+	VolunteerLogin string `json:"volunteer_login,omitempty"`
 }
 
 type EnrollTokenResponse struct {

@@ -2,21 +2,24 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
 
 // Scope is what a request's caller may see and do. A Maintainer sees the
-// whole fleet. A person on the tailnet without a Maintainer's token sees
-// only the Macs they volunteered, while those stay enrolled. A Mac sees only
-// itself, through its own routes (see agent). A Volunteer's Mac must never
-// reach another Mac, a Volunteer's or Lab-owned, and this is where that
-// holds. What a caller may do to a Mac (mayDo) keeps a Volunteer's Mac's
-// Access level, Availability window and held rules in one place too.
+// whole fleet. A person on the tailnet without a Maintainer's token sees only
+// the Macs they volunteered, while those stay enrolled. A Mac sees only
+// itself, through its own routes (see agent), and the artifacts its active
+// job was sent (see grantLocked). A Volunteer's Mac must never reach another
+// Mac, a Volunteer's or Lab-owned, and this is where that holds. What a
+// caller may do to a Mac (mayDo) keeps a Volunteer's Mac's Access level,
+// Availability window and held rules in one place too.
 //
 // Every route says who may reach it (reach), and labd registers no route
 // that doesn't, so a new route can't forget to ask.
@@ -180,8 +183,9 @@ func callerFor(maintainer string) caller {
 
 // action is something a caller asks to do on a Mac.
 type action struct {
-	kind actionKind
-	what string // named in a refusal
+	kind     actionKind
+	what     string // named in a refusal
+	artifact string // fetching: the artifact's sha256
 }
 
 type actionKind int
@@ -191,25 +195,34 @@ const (
 	kindWatch                        // its screen or live journal
 	kindLease                        // holding it for a Maintainer
 	kindUpload                       // a file added to one of its jobs
+	kindFetch                        // an artifact from labd's store, for its job
 )
 
 var (
-	actExec     = action{kindFull, "lab exec"}
-	actMesa     = action{kindFull, "staged Mesa packages"}
-	actRecovery = action{kindFull, "recovery-policy overrides"}
-	actWatch    = action{kindWatch, "its screen or live journal"}
-	actLease    = action{kindLease, "a lease"}
-	actUpload   = action{kindUpload, "files added to its jobs"}
+	actExec     = action{kind: kindFull, what: "lab exec"}
+	actMesa     = action{kind: kindFull, what: "staged Mesa packages"}
+	actRecovery = action{kind: kindFull, what: "recovery-policy overrides"}
+	actWatch    = action{kind: kindWatch, what: "its screen or live journal"}
+	actLease    = action{kind: kindLease, what: "a lease"}
+	actUpload   = action{kind: kindUpload, what: "files added to its jobs"}
 )
+
+// actFetch is a Mac fetching the artifact sha from labd's store.
+func actFetch(sha string) action {
+	return action{kind: kindFetch, what: "artifact " + short(sha), artifact: sha}
+}
 
 // actScript is running a Maintainer's script on a Mac; why says which (see
 // needsFull).
-func actScript(why string) action { return action{kindFull, "Maintainer's script (" + why + ")"} }
+func actScript(why string) action {
+	return action{kind: kindFull, what: "Maintainer's script (" + why + ")"}
+}
 
 // mayDo is why c may not do a on v, or nil when it may. A Mac c doesn't see
 // is errNotSeen. A person may only watch their own Mac; a Mac may only add
-// files to its own jobs; Maintainers and labd do the rest, as far as a
-// Volunteer's Mac's Access level and Availability window allow.
+// files to its own jobs and fetch the artifacts of its active job (see
+// grantLocked); Maintainers and labd do the rest, as far as a Volunteer's
+// Mac's Access level and Availability window allow.
 func (s *Server) mayDo(c caller, v *dev, a action) error {
 	if v == nil {
 		return errNotSeen
@@ -228,7 +241,11 @@ func (s *Server) mayDoLocked(c caller, v *dev, a action) error {
 	switch {
 	case c.maintainer != "" || c.labd:
 	case c.mac != "":
-		if a.kind == kindUpload && c.mac == d.Name {
+		switch {
+		case c.mac != d.Name:
+		case a.kind == kindUpload:
+			return nil
+		case a.kind == kindFetch && d.ActiveJob != "" && v.grants[a.artifact] == d.ActiveJob:
 			return nil
 		}
 		return fmt.Errorf("a Mac may not ask for %s on %s", a.what, d.Name)
@@ -255,6 +272,8 @@ func (s *Server) mayDoLocked(c caller, v *dev, a action) error {
 		}
 	case kindUpload:
 		return fmt.Errorf("only a Mac adds files to its own jobs")
+	case kindFetch:
+		return fmt.Errorf("only a Mac fetches the artifacts of its own job")
 	}
 	return nil
 }
@@ -267,4 +286,59 @@ func refuseBelowFull(d *api.Device, a action) error {
 		return nil
 	}
 	return fmt.Errorf("%s is a Volunteer's Mac at Access level Qualification, which allows no %s; only its Volunteer can raise it (sudo lab-agent access full)", d.Name, a.what)
+}
+
+// grantLocked lets the Mac fetch the artifacts command c names, for c's job
+// and until that job ends: the kernel it stages, test scripts, Mesa packages
+// and the lab's probes, and a Release's packages. A Mac fetches nothing else from labd's store.
+// Grants of earlier jobs go. Caller holds v.mu.
+func (v *dev) grantLocked(c api.Command) {
+	shas := artifactsIn(c)
+	if c.JobID == "" || len(shas) == 0 {
+		return
+	}
+	for sha, job := range v.grants {
+		if job != c.JobID {
+			delete(v.grants, sha)
+		}
+	}
+	if v.grants == nil {
+		v.grants = map[string]string{}
+	}
+	for _, sha := range shas {
+		v.grants[sha] = c.JobID
+	}
+}
+
+// artifactsIn names the artifacts in labd's store that command c has the
+// Mac fetch.
+func artifactsIn(c api.Command) []string {
+	var shas []string
+	switch c.Kind {
+	case api.CmdStage:
+		var a api.StageArgs
+		json.Unmarshal(c.Args, &a)
+		shas = append(shas, a.Artifact)
+	case api.CmdRunTest:
+		var t api.TestSpec
+		json.Unmarshal(c.Args, &t)
+		shas = append(shas, t.Script)
+	case api.CmdBootOnce:
+		var a api.BootOnceArgs
+		json.Unmarshal(c.Args, &a)
+		for _, t := range a.Tests {
+			shas = append(shas, t.Script)
+		}
+	case api.CmdInstall:
+		var a api.InstallArgs
+		json.Unmarshal(c.Args, &a)
+		for _, p := range a.Packages {
+			shas = append(shas, p.SHA256)
+		}
+	case api.CmdMesaStage:
+		var a api.MesaStageArgs
+		json.Unmarshal(c.Args, &a)
+		shas = append(shas, mesaRefs(api.JobSpec{Mesa: &a.Spec})...)
+	}
+	return slices.DeleteFunc(shas, func(sha string) bool { return !reSHA.MatchString(sha) })
 }

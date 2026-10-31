@@ -33,6 +33,7 @@ type dev struct {
 	inflight      map[string]time.Time
 	sent          map[string]api.Command
 	target        map[string]string // command ID -> the boot it was issued for
+	grants        map[string]string // artifact sha256 -> the job labd sent it for (see grantLocked)
 	results       map[string]api.CommandResult
 	changed       chan struct{}
 	events        []api.KernelEvent
@@ -423,6 +424,7 @@ func (v *dev) sendFor(c caller, kind, job string, args any) string {
 	b, _ := json.Marshal(args)
 	cmd := api.Command{ID: nextCmdID(), Kind: kind, JobID: job, Maintainer: maintainer, VolunteerLogin: c.login, Args: b}
 	v.mu.Lock()
+	v.grantLocked(cmd)
 	v.pending = append(v.pending, cmd)
 	v.target[cmd.ID] = v.d.BootID
 	v.bump()

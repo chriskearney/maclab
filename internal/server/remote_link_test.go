@@ -177,10 +177,23 @@ func (l *lab) agentGet(secret, sha, rng string) (*http.Response, []byte) {
 	return resp, body
 }
 
+// grantForTest lets the lab's Mac fetch sha, as labd does when a job holding
+// the Mac stages it (see grantLocked).
+func (l *lab) grantForTest(sha string) {
+	l.t.Helper()
+	args, _ := json.Marshal(api.StageArgs{Artifact: sha})
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	v.d.ActiveJob = "range-test"
+	v.grantLocked(api.Command{Kind: api.CmdStage, JobID: "range-test", Args: args})
+	v.mu.Unlock()
+}
+
 func TestArtifactIsServedWhole(t *testing.T) {
 	l := newLab(t, false)
 	content := strings.Repeat("0123456789", 100)
 	sha := l.artifact(content)
+	l.grantForTest(sha)
 	resp, body := l.agentGet(l.secret, sha, "")
 	if resp.StatusCode != 200 || string(body) != content {
 		t.Fatalf("whole artifact: %s, %d bytes", resp.Status, len(body))
@@ -194,6 +207,7 @@ func TestArtifactResumesFromTheOffsetAMacAsksFor(t *testing.T) {
 	l := newLab(t, false)
 	content := strings.Repeat("0123456789", 100)
 	sha := l.artifact(content)
+	l.grantForTest(sha)
 	resp, body := l.agentGet(l.secret, sha, "bytes=250-")
 	if resp.StatusCode != 206 || string(body) != content[250:] {
 		t.Fatalf("resume: %s, %d bytes", resp.Status, len(body))
@@ -207,6 +221,7 @@ func TestArtifactRangePastTheEndIsRefused(t *testing.T) {
 	l := newLab(t, false)
 	content := strings.Repeat("0123456789", 100)
 	sha := l.artifact(content)
+	l.grantForTest(sha)
 	for _, off := range []int{len(content), len(content) + 50} {
 		if resp, _ := l.agentGet(l.secret, sha, fmt.Sprintf("bytes=%d-", off)); resp.StatusCode != 416 {
 			t.Errorf("Range from %d of %d bytes: %s", off, len(content), resp.Status)

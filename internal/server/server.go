@@ -565,7 +565,7 @@ func (s *Server) routes() []route {
 		{"POST /api/builder/builds/{id}/progress", builder, s.hBuilderProgress},
 		{"POST /api/builder/builds/{id}/done", builder, s.hBuilderDone},
 		{"POST /api/builder/artifacts", builder, s.hBuilderArtifact},
-		{"GET /api/builder/artifacts/{sha}", builder, s.hAgentArtifact},
+		{"GET /api/builder/artifacts/{sha}", builder, s.hBuilderFetch},
 		{"POST /api/builds", maintainers, s.hCreateBuild},
 		{"POST /api/installed/{release}/manifest", maintainers, s.hFreezeManifest},
 		{"POST /api/installed/{release}/entry/{device}", maintainers, s.hFreezeEntry},
@@ -656,6 +656,10 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 	// and enrolling again with the new token replaces its secret.
 	if v := s.dev(req.Name); v != nil && v.checkedIn() {
 		httpErr(w, 409, "device %s already enrolled", req.Name)
+		return
+	}
+	if req.VolunteerLogin = strings.ToLower(strings.TrimSpace(req.VolunteerLogin)); req.VolunteerLogin != "" && strings.TrimSpace(req.VolunteerName) == "" {
+		httpErr(w, 400, "a Volunteer's login goes on a Volunteer's token, with their name and contact")
 		return
 	}
 	s.issueToken(w, req, "")
@@ -897,8 +901,10 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	}
 	// hVolunteer counted this person's Macs when it handed out the token, but
 	// a token asked for while another was being used here was counted one
-	// Mac short. Counting again with the insert, under s.mu, settles it.
-	if d.VolunteeredBy != "" {
+	// Mac short. Counting again with the insert, under s.mu, settles it. A
+	// token a Maintainer made for them is outside the limit, as hVolunteer is
+	// for Maintainers.
+	if t.SelfServe {
 		if names := s.volunteerMacsLocked(d.VolunteeredBy); len(names) >= maxVolunteerMacs {
 			s.mu.Unlock()
 			tooManyMacs(w, d.VolunteeredBy, names)
@@ -996,7 +1002,24 @@ func (s *Server) artifactPath(sha string) string {
 	return filepath.Join(s.cfg.DataDir, "artifacts", sha)
 }
 
+// hAgentArtifact serves a Mac an artifact labd sent it for its active job
+// (see grantLocked); any other answers 404, as if it weren't there.
 func (s *Server) hAgentArtifact(w http.ResponseWriter, r *http.Request) {
+	sha := r.PathValue("sha")
+	if !reSHA.MatchString(sha) {
+		httpErr(w, 400, "bad sha256")
+		return
+	}
+	if err := s.mayDo(callerOf(r), agentDev(r), actFetch(sha)); err != nil {
+		httpErr(w, 404, "no artifact %s for this Mac's job", short(sha))
+		return
+	}
+	s.hBuilderFetch(w, r)
+}
+
+// hBuilderFetch serves any artifact: to the builder, a kernel's .config to
+// build with; to a Mac, once hAgentArtifact let it.
+func (s *Server) hBuilderFetch(w http.ResponseWriter, r *http.Request) {
 	sha := r.PathValue("sha")
 	if !reSHA.MatchString(sha) {
 		httpErr(w, 400, "bad sha256")
