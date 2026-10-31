@@ -203,8 +203,10 @@ func TestMesaStoredJobReachesNothing(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
 	v := l.s.dev(l.name)
+	const leftover = "j0101-000000-dead"
 	v.mu.Lock()
-	v.d.Health.JobTag = "j0101-000000-dead" // a leftover lab entry: the normal path would restore first
+	v.d.Health.JobTag = leftover // a leftover lab entry: the normal path would restore first
+	injected, boot := time.Now(), v.d.BootID
 	v.mu.Unlock()
 	now := time.Now()
 	blocked := mesaSpec(l)
@@ -225,8 +227,16 @@ func TestMesaStoredJobReachesNothing(t *testing.T) {
 		}
 	}
 	snap := v.snapshot()
-	if snap.ActiveJob != "" || snap.State == api.StateBusy || snap.Health.JobTag != "j0101-000000-dead" {
-		t.Fatalf("the device was touched: active %q state %s tag %q", snap.ActiveJob, snap.State, snap.Health.JobTag)
+	if snap.ActiveJob != "" || snap.State == api.StateBusy || snap.BootID != boot {
+		t.Fatalf("the device was touched: active %q state %s boot %q (was %q)", snap.ActiveJob, snap.State, snap.BootID, boot)
+	}
+	// labd never writes the job tag itself; the Mac's next check-in replaces
+	// the injected one with its own, which on its known-good boot is empty.
+	v.mu.Lock()
+	heard := v.heard
+	v.mu.Unlock()
+	if tag := snap.Health.JobTag; tag != leftover && !(tag == "" && heard.After(injected)) {
+		t.Fatalf("the job tag became %q without a check-in", tag)
 	}
 }
 
