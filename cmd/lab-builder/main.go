@@ -26,8 +26,10 @@ import (
 	"syscall"
 	"time"
 
+	"errors"
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/labhttp"
+	"io/fs"
 )
 
 type builder struct {
@@ -263,11 +265,7 @@ func (b *builder) download(ctx context.Context, sha, dst string) error {
 	return err
 }
 
-func (b *builder) upload(ctx context.Context, build, path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
+func (b *builder) upload(ctx context.Context, build string, f *os.File) (string, error) {
 	defer f.Close()
 	req, _ := http.NewRequestWithContext(ctx, "POST", b.server+"/api/builder/artifacts?build="+url.QueryEscape(build), f)
 	req.Header.Set("Authorization", "Bearer "+b.token)
@@ -415,14 +413,29 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 		result.Error = "kbuild: " + err.Error()
 		return
 	}
-	rel, _ := os.ReadFile(filepath.Join(dir, "release"))
-	result.Release = strings.TrimSpace(string(rel))
-	push("@@stage upload")
-	if pkg {
-		b.uploadPackages(ctx, bd, dir, &result, push)
+	out, err := openOutputs(dir)
+	if err != nil {
+		result.Error = err.Error()
 		return
 	}
-	sha, err := b.upload(ctx, bd.ID, filepath.Join(dir, "kernel.tar.zst"))
+	defer out.Close()
+	rel, err := out.small("release")
+	if err != nil {
+		result.Error = err.Error()
+		return
+	}
+	result.Release = rel
+	push("@@stage upload")
+	if pkg {
+		b.uploadPackages(ctx, bd, out, &result, push)
+		return
+	}
+	f, _, err := out.regular("kernel.tar.zst")
+	if err != nil {
+		result.Error = err.Error()
+		return
+	}
+	sha, err := b.upload(ctx, bd.ID, f)
 	if err != nil {
 		result.Error = err.Error()
 		return
@@ -432,9 +445,13 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 
 // uploadPackages uploads everything pkgbuild left in out/. The package that
 // holds a vmlinuz becomes the build's artifact, so `lab run` can boot it.
-func (b *builder) uploadPackages(ctx context.Context, bd api.Build, dir string, result *api.BuildResult, push func(string)) {
-	kernel, _ := os.ReadFile(filepath.Join(dir, "kernel"))
-	ents, err := os.ReadDir(filepath.Join(dir, "out"))
+func (b *builder) uploadPackages(ctx context.Context, bd api.Build, out *outputs, result *api.BuildResult, push func(string)) {
+	kernel, err := out.small("kernel")
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		result.Error = err.Error()
+		return
+	}
+	ents, err := out.list("out")
 	if err != nil {
 		result.Error = "no outputs: " + err.Error()
 		return
@@ -443,26 +460,133 @@ func (b *builder) uploadPackages(ctx context.Context, bd api.Build, dir string, 
 		if e.IsDir() {
 			continue
 		}
-		p := filepath.Join(dir, "out", e.Name())
-		st, err := os.Stat(p)
+		f, st, err := out.regular("out/" + e.Name())
 		if err != nil {
 			result.Error = err.Error()
 			return
 		}
-		sha, err := b.upload(ctx, bd.ID, p)
+		sha, err := b.upload(ctx, bd.ID, f)
 		if err != nil {
 			result.Error = err.Error()
 			return
 		}
 		push(fmt.Sprintf("uploaded %s sha256 %s", e.Name(), sha))
 		result.Files = append(result.Files, api.BuildFile{Name: e.Name(), SHA256: sha, Size: st.Size()})
-		if e.Name() == strings.TrimSpace(string(kernel)) {
+		if e.Name() == kernel {
 			result.Artifact = sha
 		}
 	}
 	if len(result.Files) == 0 {
 		result.Error = "makepkg made no packages"
 	}
+}
+
+// outputs is a build's scratch dir as lab-builder reads what the build left
+// there. The build VM shares that dir, so any name in it may be a link the VM
+// made to a file of this host: every output is resolved inside the dir
+// (os.Root), never through a symlink, and only as a regular file.
+type outputs struct{ root *os.Root }
+
+func openOutputs(dir string) (*outputs, error) {
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	return &outputs{r}, nil
+}
+
+func (o *outputs) Close() error { return o.root.Close() }
+
+// regular opens name for reading if it is a regular file, reached through no
+// symlink at all.
+func (o *outputs) regular(name string) (*os.File, fs.FileInfo, error) {
+	if err := o.noLinks(name); err != nil {
+		return nil, nil, err
+	}
+	st, err := o.root.Lstat(name)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !st.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("build output %s is not a regular file (%s)", name, st.Mode().Type())
+	}
+	f, err := o.root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+	fst, err := f.Stat()
+	if err != nil || !fst.Mode().IsRegular() || !os.SameFile(st, fst) {
+		f.Close()
+		return nil, nil, fmt.Errorf("build output %s changed while it was opened", name)
+	}
+	if n, ok := links(fst); !ok || n != 1 {
+		f.Close()
+		return nil, nil, fmt.Errorf("build output %s has %d links; an output is one file of its own", name, n)
+	}
+	return f, fst, nil
+}
+
+// links is a file's hard-link count.
+func links(fi fs.FileInfo) (uint64, bool) {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(st.Nlink), true
+}
+
+// noLinks refuses a name any of whose directories is a symlink.
+func (o *outputs) noLinks(name string) error {
+	dir := filepath.Dir(filepath.Clean(name))
+	for dir != "." && dir != "/" {
+		st, err := o.root.Lstat(dir)
+		if err != nil {
+			return err
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("build output dir %s is not a directory (%s)", dir, st.Mode().Type())
+		}
+		dir = filepath.Dir(dir)
+	}
+	return nil
+}
+
+// small reads a short text output (release, kernel), trimmed.
+func (o *outputs) small(name string) (string, error) {
+	f, _, err := o.regular(name)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 4097))
+	if err != nil {
+		return "", err
+	}
+	if len(b) > 4096 {
+		return "", fmt.Errorf("build output %s is longer than 4096 bytes", name)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+// list lists a directory of outputs, which must itself be a directory and
+// not a link.
+func (o *outputs) list(name string) ([]fs.DirEntry, error) {
+	st, err := o.root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("build output %s is not a directory (%s)", name, st.Mode().Type())
+	}
+	if err := o.noLinks(name + "/x"); err != nil {
+		return nil, err
+	}
+	d, err := o.root.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer d.Close()
+	return d.ReadDir(-1)
 }
 
 func orStr(s, def string) string {

@@ -61,3 +61,65 @@ func TestContainerPrefix(t *testing.T) {
 		}
 	}
 }
+
+// A build VM shares the scratch dir and may leave links to files of this
+// host there: none is ever read or uploaded, wherever it points.
+func TestOutputsReadNoLinks(t *testing.T) {
+	host := t.TempDir()
+	secret := filepath.Join(host, "builder.token")
+	os.WriteFile(secret, []byte("bldr_host_secret"), 0o600)
+	os.Mkdir(filepath.Join(host, "dir"), 0o700)
+	os.WriteFile(filepath.Join(host, "dir", "x.pkg.tar.zst"), []byte("host file"), 0o600)
+
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "kernel.tar.zst"), []byte("kernel"), 0o644)
+	os.WriteFile(filepath.Join(dir, "inside"), []byte("in"), 0o644)
+	os.Mkdir(filepath.Join(dir, "out"), 0o755)
+	os.WriteFile(filepath.Join(dir, "out", "linux-x-1-1-aarch64.pkg.tar.zst"), []byte("pkg"), 0o644)
+	os.Symlink(secret, filepath.Join(dir, "release"))                             // to a host file
+	os.Symlink(secret, filepath.Join(dir, "out", "evil-1-1-aarch64.pkg.tar.zst")) // listed output, to a host file
+	os.Symlink("inside", filepath.Join(dir, "kernel"))                            // a link that stays inside
+	os.Symlink(filepath.Join(host, "dir"), filepath.Join(dir, "outlink"))         // an outputs dir that is a link
+	os.WriteFile(filepath.Join(dir, "big"), make([]byte, 5000), 0o644)
+
+	o, err := openOutputs(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer o.Close()
+	if f, st, err := o.regular("kernel.tar.zst"); err != nil || st.Size() != 6 {
+		t.Fatalf("regular file: %v", err)
+	} else {
+		f.Close()
+	}
+	if f, _, err := o.regular("out/linux-x-1-1-aarch64.pkg.tar.zst"); err != nil {
+		t.Fatalf("regular package: %v", err)
+	} else {
+		f.Close()
+	}
+	for _, name := range []string{"release", "out/evil-1-1-aarch64.pkg.tar.zst", "kernel", "outlink/x.pkg.tar.zst"} {
+		if f, _, err := o.regular(name); err == nil {
+			f.Close()
+			t.Errorf("%s: read through a link", name)
+		}
+		if s, err := o.small(name); err == nil || strings.Contains(s, "secret") {
+			t.Errorf("%s: small read %q %v", name, s, err)
+		}
+	}
+	if _, err := o.list("outlink"); err == nil {
+		t.Error("listed a linked outputs dir")
+	}
+	ents, err := o.list("out")
+	if err != nil || len(ents) != 2 {
+		t.Fatalf("list out: %v %v", ents, err)
+	}
+	if _, err := o.small("big"); err == nil {
+		t.Error("an oversized short output was read")
+	}
+	// A second name for the same file is refused too.
+	os.Link(filepath.Join(dir, "kernel.tar.zst"), filepath.Join(dir, "hardlink"))
+	if f, _, err := o.regular("hardlink"); err == nil {
+		f.Close()
+		t.Error("read a hard-linked output")
+	}
+}
