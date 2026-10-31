@@ -128,6 +128,8 @@ Apply in this order:
   - If setup is interrupted, re-running it on the same Mac works until its first check-in, and only while labd keeps running: the
     activation state is in labd's memory.
   - After a labd restart, `lab forget <name>` and send a new invite.
+  - The same remedy covers a known limit: if labd stops in the moment between using up the invite and saving the new Mac, the invite is
+    spent and no Mac is recorded. Send a new invite.
   - The Mac keeps its activation key in `/var/lib/maclab`, renamed into place. The rename is atomic, but the file isn't flushed to
     disk first, so a power cut right after setup may lose it; then the same remedy applies.
 - `lab enroll <name> --revoke` withdraws an unused invite.
@@ -165,8 +167,11 @@ Move only from a stopped, consistent state. Never run the old and new labd at th
 1. **Drain.** No running or queued jobs, and no leases: `lab status`.
 2. **Point the agents first.**
    - Each Mac needs the new lab-agent binary (it understands https, `--ca-file` and the plain-http policy).
-   - Re-point it with **`lab-agent move`**, which changes the labd URL and nothing else:
+   - Re-point it with **`lab-agent move`**, which changes the labd URL and nothing else. Run it **in a terminal on the Mac or over
+     SSH**, never through `lab exec`:
      `sudo lab-agent move --server https://maclab.chonkbase.net [--ca-file <pem>] [--allow-plain-http] [--no-check]`.
+   - Run from inside lab-agent's own service (that is what `lab exec` does), `move` refuses before it changes anything. Restarting
+     lab-agent there would cut off the answer.
    - Unless `--no-check` is given, `move` first asks the new labd, with the Mac's own device secret, whether it knows this Mac as
      the same kind of Mac (`GET /api/agent/enrollment`). Otherwise it stops with "Nothing was changed".
    - It then replaces only `server`, `server_ca` and `allow_plain_http` in agent.json:
@@ -176,13 +181,17 @@ Move only from a stopped, consistent state. Never run the old and new labd at th
      - it restarts only `lab-agent.service`.
 
      The Mac keeps its enrollment (ID and secret), its GUI settings and its recovery state.
-   - **Before the cutover**, the new labd isn't answering yet. Run it through `lab exec` from the old labd with `--no-check`. The URL
-     policy and the CA are still checked, and the agent keeps retrying until the new labd answers.
-   - **After the cutover** (over SSH, say), use the checked form, without `--no-check`.
+   - **Before the cutover** the new labd isn't answering yet, so use `--no-check`. The URL policy and the CA are still checked, and
+     the agent keeps retrying until the new labd answers.
+   - **After the cutover**, use the checked form, without `--no-check`.
+   - This needs a shell on every Mac: SSH from a Maintainer's machine, or someone at the Mac. Check that you have one before step 3.
    - Don't use `lab-agent setup` for this. `setup` with a different `--server` and no token refuses and points to `move`, because
      a setup run also redoes the bootloader, known-good, watchdog, journal and getty setup, which a move of labd must not touch.
    - The agents then keep retrying until the new labd answers.
    - Check each Mac's `/etc/maclab/agent.json` afterwards: same `device_id`, new `server`, and an `allow_plain_http` key.
+   - A Mac has moved only when it **checks in to the new labd** (`lab status` there, step 6). Before that, a staged move is just
+     agent.json on the Mac.
+   - If you are unsure whether `move` ran, read agent.json on the Mac. Don't simply run it again.
 3. **Stop labd on i9beef.** Run `systemctl --user disable --now labd`, then check that no labd process is left and port 7770 is closed.
 4. **Snapshot.**
    - Stopped, the database is closed. Run `sqlite3 ~/.local/share/maclab/labd.db 'PRAGMA wal_checkpoint(TRUNCATE)'` anyway.
@@ -199,9 +208,10 @@ Move only from a stopped, consistent state. Never run the old and new labd at th
 **Rollback**:
 1. Scale the Deployment to 0 and confirm the pod is gone.
 2. Restore data on i9beef: either copy `/data` back (to keep what happened since), or use the untouched archive from step 4.
-3. Re-point the agents to the old URL with `lab-agent move`, never `setup`. That URL is plain HTTP to a non-loopback address, so it
-   takes the explicit opt-in: `sudo lab-agent move --server http://<i9beef tailnet address>:7770 --allow-plain-http`. Add `--no-check`
-   if labd on i9beef isn't answering yet. Likewise run `lab login http://… "<token>" --allow-plain-http`.
+3. Re-point the agents to the old URL with `lab-agent move`, in a terminal on each Mac or over SSH, as in step 2 (never `setup`, and
+   never through `lab exec`). That URL is plain HTTP to a non-loopback address, so it takes the explicit opt-in:
+   `sudo lab-agent move --server http://<i9beef tailnet address>:7770 --allow-plain-http`. Add `--no-check` if labd on i9beef isn't
+   answering yet. A Mac is back when it checks in there. Likewise run `lab login http://… "<token>" --allow-plain-http`.
 4. Start labd on i9beef with `--allow-plain-http` on its tailnet `--listen`.
 
 Nothing falls back to plain HTTP by itself: every client or agent set up for https refuses it until told explicitly.
