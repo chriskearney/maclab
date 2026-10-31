@@ -496,83 +496,93 @@ func hashSecret(s string) string {
 
 func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	m.HandleFunc("POST /api/agent/enroll", s.hEnroll)
-	m.HandleFunc("POST /api/agent/checkin", s.agent(s.hCheckin))
-	m.HandleFunc("POST /api/agent/report", s.agent(s.hReport))
-	m.HandleFunc("GET /api/agent/enrollment", s.agent(s.hAgentEnrollment))
-	m.HandleFunc("POST /api/agent/left", s.agent(s.hAgentLeave))
-	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
-	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
-	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
-	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
-
-	m.HandleFunc("GET /api/auth", s.hAuth)
-	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.maintainer(s.hRecoveryMode))
-	m.HandleFunc("GET /api/recovery", s.viewer(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
-	}))
-	m.HandleFunc("GET /api/mesa", s.viewer(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, api.MesaCapabilities{Schema: 1, Staged: true, OfficialGPU: false, AgentMin: mesaMinAgent})
-	}))
-	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
-	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
-	m.HandleFunc("PATCH /api/devices/{name}", s.maintainer(s.hPatchDevice))
-	m.HandleFunc("DELETE /api/devices/{name}", s.maintainer(s.hForgetDevice))
-	m.HandleFunc("POST /api/devices/{name}/end-enrollment", s.maintainer(s.hEndEnrollment))
-	m.HandleFunc("POST /api/devices/{name}/lease", s.maintainer(s.hLease))
-	m.HandleFunc("DELETE /api/devices/{name}/lease", s.maintainer(s.hRelease))
-	m.HandleFunc("POST /api/devices/{name}/reset", s.maintainer(s.hReset))
-	m.HandleFunc("GET /api/devices/{name}/serial", s.maintainer(s.hSerial))
-	m.HandleFunc("GET /api/devices/{name}/oob", s.viewer(s.hOOBStatus))
-	m.HandleFunc("GET /api/stream", s.viewer(s.hStream))
-	m.HandleFunc("POST /api/devices/{name}/screenshot", s.maintainer(s.hScreenshot))
-	m.HandleFunc("GET /api/devices/{name}/screen", s.viewer(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/screens", s.viewer(s.hScreens))
-	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.viewer(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/logs", s.viewer(s.hLogs))
-	m.HandleFunc("GET /api/devices/{name}/console", s.maintainer(s.hConsoleRaw))
-	m.HandleFunc("POST /api/devices/{name}/console", s.maintainer(s.hConsoleWrite))
-	m.HandleFunc("POST /api/devices/{name}/console/arm", s.maintainer(s.hConsoleArm))
-	m.HandleFunc("POST /api/agent/screen", s.agent(s.hAgentScreen))
-	m.HandleFunc("POST /api/enroll-tokens", s.maintainer(s.hEnrollToken))
-	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
-	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
-	m.HandleFunc("POST /api/artifacts", s.maintainer(s.hPutArtifact))
-	m.HandleFunc("POST /api/mesa/jobs", s.maintainer(s.hSubmit))
-	m.HandleFunc("POST /api/jobs", s.maintainer(s.hSubmit))
-	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
-	m.HandleFunc("GET /api/jobs/{id}", s.viewer(s.hJob))
-	m.HandleFunc("GET /api/jobs/{id}/wait", s.viewer(s.hWait))
-	m.HandleFunc("POST /api/jobs/{id}/cancel", s.maintainer(s.hCancel))
-	m.HandleFunc("POST /api/jobs/{id}/retry", s.maintainer(s.hRetry))
-	m.HandleFunc("POST /api/jobs/{id}/publish", s.maintainer(s.hPublish))
-	m.HandleFunc("POST /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
-	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
-	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.viewer(s.hJobFile))
-	m.HandleFunc("GET /api/gate/{kernel}", s.maintainer(s.hGate))
-	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
-	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
-	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
-	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
-	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hAgentArtifact))
-	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
-	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
-	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
-	m.HandleFunc("POST /api/installed/{release}/promote", s.maintainer(s.hPromote))
-	m.HandleFunc("GET /api/installed/{release}", s.viewer(s.hInstalledStatus))
-	m.HandleFunc("GET /api/builds", s.viewer(s.hBuilds))
-	m.HandleFunc("GET /api/builds/{id}", s.viewer(s.hBuild))
-	m.HandleFunc("GET /api/builds/{id}/log", s.viewer(s.hBuildLog))
-	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
-	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
-	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
-	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
-	m.HandleFunc("GET /api/devices/{name}/audit", s.maintainer(s.hAudit))
-	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
-	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
-	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
+	for _, rt := range s.routes() {
+		s.register(m, rt)
+	}
+	// The UI's own files and themes: no Mac's data, so anyone.
 	web.Register(m)
 	return sameOrigin(m)
+}
+
+// routes is every API route and who may reach it (see reach).
+func (s *Server) routes() []route {
+	return []route{
+		{"POST /api/agent/enroll", anyone, s.hEnroll},
+		{"POST /api/agent/checkin", ownMac, s.hCheckin},
+		{"POST /api/agent/report", ownMac, s.hReport},
+		{"GET /api/agent/enrollment", ownMac, s.hAgentEnrollment},
+		{"POST /api/agent/left", ownMac, s.hAgentLeave},
+		{"GET /api/agent/artifacts/{sha}", ownMac, s.hAgentArtifact},
+		{"POST /api/agent/upload", ownMac, s.hUpload},
+		{"POST /api/agent/leave", ownMac, s.hLeave},
+		{"GET /api/agent/published", ownMac, s.hAgentPublished},
+
+		{"GET /api/auth", anyone, s.hAuth},
+		{"POST /api/devices/{name}/recovery-mode", maintainers, s.hRecoveryMode},
+		{"GET /api/recovery", maintainers, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
+		}},
+		{"GET /api/mesa", maintainers, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, api.MesaCapabilities{Schema: 1, Staged: true, OfficialGPU: false, AgentMin: mesaMinAgent})
+		}},
+		{"GET /api/devices", scoped, s.hDevices},
+		{"GET /api/devices/{name}", macNamed, s.hDevice},
+		{"PATCH /api/devices/{name}", maintainers, s.hPatchDevice},
+		{"DELETE /api/devices/{name}", maintainers, s.hForgetDevice},
+		{"POST /api/devices/{name}/end-enrollment", maintainers, s.hEndEnrollment},
+		{"POST /api/devices/{name}/lease", maintainers, s.hLease},
+		{"DELETE /api/devices/{name}/lease", maintainers, s.hRelease},
+		{"POST /api/devices/{name}/reset", maintainers, s.hReset},
+		{"GET /api/devices/{name}/serial", maintainers, s.hSerial},
+		{"GET /api/devices/{name}/oob", macNamed, s.hOOBStatus},
+		{"GET /api/stream", scoped, s.hStream},
+		{"POST /api/devices/{name}/screenshot", maintainers, s.hScreenshot},
+		{"GET /api/devices/{name}/screen", macNamed, s.hScreen},
+		{"GET /api/devices/{name}/screens", macNamed, s.hScreens},
+		{"GET /api/devices/{name}/screens/{file}", macNamed, s.hScreen},
+		{"GET /api/devices/{name}/logs", macNamed, s.hLogs},
+		{"GET /api/devices/{name}/console", maintainers, s.hConsoleRaw},
+		{"POST /api/devices/{name}/console", maintainers, s.hConsoleWrite},
+		{"POST /api/devices/{name}/console/arm", maintainers, s.hConsoleArm},
+		{"POST /api/agent/screen", ownMac, s.hAgentScreen},
+		{"POST /api/enroll-tokens", maintainers, s.hEnrollToken},
+		{"POST /api/volunteer", people, s.hVolunteer},
+		{"GET /api/volunteer/lab-agent", people, s.hVolunteerAgent},
+		{"POST /api/artifacts", maintainers, s.hPutArtifact},
+		{"POST /api/mesa/jobs", maintainers, s.hSubmit},
+		{"POST /api/jobs", maintainers, s.hSubmit},
+		{"GET /api/jobs", scoped, s.hJobs},
+		{"GET /api/jobs/{id}", jobNamed, s.hJob},
+		{"GET /api/jobs/{id}/wait", jobNamed, s.hWait},
+		{"POST /api/jobs/{id}/cancel", maintainers, s.hCancel},
+		{"POST /api/jobs/{id}/retry", maintainers, s.hRetry},
+		{"POST /api/jobs/{id}/publish", maintainers, s.hPublish},
+		{"POST /api/jobs/{id}/exclude", maintainers, s.hExclude},
+		{"DELETE /api/jobs/{id}/exclude", maintainers, s.hExclude},
+		{"GET /api/jobs/{id}/files/{name...}", jobNamed, s.hJobFile},
+		{"GET /api/gate/{kernel}", maintainers, s.hGate},
+		{"POST /api/builder/poll", builder, s.hBuilderPoll},
+		{"POST /api/builder/builds/{id}/progress", builder, s.hBuilderProgress},
+		{"POST /api/builder/builds/{id}/done", builder, s.hBuilderDone},
+		{"POST /api/builder/artifacts", builder, s.hBuilderArtifact},
+		{"GET /api/builder/artifacts/{sha}", builder, s.hAgentArtifact},
+		{"POST /api/builds", maintainers, s.hCreateBuild},
+		{"POST /api/installed/{release}/manifest", maintainers, s.hFreezeManifest},
+		{"POST /api/installed/{release}/entry/{device}", maintainers, s.hFreezeEntry},
+		{"POST /api/installed/{release}/promote", maintainers, s.hPromote},
+		{"GET /api/installed/{release}", maintainers, s.hInstalledStatus},
+		{"GET /api/builds", maintainers, s.hBuilds},
+		{"GET /api/builds/{id}", maintainers, s.hBuild},
+		{"GET /api/builds/{id}/log", maintainers, s.hBuildLog},
+		{"GET /api/builds/{id}/files/{name}", maintainers, s.hBuildFile},
+		{"POST /api/builds/{id}/cancel", maintainers, s.hCancelBuild},
+		{"GET /api/builders", maintainers, s.hBuilders},
+		{"POST /api/devices/{name}/exec", maintainers, s.hExec},
+		{"GET /api/devices/{name}/audit", maintainers, s.hAudit},
+		{"GET /api/maintainers", maintainers, s.hMaintainers},
+		{"POST /api/maintainers", maintainers, s.hAddMaintainer},
+		{"DELETE /api/maintainers/{name}", maintainers, s.hRemoveMaintainer},
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -745,25 +755,20 @@ func tooManyMacs(w http.ResponseWriter, login string, names []string) {
 		"(./volunteer leave on it, then the lab's maintainer runs `lab forget <name>`)", login, len(names), strings.Join(names, ", "))
 }
 
-// hVolunteer gives anyone who may look at the lab, such as any tailnet peer
-// under --tailscale, a token to enroll their own Mac: ./volunteer runs
-// lab-agent setup with it. The Mac is named after what it sent, made into a
-// free device name, labelled with the volunteer's tailnet login and marked a
-// volunteer's. Tagged tailnet devices are machines, lab Macs among them, not
-// people, so they get no token, and a person with maxVolunteerMacs Macs in
-// the lab gets none either. Maintainers may ask too, with their token,
-// outside the limits: they can make any token with POST /api/enroll-tokens
-// anyway.
+// hVolunteer gives any person on the tailnet under --tailscale a token to
+// enroll their own Mac: ./volunteer runs lab-agent setup with it. The Mac is
+// named after what it sent, made into a free device name, labelled with the
+// volunteer's tailnet login and marked a volunteer's. Tagged tailnet devices
+// are machines, lab Macs among them, not people, so they never get here (see
+// tokenless), and a person with maxVolunteerMacs Macs in the lab gets no
+// token either. Maintainers may ask too, with their token, outside the
+// limits: they can make any token with POST /api/enroll-tokens anyway.
 func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	a, who := s.access(r)
 	volunteer := ""
 	if a == adminAccess {
 		who = "" // a Maintainer, not a volunteer's tailnet login
 	} else {
-		if s.taggedPeer(r) {
-			httpErr(w, 403, "%s is a tagged tailnet device, a machine rather than a person: only a person may volunteer a Mac", who)
-			return
-		}
 		if volunteer = strings.ToLower(who); volunteer == "" {
 			httpErr(w, 403, "labd can't tell who you are on the tailnet")
 			return
@@ -793,12 +798,6 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(Maintainer "+maintainerName(r)+")"))
 	s.issueToken(w, req, volunteer)
-}
-
-// taggedPeer reports whether r comes from a tagged tailnet device.
-func (s *Server) taggedPeer(r *http.Request) bool {
-	p := s.tailnetPeer(r)
-	return p != nil && len(p.Tags) > 0
 }
 
 var reNameRun = regexp.MustCompile(`[^a-z0-9]+`)
@@ -1072,10 +1071,14 @@ func (s *Server) view(v *dev) DeviceView {
 	return v.viewLocked()
 }
 
+// hDevices lists the Macs the caller sees.
 func (s *Server) hDevices(w http.ResponseWriter, r *http.Request) {
+	c := callerOf(r)
 	out := []DeviceView{}
 	for _, v := range s.allDevs() {
-		out = append(out, s.view(v))
+		if s.sees(c, v.d.Name) {
+			out = append(out, s.view(v))
+		}
 	}
 	writeJSON(w, out)
 }
@@ -1612,12 +1615,28 @@ func (s *Server) hRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, j)
 }
 
+// hJobs lists the newest jobs on the Macs the caller sees; ?device= keeps
+// to one of them.
 func (s *Server) hJobs(w http.ResponseWriter, r *http.Request) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if n <= 0 {
 		n = 20
 	}
-	jobs, err := s.store.jobs(r.URL.Query().Get("device"), n, false)
+	c, device := callerOf(r), r.URL.Query().Get("device")
+	var (
+		jobs []*api.Job
+		err  error
+	)
+	switch {
+	case c.maintainer != "":
+		jobs, err = s.store.jobs(device, n, false)
+	case device != "":
+		if s.sees(c, device) {
+			jobs, err = s.store.jobs(device, n, false)
+		}
+	default:
+		jobs, err = s.store.jobsOn(s.seenMacs(c), n)
+	}
 	if err != nil {
 		httpErr(w, 500, "%v", err)
 		return

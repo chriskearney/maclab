@@ -74,9 +74,11 @@ func (h *hub) unsubscribe(s *sub) {
 	h.mu.Unlock()
 }
 
-// hStream serves server-sent events: device, job, serial, kevent, screen.
-// ?device= limits it to one Mac. Browsers read it with fetch (EventSource
-// cannot send the Authorization header).
+// hStream serves server-sent events: device, job, serial, kevent, screen,
+// build. ?device= limits it to one Mac. A caller gets only the events of the
+// Macs they see (see sees), and the fleet's own (builds) only as a
+// Maintainer. Browsers read it with fetch (EventSource cannot send the
+// Authorization header).
 func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -86,10 +88,10 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	// Serial lines carry the console (lab shell, serial lab exec), so only admins
-	// get them, as with the stored serial log.
-	a, _ := s.access(r)
-	serial := a == adminAccess
+	// Serial lines carry the console (lab shell, serial lab exec), so only
+	// Maintainers get them, as with the stored serial log.
+	c := callerOf(r)
+	serial := c.maintainer != ""
 	sb := s.hub.subscribe(r.URL.Query().Get("device"))
 	defer s.hub.unsubscribe(sb)
 	fmt.Fprint(w, ": maclab stream\n\n")
@@ -105,7 +107,7 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 		case <-keep.C():
 			fmt.Fprint(w, ": keepalive\n\n")
 		case e := <-sb.ch:
-			if e.kind == "serial" && !serial {
+			if (e.kind == "serial" && !serial) || !s.sees(c, e.device) {
 				continue
 			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.kind, e.data)
