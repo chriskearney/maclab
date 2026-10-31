@@ -1,0 +1,31 @@
+# The supported alternative to chonkbase.net/maclab: labd on its own origin, https://maclab.chonkbase.net, served at /.
+# A token in the browser is then readable only by labd's own pages (docs/https.md, "Origin and trust").
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - target: { kind: Certificate, name: maclab-tls }
+    patch: |-
+      - op: replace
+        path: /spec/dnsNames
+        value: [maclab.chonkbase.net]
+  - target: { kind: Ingress, name: maclab }
+    patch: |-
+      - op: replace
+        path: /spec/tls/0/hosts
+        value: [maclab.chonkbase.net]
+      - op: replace
+        path: /spec/rules/0/host
+        value: maclab.chonkbase.net
+      - op: replace
+        path: /spec/rules/0/http/paths/0/path
+        value: /
+  - target: { kind: Deployment, name: maclab }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args/3
+        value: --public-url=https://maclab.chonkbase.net
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
+        value: /

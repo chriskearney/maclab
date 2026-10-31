@@ -55,6 +55,7 @@ REBOOT_WAIT = 360           # 6 min for a new boot id
 POLL = 10
 JOB_BUDGET = 4 * 3600
 WAIT_CHUNK = 2400           # GET /api/jobs/<id>/wait?timeout=<= 2400
+GRANT_TTL = 2700   # covers the target fetch step (TIMEOUTS['fetch']) with margin
 TIMEOUTS = {'preflight': 300, 'fetch': 1800, 'capture': 1800, 'hold-writers': 300, 'esp-prep': 900,
             'install': 3000, 'rollback': 3000, 'esp-restore': 900, 'etc-restore': 600, 'audit': 900,
             'release-writers': 300, 'cleanup': 600}
@@ -1115,6 +1116,18 @@ class Controller:
             done[f] = sha
         return {'uploaded': done}
 
+    def grant_artifacts(self):
+        """One explicit grant for exactly the run's artifact_shas, sized to the fetch step. A retry of the run grants
+        again in its own step; nothing re-grants silently."""
+        shas = sorted(set(self.cfg['artifact_shas'].values()))
+        need(shas, 'no artifacts to grant')
+        g = self.api.artifact_grants(self.device, shas, GRANT_TTL)
+        return {'artifacts': shas, 'ttl_sec': GRANT_TTL, 'expires': g['expires']}
+
+    def revoke_artifacts(self):
+        g = self.api.artifact_grants(self.device, [], GRANT_TTL)
+        return {'artifacts': [], 'expires': g['expires']}
+
     def verify_preflight(self, res):
         f = res.get('facts') or {}
         for n in [c['name'] for c in self.cfg['candidates']]:
@@ -1752,7 +1765,10 @@ class Controller:
             # ---- run dir + capture (only bt2's own run dir changes) ----
             s('push', self.push_package, mutating=True)
             s('upload', self.upload_artifacts)
+            # the Mac may fetch from labd only shas a grant names (docs/https.md): exactly these, once per run, then revoked
+            s('grant-artifacts', self.grant_artifacts)
             self.tstep('fetch')
+            s('revoke-artifacts', self.revoke_artifacts)
             self.tstep('preflight', verify=self.verify_preflight)
             self.tstep('capture', verify=self.verify_capture)
             # ---- system mutations (each with its inverse) ----
