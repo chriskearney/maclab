@@ -587,16 +587,20 @@ session: about 70 checks of the boot chain, drivers, GPU, video decode, display,
 audio, Wi-Fi, power and CPU, and short benchmarks. The agent installs or upgrades
 the tool with its own installer, which checks the release signature. It runs with
 `--unattended`: it answers the disclaimer and gets no more input, every check meant
-for a person is skipped, and the speaker tone, brightness steps, camera window,
-full-screen video test card and disruptive sections (lid, Wi-Fi reload) don't
-happen. The run takes 1 to 3 minutes.
+for a person is skipped, and the speaker tone, brightness steps, camera window and
+disruptive sections (lid, Wi-Fi reload) don't happen. The run takes 1 to 3 minutes.
 
-- **What it still touches:** it reads the built-in microphone for 3 seconds and 30
-  camera frames, measured and discarded, on every Mac including a Volunteer's,
-  and, where passwordless sudo works, sets the battery charge limit and puts it
-  back. A tool older than 0.1.15 (a failed upgrade) has no `--unattended`: the job
-  logs that and runs without it, so the tone, brightness steps and camera window
-  happen on that run.
+- **On-screen video checks:** on 0.1.15, Lab-owned Macs skip `video.h264-on-screen`
+  and `video.hevc-on-screen` in an unattended run. Once
+  maralcbr/omarchy-m-testing#61 ships they run again on an unlocked session, and
+  skip under a lock or a full-screen overlay. A Volunteer's Mac leaves them out
+  either way (`--skip video`).
+- **What else it uses:** the built-in microphone for 3 seconds and 30 camera frames,
+  measured and not kept. Where passwordless sudo works, it sets the battery charge
+  limit and puts it back.
+- **Older tools:** a tool older than 0.1.15 (a failed upgrade) has no `--unattended`.
+  The job logs that and runs without it, so the tone, brightness steps and camera
+  window happen on that run.
 
 - **Known-good runs** (`lab baseline`, `lab run <mac>` with no kernel) become the
   Mac's reference report.
@@ -614,10 +618,12 @@ happen. The run takes 1 to 3 minutes.
   recorded before the lab counted nodes compares compatibles only.
 - **Skipped checks:** a skip on either side compares as nothing. Against a reference
   from an attended run, an unattended run names what it skipped that the reference
-  passed (`video.*-on-screen`) in "compared with", until a known-good unattended
-  run replaces the reference. An Installed run is stricter: a frozen pass that is
-  now a skip is a regression, so preinstall references frozen from an attended run
-  have to be taken again.
+  passed in "compared with", until a known-good unattended run replaces the
+  reference. An Installed run is stricter: a frozen pass that is now a skip is a
+  regression. On 0.1.15 that means taking preinstall references frozen from an
+  attended run again. Once the on-screen checks run again it means a locked or
+  covered screen fails the run, so run Lab-owned Macs with `--autologin` or
+  `--stay-awake`, and run it again if the screen was locked.
 - **Publishing:** `lab run <mac> --publish`, `lab publish <job>`, or the job page's
   Publish button uploads the signed report to omarchy-m-testing.org. Only
   known-good runs qualify, because the site names a report's build from the

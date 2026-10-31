@@ -326,14 +326,14 @@ func omtNotRun(unattended bool, before, after map[string]string) []string {
 	return ids
 }
 
-// omtFrozenSkipNote says why an Installed run regressed when it is only the
-// mode: a frozen pass that is now a skip stays a regression (CompareOMT), so a
-// report frozen from an attended run has to be taken again.
+// omtFrozenSkipNote says what to do when an unattended Installed run regressed
+// by skipping: a frozen pass that is now a skip stays a regression (CompareOMT),
+// whether the mode skipped it or a locked or covered screen did.
 func omtFrozenSkipNote(unattended bool, regressed []api.OMTCheck) string {
 	if unattended {
 		for _, c := range regressed {
 			if c.Outcome == "pass -> skip" {
-				return "; this unattended run skips checks the attended pre-install report ran: take the preinstall references again"
+				return "; this unattended run skipped what the pre-install report passed: if the screen was locked or covered run it again, otherwise take the preinstall references again"
 			}
 		}
 	}

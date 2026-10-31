@@ -71,8 +71,9 @@ if the installer set one, is unchanged.
 ## 6. A Lab-owned Mac is unchanged
 
 On a Lab-owned Mac, `--autologin` and `--stay-awake` still apply, the desktop
-is unlocked after every boot. Its omarchy-m-test run is unattended too, so its
-report skips the on-screen checks as well, unless the tool is older than 0.1.15.
+is unlocked after every boot. Its omarchy-m-test run is unattended too: on 0.1.15
+its report skips the on-screen checks, and once maralcbr/omarchy-m-testing#61
+ships they run again.
 
 ## Results
 

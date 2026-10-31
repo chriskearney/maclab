@@ -34,10 +34,11 @@ case "$(omarchy-m-test --help 2>/dev/null)" in
     *) echo "omarchy-m-test $running has no --unattended: running without it (tone, brightness steps, camera window)" ;;
 esac
 
-# A Volunteer's Mac is locked while this runs (MACLAB_SKIP_ON_SCREEN=1). An
-# unattended run already skips the video section's full-screen test card; this
-# keeps it off the lock screen on a run without --unattended, in the reference
-# and the test run alike.
+# A Volunteer's Mac is locked while this runs (MACLAB_SKIP_ON_SCREEN=1), so the
+# video section's full-screen test card is left out of the reference and the
+# test run alike. omarchy-m-test 0.1.15 skips it under --unattended anyway; once
+# maralcbr/omarchy-m-testing#61 ships it runs on an unlocked session, and this
+# keeps it off a Volunteer's screen.
 if [ -n "${MACLAB_SKIP_ON_SCREEN:-}" ]; then
     args+=(--skip video)
     echo "locked screen: on-screen checks left out"
