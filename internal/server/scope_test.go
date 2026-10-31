@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,8 +15,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/window"
 )
 
 // Scope, through its interface: who may see which Mac, its jobs and its
@@ -271,5 +274,73 @@ func TestPersonSeesOnlyTheirOwnMacs(t *testing.T) {
 	}
 	if strings.Contains(got.String(), "secret") {
 		t.Errorf("the visitor's stream carried another Mac's or the fleet's events:\n%s", got.String())
+	}
+}
+
+// Scope's actions, through its interface: who may do what on which Mac. The
+// Access level, Availability window and held rules are a Volunteer's Mac's;
+// a Lab-owned Mac has none of them.
+func TestScopeActions(t *testing.T) {
+	s := &Server{devs: map[string]*dev{}}
+	open := &window.Settings{OpenUntil: s.now().Add(time.Hour)}
+	add := func(name string, d api.Device) {
+		d.Name = name
+		s.devs[name] = &dev{s: s, d: d, volunteeredBy: d.VolunteeredBy}
+	}
+	vol := func(level string, w *window.Settings, job string) api.Device {
+		return api.Device{Kind: api.KindVolunteer, VolunteeredBy: "visitor@github", AccessLevel: level, Window: w, ActiveJob: job}
+	}
+	add("lab", api.Device{Kind: api.KindLabOwned})
+	add("full", vol(api.AccessFull, open, ""))
+	add("held", vol(api.AccessQualification, open, "j1"))       // Qualification, held, window open
+	add("held-closed", vol(api.AccessQualification, nil, "j1")) // held, window closed
+	add("free", vol(api.AccessQualification, open, ""))         // window open, not held
+	add("theirs", api.Device{Kind: api.KindVolunteer, VolunteeredBy: "other@github", AccessLevel: api.AccessFull, Window: open, ActiveJob: "j2"})
+	add("full-held", vol(api.AccessFull, open, "j3"))  // Full, held, window open
+	add("full-closed", vol(api.AccessFull, nil, "j4")) // Full, held, window closed
+
+	var (
+		maintainer = caller{maintainer: "ada"}
+		self       = labdItself
+		visitor    = caller{login: "visitor@github"}
+		heldMac    = caller{mac: "held"}
+	)
+	macs := []string{"lab", "full", "held", "held-closed", "free", "theirs", "full-held", "full-closed"}
+	for _, c := range []struct {
+		name string
+		who  caller
+		a    action
+		may  []string
+	}{
+		{"a Maintainer runs lab exec where the Access level allows it", maintainer, actExec, []string{"lab", "full", "theirs", "full-held", "full-closed"}},
+		{"labd runs a Maintainer's script for a job", self, actScript("test t is a --script"), []string{"lab", "full", "theirs", "full-held", "full-closed"}},
+		{"Mesa packages need Full", maintainer, actMesa, []string{"lab", "full", "theirs", "full-held", "full-closed"}},
+		{"recovery overrides need Full", maintainer, actRecovery, []string{"lab", "full", "theirs", "full-held", "full-closed"}},
+		{"a Maintainer watches a held Mac inside its window", maintainer, actWatch, []string{"lab", "held", "theirs", "full-held"}},
+		{"a Volunteer watches only their own held Mac", visitor, actWatch, []string{"held", "full-held"}},
+		{"a Maintainer leases inside the window", maintainer, actLease, []string{"lab", "full", "held", "free", "theirs", "full-held"}},
+		{"a Volunteer runs no lab exec, even on their own Mac", visitor, actExec, nil},
+		{"a Volunteer takes no lease", visitor, actLease, nil},
+		{"a Mac adds files only to its own jobs", heldMac, actUpload, []string{"held"}},
+		{"a Maintainer adds no files to a Mac's job", maintainer, actUpload, nil},
+		{"a Mac runs nothing on another Mac", heldMac, actExec, nil},
+		{"a Mac watches nothing", heldMac, actWatch, nil},
+		{"nobody does anything", caller{}, actWatch, nil},
+	} {
+		for _, name := range macs {
+			want := slices.Contains(c.may, name)
+			if err := s.mayDo(c.who, s.devs[name], c.a); (err == nil) != want {
+				t.Errorf("%s: on %s got %v, want allowed=%v", c.name, name, err, want)
+			}
+		}
+	}
+	if err := s.mayDo(maintainer, nil, actExec); !errors.Is(err, errNotSeen) {
+		t.Errorf("a Mac that isn't there: %v", err)
+	}
+	if err := s.mayDo(visitor, s.devs["theirs"], actWatch); !errors.Is(err, errNotSeen) {
+		t.Errorf("another Volunteer's Mac must look absent: %v", err)
+	}
+	if err := s.mayDo(maintainer, s.devs["held"], actScript("test t is a --script")); err == nil || !strings.Contains(err.Error(), "test t is a --script") {
+		t.Errorf("a script refusal names the script: %v", err)
 	}
 }
