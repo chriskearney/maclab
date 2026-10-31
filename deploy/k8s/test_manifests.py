@@ -68,7 +68,7 @@ class Base(unittest.TestCase):
         for p in ('readinessProbe', 'livenessProbe'):
             self.assertEqual(container(self.o)[p]['httpGet']['httpHeaders'], [{'name': 'X-Forwarded-Proto', 'value': 'https'},
                              {'name': 'X-Forwarded-Host', 'value': 'maclab.chonkbase.net'}], 'probe names the public origin')
-        self.assertEqual(container(self.o)['image'], 'ghcr.io/iconidentify/maclab:SET-IMAGE-TAG')
+        self.assertEqual(container(self.o)['image'], 'ghcr.io/chriskearney/maclab:SET-IMAGE-TAG')
 
     def test_ingress_passes_the_prefix_through_and_holds_long_requests(self):
         i = self.o[('Ingress', 'maclab')]
