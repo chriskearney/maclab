@@ -282,6 +282,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 				continue
 			}
 		}
+		s.tellVolunteerJobEndedByRestart(j, api.OutcomeInfra)
 		j.State, j.Outcome, j.Summary = api.JobDone, api.OutcomeInfra, "labd restarted while the job was running"
 		st.saveJob(j)
 	}

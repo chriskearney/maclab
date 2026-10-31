@@ -27,8 +27,11 @@ type dev struct {
 	// volunteer's Macs under s.mu alone, without each Mac's mu.
 	volunteeredBy string
 
-	mu            sync.Mutex
-	d             api.Device
+	mu sync.Mutex
+	d  api.Device
+	// owedDone is a job's done notice that waited for the Mac to be back (needs hands or recovering at the job's end). It is memory
+	// only: if labd restarts while one is held, the job is already closed and that notice is lost.
+	owedDone      *Notification
 	pending       []api.Command
 	inflight      map[string]time.Time
 	sent          map[string]api.Command
@@ -214,6 +217,10 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		v.d.NtfyOwnURL = ci.NtfyOwnURL
 		persist = true
 	}
+	if v.d.IsVolunteer() && ci.JobNotices != nil && v.d.JobNotices != *ci.JobNotices { // a check-in without it keeps the stored choice
+		v.d.JobNotices = *ci.JobNotices
+		persist = true
+	}
 	if ci.Facts != nil {
 		v.d.Facts = *ci.Facts
 	}
@@ -247,6 +254,7 @@ func (v *dev) heartbeat(ci api.Checkin) {
 		}
 		v.setStateLocked(back, "")
 		v.restore = ""
+		v.sendOwedDoneLocked()
 		if was == api.StateNeedsHands {
 			v.s.notify(Notification{Device: v.d.Name, Title: v.d.Name + " is back", Body: "Checked in on " + ci.Kernel + ". Nothing else to do.", Priority: "default"})
 		}

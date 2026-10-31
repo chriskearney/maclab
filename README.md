@@ -447,6 +447,16 @@ those minutes, and one warning is shown per job. With no desktop session to
 show it, the job goes ahead within the window. The Audit log records, per job,
 whether the warning was shown. Lab-owned Macs get no warning and no wait.
 
+A Volunteer can also ask to be told about jobs on the Mac's own ntfy topic:
+`sudo lab-agent notify --jobs on` (off by default; `off` turns it off again,
+and `status` shows it). As a job starts, the notice names the job and who
+asked, says the job takes at most about so many minutes, and asks the
+Volunteer to leave the Mac alone until the done notice. When the job ends, a
+second notice says how it ended and that the Mac is free. A Mac that still
+needs hands gets that notice once it is back, and one whose job labd lost by
+restarting gets it at once. Nothing else about jobs goes to the Mac's topic,
+and Lab-owned Macs get none of this.
+
 The Volunteer also chooses what Maintainers may do on the Mac, its Access
 level, and can read everything done to it, its Audit log:
 
