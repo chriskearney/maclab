@@ -106,11 +106,14 @@ func (c *certReloader) stampNow() string {
 }
 
 func (c *certReloader) load() error {
+	// The files' stamp is taken before they are read: a renewal landing
+	// while they are read changes it, so the next look reads them again.
+	stamp := c.stampNow()
 	cert, err := tls.LoadX509KeyPair(c.certFile, c.keyFile)
 	if err != nil {
 		return fmt.Errorf("TLS certificate: %w", err)
 	}
-	c.cert, c.stamp, c.checked = &cert, c.stampNow(), time.Now()
+	c.cert, c.stamp, c.checked = &cert, stamp, time.Now()
 	return nil
 }
 

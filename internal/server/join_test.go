@@ -3,6 +3,9 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -356,5 +360,31 @@ cat > "$REC/sudo.stdin"
 	}
 	if _, err := os.Stat(filepath.Join(rec, "sudo.argv")); err == nil {
 		t.Error("sudo ran with a wrong download")
+	}
+}
+
+// An enrollment is the one body anyone may send before labd knows who they
+// are: one that trickles in is cut off at its deadline, not held open.
+func TestASlowEnrollmentBodyIsCutOff(t *testing.T) {
+	old := enrollBodyTimeout
+	enrollBodyTimeout = 300 * time.Millisecond
+	defer func() { enrollBodyTimeout = old }()
+	j := newJoinLab(t)
+	srv := httptest.NewServer(j.h)
+	defer srv.Close()
+	c, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	start := time.Now()
+	fmt.Fprintf(c, "POST /maclab/api/agent/enroll HTTP/1.1\r\nHost: chonkbase.net\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{")
+	c.SetReadDeadline(time.Now().Add(10 * time.Second))
+	b, _ := io.ReadAll(c)
+	if took := time.Since(start); took > 5*time.Second {
+		t.Fatalf("the slow body held the connection %s", took)
+	}
+	if len(b) > 0 && !strings.Contains(string(b), " 400 ") && !strings.Contains(string(b), " 408 ") {
+		t.Errorf("answer to a slow body: %q", b)
 	}
 }

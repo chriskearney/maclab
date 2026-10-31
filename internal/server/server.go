@@ -743,6 +743,10 @@ const (
 // which JSON's escapes can make 6 MB), a journal of up to 20000 lines or the
 // kernel's .config, and up to 500 kernel events. Files go to
 // /api/agent/upload and /api/agent/screen, which these don't limit.
+// enrollBodyTimeout is how long an enrollment's body may take to arrive;
+// tests shorten it.
+var enrollBodyTimeout = 30 * time.Second
+
 const (
 	enrollBodyMax  = 256 << 10
 	checkinBodyMax = 256 << 10
@@ -897,6 +901,9 @@ func (s *Server) tokenValid(hash string) bool {
 // the Mac's first check-in: the token alone, copied to another Mac, is worth
 // nothing once used. The owner must have accepted labd's current terms.
 func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
+	// Anyone may send this body, before labd knows who they are: it must
+	// arrive soon, not trickle in to hold the connection.
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(enrollBodyTimeout))
 	var req api.EnrollRequest
 	if !decodeBody(w, r, enrollBodyMax, &req) {
 		return
@@ -952,18 +959,16 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Used up here, under s.mu with the insert: of two enrollments racing
-	// with one token, one gets the Mac and the other a 403.
-	if ok, err := s.store.activateToken(tokHash, keyHash, s.now()); err != nil || !ok {
+	// Used up here, under s.mu, in one transaction with the device's row: of
+	// two enrollments racing with one token, one gets the Mac and the other
+	// a 403, and a crash leaves no used token without its Mac.
+	if ok, err := s.store.activateAndSave(tokHash, keyHash, s.now(), &d, hashSecret(secret)); err != nil || !ok {
 		s.mu.Unlock()
 		httpErr(w, 403, "enrollment token unknown, used or expired")
 		return
 	}
 	s.devs[d.Name] = v
 	s.mu.Unlock()
-	v.mu.Lock()
-	v.saveLocked()
-	v.mu.Unlock()
 	go s.deviceLoop(v)
 	s.log.Printf("enrolled %s (%s, %s); terms %s accepted", d.Name, d.Kind, req.Facts.DTModel, short(req.TermsSHA256))
 	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})

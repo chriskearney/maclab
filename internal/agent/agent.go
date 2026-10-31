@@ -95,12 +95,14 @@ func LoadConfig(path string) (*Config, error) {
 	return &c, nil
 }
 
+// Save writes c to path in one rename, so a crash leaves the old file or the
+// new one, never half of either.
 func (c *Config) Save(path string) error {
 	b, _ := json.MarshalIndent(c, "", "  ")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return replaceFile(path, b)
 }
 
 type Agent struct {

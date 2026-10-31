@@ -37,8 +37,11 @@ type MoveOptions struct {
 	// does). The URL and the CA are checked either way.
 	NoCheck bool
 	// Restart restarts lab-agent.service so it reads the new address; nil is
-	// systemctl.
+	// systemctl. InAgent says whether move runs inside lab-agent.service
+	// (through lab exec), where restarting the service would kill move
+	// before it answered; nil reads /proc/self/cgroup.
 	Restart func() error
+	InAgent func() bool
 	Log     func(format string, args ...any)
 }
 
@@ -55,6 +58,13 @@ func Move(ctx context.Context, o MoveOptions) error {
 	say := o.Log
 	if say == nil {
 		say = func(string, ...any) {}
+	}
+	inAgent := o.InAgent
+	if inAgent == nil {
+		inAgent = insideAgentUnit
+	}
+	if inAgent() {
+		return errors.New("run lab-agent move in a terminal on the Mac or over SSH, not through the lab: it restarts lab-agent.service, which would end this command before labd heard back. Nothing was changed")
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
@@ -109,17 +119,31 @@ func Move(ctx context.Context, o MoveOptions) error {
 	if err := replaceFile(path, b); err != nil {
 		return err
 	}
-	say("moved: labd %s -> %s; this Mac keeps its enrollment as %s", cfg.Server, server, cfg.Name)
+	say("agent.json now names labd at %s (was %s); this Mac keeps its enrollment as %s", server, cfg.Server, cfg.Name)
 	restart := o.Restart
 	if restart == nil {
-		restart = func() error {
-			if out, err := exec.Command("systemctl", "restart", "lab-agent.service").CombinedOutput(); err != nil {
-				return fmt.Errorf("systemctl restart lab-agent.service: %v: %s", err, strings.TrimSpace(string(out)))
-			}
-			return nil
-		}
+		restart = func() error { return run("systemctl", "restart", "lab-agent.service") }
 	}
-	return restart()
+	if err := restart(); err != nil {
+		return err
+	}
+	say("lab-agent restarted; the move is done when this Mac checks in to %s", server)
+	return nil
+}
+
+// insideAgentUnit is whether this process runs in lab-agent.service's
+// cgroup: lab exec's commands do.
+func insideAgentUnit() bool {
+	b, _ := os.ReadFile("/proc/self/cgroup")
+	return strings.Contains(string(b), "/lab-agent.service")
+}
+
+// run runs a command, its output going into the error.
+func run(name string, args ...string) error {
+	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("%s %s: %v: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // knowsThisMac asks labd at server, with the Mac's device secret, for the

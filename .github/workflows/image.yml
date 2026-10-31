@@ -27,7 +27,7 @@ jobs:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"   # the bt2 fixtures need 3.14 (tarfile w:zst), as the Macs run
       # test_manifests renders with kubectl and parses with PyYAML; -I ignores
       # the user site, so PyYAML goes into this interpreter itself.
       - run: python3 -m pip install pyyaml

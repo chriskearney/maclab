@@ -68,7 +68,8 @@ func (f *moveFixture) caFile(t *testing.T) string {
 }
 
 func (f *moveFixture) opts(server, ca string) MoveOptions {
-	return MoveOptions{ConfigPath: f.cfg, Server: server, CAFile: ca, Restart: func() error { f.restarts.Add(1); return nil }}
+	return MoveOptions{ConfigPath: f.cfg, Server: server, CAFile: ca, Restart: func() error { f.restarts.Add(1); return nil },
+		InAgent: func() bool { return false }}
 }
 
 func (f *moveFixture) fields(t *testing.T) map[string]json.RawMessage {
@@ -232,5 +233,22 @@ func TestSetupLeavesMovingToMove(t *testing.T) {
 		if err := refuseMoveInSetup(c.cfg, c.token, c.server); err != nil {
 			t.Errorf("%s: %v", name, err)
 		}
+	}
+}
+
+// Through lab exec (inside lab-agent.service) move would end with the service
+// it restarts, before labd heard back: it refuses before reading or writing
+// anything, and asks for a terminal or SSH.
+func TestMoveRefusesToRunInsideLabAgent(t *testing.T) {
+	f := newMoveFixture(t)
+	orig, _ := os.ReadFile(f.cfg)
+	o := f.opts(f.srv.URL+"/maclab", f.caFile(t))
+	o.InAgent = func() bool { return true }
+	err := Move(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "over SSH") || !strings.Contains(err.Error(), "Nothing was changed") {
+		t.Fatalf("move inside lab-agent: %v", err)
+	}
+	if b, _ := os.ReadFile(f.cfg); string(b) != string(orig) || f.hits.Load() != 0 || f.restarts.Load() != 0 {
+		t.Errorf("it acted: config changed=%v, %d requests, %d restarts", string(b) != string(orig), f.hits.Load(), f.restarts.Load())
 	}
 }

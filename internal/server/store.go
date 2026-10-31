@@ -164,16 +164,28 @@ func (s *store) tokenState(hash string, now time.Time) (*api.EnrollTokenRequest,
 	return t, by, err
 }
 
-// activateToken uses up an unused, unexpired token for the activation whose
-// key hashes to keyHash, and says whether it did: of two enrollments racing
-// with one token, one wins.
-func (s *store) activateToken(hash, keyHash string, now time.Time) (bool, error) {
-	res, err := s.db.Exec(`UPDATE tokens SET activated_by=? WHERE token_hash=? AND activated_by='' AND expires>=?`, keyHash, hash, now.Unix())
+// activateAndSave uses up an unused, unexpired token for the activation
+// whose key hashes to keyHash and saves the device it makes, in one
+// transaction, and says whether it did: of two enrollments racing with one
+// token, one wins, and a crash leaves either both or neither.
+func (s *store) activateAndSave(hash, keyHash string, now time.Time, d *api.Device, secretHash string) (bool, error) {
+	tx, err := s.db.Begin()
 	if err != nil {
 		return false, err
 	}
-	n, err := res.RowsAffected()
-	return n == 1, err
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE tokens SET activated_by=? WHERE token_hash=? AND activated_by='' AND expires>=?`, keyHash, hash, now.Unix())
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, err
+	}
+	b, _ := json.Marshal(d)
+	if _, err := tx.Exec(`INSERT INTO devices(id,name,secret_hash,data) VALUES(?,?,?,?)`, d.ID, d.Name, secretHash, string(b)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
 }
 
 // revokeTokens deletes the enrollment tokens for a name, used or not, and
