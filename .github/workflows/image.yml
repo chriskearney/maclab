@@ -25,8 +25,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # test_manifests renders with kubectl and parses with PyYAML; -I ignores
+      # the user site, so PyYAML goes into this interpreter itself.
+      - run: python3 -m pip install pyyaml
+      - run: kubectl version --client
       - run: python3 -B -E -s -m unittest discover -s tests -v
         working-directory: tools/bt2
       - run: python3 -I -B -m unittest discover -s scripts/boot-test -p 'test_https_runtime.py' -v
       - run: python3 -I -B -m unittest discover -s scripts/workflow/m1 -p 'test_https_controller.py' -v
-      - run: python3 -I -B deploy/k8s/test_manifests.py -v
+      # A skip (no kubectl) must fail the job, not pass it.
+      - run: |
+          out=$(python3 -I -B deploy/k8s/test_manifests.py -v 2>&1); rc=$?
+          echo "$out"
+          [ "$rc" = 0 ] && grep -qx OK <<<"$out"
