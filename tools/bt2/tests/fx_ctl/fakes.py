@@ -126,6 +126,8 @@ class FakeLabd:
         self._dev(name)
         assert all(s in self.artifacts for s in shas), 'grant for a sha labd does not hold'
         self.grants[name] = {'artifacts': sorted(shas), 'ttl_sec': ttl_sec}
+        if not shas:   # as labd answers a revocation: no expires (json omitzero)
+            return {'device': name, 'artifacts': []}
         return {'device': name, 'artifacts': sorted(shas), 'expires': iso(now() + datetime.timedelta(seconds=ttl_sec))}
 
     def exec(self, *a, **k):

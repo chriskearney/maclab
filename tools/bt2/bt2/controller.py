@@ -1125,8 +1125,8 @@ class Controller:
         return {'artifacts': shas, 'ttl_sec': GRANT_TTL, 'expires': g['expires']}
 
     def revoke_artifacts(self):
-        g = self.api.artifact_grants(self.device, [], GRANT_TTL)
-        return {'artifacts': [], 'expires': g['expires']}
+        self.api.artifact_grants(self.device, [], GRANT_TTL)
+        return {'artifacts': []}
 
     def verify_preflight(self, res):
         f = res.get('facts') or {}

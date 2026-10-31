@@ -167,8 +167,10 @@ class Transport(unittest.TestCase):
     def test_artifact_grants_asks_for_exactly_the_shas_and_checks_the_answer(self):
         a, b = 'a' * 64, 'b' * 64
 
-        def answer(body):
+        def answer(body):   # as labd's hArtifactGrants answers: a revocation has no expires (omitzero)
             q = json.loads(body)
+            if not q['artifacts']:
+                return {'device': 'm1', 'artifacts': []}
             return {'device': 'm1', 'artifacts': q['artifacts'], 'expires': '2026-10-31T12:45:00Z'}
         s = self.serve(fx_tls.json_route({('POST', '/maclab/api/devices/m1/artifact-grants'): (200, answer)}))
         api = self.labd(s.url(prefix='/maclab'), env={'MACLAB_CA_FILE': self.ca})
@@ -182,6 +184,16 @@ class Transport(unittest.TestCase):
                                           (200, {'device': 'm1', 'artifacts': ['c' * 64], 'expires': 'x'})}))
         with self.assertRaises(labd.APIError):
             self.labd(s.url(), env={'MACLAB_CA_FILE': self.ca}).artifact_grants('m1', ['a' * 64], 2700)
+
+    def test_a_grant_needs_its_expiry_and_a_revocation_has_none(self):
+        s = self.serve(fx_tls.json_route({('POST', '/api/devices/m1/artifact-grants'): (200, {'device': 'm1', 'artifacts': ['a' * 64]})}))
+        api = self.labd(s.url(), env={'MACLAB_CA_FILE': self.ca})
+        with self.assertRaises(labd.APIError):          # a grant without its expiry is not what was asked
+            api.artifact_grants('m1', ['a' * 64], 2700)
+        s2 = self.serve(fx_tls.json_route({('POST', '/api/devices/m1/artifact-grants'):
+                                           (200, {'device': 'm1', 'artifacts': [], 'expires': '2026-10-31T12:45:00Z'})}))
+        with self.assertRaises(labd.APIError):          # a revocation that claims an expiry is not one
+            self.labd(s2.url(), env={'MACLAB_CA_FILE': self.ca}).artifact_grants('m1', [], 2700)
 
     def test_wait_asks_in_calls_of_at_most_50_seconds(self):
         calls = []

@@ -110,12 +110,15 @@ class Labd:
 
     def artifact_grants(self, name, shas, ttl_sec):
         """Let the Mac's current enrollment fetch exactly these shas from /api/agent/artifacts until ttl_sec runs out
-        (POST /api/devices/<name>/artifact-grants). An empty list revokes. The answer must name exactly what was asked."""
+        (POST /api/devices/<name>/artifact-grants). An empty list revokes. The answer must name exactly what was asked;
+        a grant carries its expiry, and a revocation, which has none, carries no "expires" (labd omits the zero time)."""
         shas = sorted(shas)
         res = self.post('/api/devices/%s/artifact-grants' % urllib.parse.quote(name, safe=''),
                         {'artifacts': shas, 'ttl_sec': int(ttl_sec)}, timeout=15)
+        expiry_ok = (isinstance(res, dict) and isinstance(res.get('expires'), str)) if shas else \
+            (isinstance(res, dict) and res.get('expires') in (None, '0001-01-01T00:00:00Z'))
         if not (isinstance(res, dict) and res.get('device') == name and sorted(res.get('artifacts') or []) == shas
-                and isinstance(res.get('expires'), str)):
+                and expiry_ok):
             raise APIError(200, 'artifact grant answer differs from the request: %r' % (res,), '/api/devices/%s/artifact-grants' % name)
         return res
 
