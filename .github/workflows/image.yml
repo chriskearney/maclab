@@ -25,7 +25,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - run: python3 -I -m unittest discover -s tools/bt2/tests -t tools/bt2 -v
-      - run: python3 -I scripts/boot-test/test_https_runtime.py -v
-      - run: python3 -I scripts/workflow/m1/test_https_controller.py -v
-      - run: python3 -I deploy/k8s/test_manifests.py -v
+      - run: python3 -B -E -s -m unittest discover -s tests -v
+        working-directory: tools/bt2
+      - run: python3 -I -B -m unittest discover -s scripts/boot-test -p 'test_https_runtime.py' -v
+      - run: python3 -I -B -m unittest discover -s scripts/workflow/m1 -p 'test_https_controller.py' -v
+      - run: python3 -I -B deploy/k8s/test_manifests.py -v
