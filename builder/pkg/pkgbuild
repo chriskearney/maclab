@@ -39,15 +39,19 @@ if [ -n "${PKGREL:-}" ]; then
 fi
 
 chown -R build: "$W" $C/sources $C/rustup $C/cargo
+# lab-builder's --pkg-jobs, read by recipes as make -j"${OMARCHY_BUILD_JOBS:-N}". sudo drops the
+# container's environment, so it is passed on here; empty leaves each recipe its own default.
+[[ -z ${OMARCHY_BUILD_JOBS:-} || $OMARCHY_BUILD_JOBS =~ ^[1-9][0-9]{0,3}$ ]] || fail "OMARCHY_BUILD_JOBS '$OMARCHY_BUILD_JOBS' is not a job count"
 as_build() {
   sudo -u build env HOME=/home/build PATH="$PATH" SRCDEST=$C/sources BUILDDIR="$W/b" PKGDEST="$W/out" \
-    RUSTUP_HOME=$C/rustup CARGO_HOME=$C/cargo "$@"
+    RUSTUP_HOME=$C/rustup CARGO_HOME=$C/cargo OMARCHY_BUILD_JOBS="${OMARCHY_BUILD_JOBS:-}" "$@"
 }
 if [ -n "${SRC_SHA:-}${PKGREL:-}" ]; then
   step "checksums"
   as_build updpkgsums
 fi
 echo "toolchain: $(gcc --version | head -1); $(pacman -Q rustup rust-bindgen pahole binutils | tr '\n' ' ')"
+echo "jobs: OMARCHY_BUILD_JOBS=${OMARCHY_BUILD_JOBS:-(unset: the recipe's default)}"
 
 step "build ($(nproc) cpus)"
 start=$(date +%s)

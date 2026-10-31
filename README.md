@@ -721,6 +721,10 @@ directory's path leaks in: ELF build-ids, the source paths Rust drivers embed fo
 (`/cache/work/b/...` here), and the build timestamp in `vmlinuz`. A cold build takes 8 to 12
 minutes on a base M5.
 
+Recipes take their parallelism from `OMARCHY_BUILD_JOBS` (`make -j"${OMARCHY_BUILD_JOBS:-10}"`). lab-builder gives package builds
+`--pkg-jobs` (default: its `--cpus`), and `builder/pkg/pkgbuild` passes it through to makepkg past sudo. An image built before this
+ignores it: rebuild the image, under a new tag if another lab-builder still uses the old one.
+
 The 30+ GB work tree is deleted after every build. The volume keeps downloaded sources (the newest
 six) and the Rust toolchains. `lab-builder` takes package builds only when it has
 `--pkg-image` (the default, `maclab-pkgbuild:1`). An older builder only ever gets kernel builds.
