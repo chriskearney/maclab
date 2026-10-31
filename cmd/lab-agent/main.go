@@ -22,9 +22,12 @@ import (
 
 const usage = `lab-agent: the Mac side of the test lab
 
-  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin|--stay-awake] [--volatile-journal]
+  sudo lab-agent setup --server https://labd --token-stdin [--gui-user you --autologin|--stay-awake] [--volatile-journal]
+        [--ca-file <pem>] [--allow-plain-http] [--accept-terms <sha256>]
         [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
                                   (a Volunteer's Mac refuses --autologin and --stay-awake)
+  sudo lab-agent move --server <labd's new URL> [--ca-file <pem>] [--allow-plain-http] [--no-check]
+                                  point this enrolled Mac at labd's new address, and change nothing else
   sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, its Availability window,
                                   Access level, Installed-run eligibility and latest Audit log entries
   sudo lab-agent window show|add|remove [<days> <HH:MM-HH:MM>]
@@ -68,7 +71,7 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "setup":
-		server := fs.String("server", "", "labd URL, e.g. https://labd.example.com/maclab; without --token, moves an enrolled Mac to labd's new URL, keeping its enrollment")
+		server := fs.String("server", "", "labd URL, e.g. https://maclab.example.com")
 		token := fs.String("token", "", "one-time enrollment token from `lab enroll` (shows in the process list and sudo's journal: prefer --token-stdin)")
 		tokenStdin := fs.Bool("token-stdin", false, "read the one-time enrollment token from the first line of stdin")
 		acceptTerms := fs.String("accept-terms", "", "accept labd's participation terms without a terminal: the sha256 of the terms you read (GET <labd>/api/join/terms)")
@@ -108,6 +111,22 @@ func main() {
 		}
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, StayAwake: *stay, VolatileJournal: *volatile,
 			TailscaleAuthKey: key, TailscaleHostname: *tsHost, CAFile: *caFile, AllowPlainHTTP: *plain, AcceptTerms: *acceptTerms,
+			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
+	case "move":
+		server := fs.String("server", "", "labd's new URL, e.g. https://maclab.example.com")
+		caFile := fs.String("ca-file", "", "PEM file of CA certificates for the new labd's https certificate, when the system doesn't trust it")
+		plain := fs.Bool("allow-plain-http", false, "allow an http:// labd on another machine: the device secret then crosses the network unencrypted")
+		noCheck := fs.Bool("no-check", false, "don't ask the new labd whether it knows this Mac (a move staged before it answers)")
+		fs.Parse(os.Args[2:])
+		if *server == "" {
+			err = fmt.Errorf("usage: sudo lab-agent move --server <labd's new URL> [--ca-file <pem>] [--allow-plain-http] [--no-check]")
+			break
+		}
+		if os.Geteuid() != 0 {
+			err = fmt.Errorf("move must run as root")
+			break
+		}
+		err = agent.Move(ctx, agent.MoveOptions{Server: *server, CAFile: *caFile, AllowPlainHTTP: *plain, NoCheck: *noCheck,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "uninstall":
 		dry := fs.Bool("dry-run", false, "print each action without taking it")

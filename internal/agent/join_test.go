@@ -145,23 +145,17 @@ func TestReadTokenTakesTheFirstLine(t *testing.T) {
 	}
 }
 
-// --server without --token moves the Mac to labd's new URL and records the
-// CA and plain-http choice; its enrollment, identity and secret stay.
-func TestApplyServerMovesTheMacKeepingItsEnrollment(t *testing.T) {
-	no := true
-	cfg := &Config{Server: "http://10.1.1.55:7770", DeviceID: "d-1", Name: "m3pro", Secret: "dev_secret",
-		Enrollment: api.AgentEnrollment{Enrollment: api.Enrollment{Kind: api.KindLabOwned}}, AllowPlainHTTP: &no}
+// applyServer records the CA and the plain-http choice, nothing else.
+func TestApplyServerRecordsOnlyTheTransportChoice(t *testing.T) {
+	cfg := &Config{Server: "https://maclab.example.com", DeviceID: "d-1", Name: "m3pro", Secret: "dev_secret",
+		Enrollment: api.AgentEnrollment{Enrollment: api.Enrollment{Kind: api.KindLabOwned}}}
 	before := *cfg
-	moved := applyServer(cfg, true, "https://chonkbase.net/maclab", []byte("PEM"), false)
-	if moved != "http://10.1.1.55:7770" || cfg.Server != "https://chonkbase.net/maclab" || cfg.ServerCA != "PEM" || cfg.AllowPlainHTTP == nil || *cfg.AllowPlainHTTP {
-		t.Fatalf("after the move: %+v", cfg)
+	applyServer(cfg, []byte("PEM"), false)
+	if cfg.Server != before.Server || cfg.ServerCA != "PEM" || cfg.AllowPlainHTTP == nil || *cfg.AllowPlainHTTP {
+		t.Fatalf("after: %+v", cfg)
 	}
 	if cfg.DeviceID != before.DeviceID || cfg.Secret != before.Secret || cfg.Name != before.Name || cfg.Enrollment != before.Enrollment {
-		t.Fatalf("the move changed the enrollment: %+v", cfg)
-	}
-	// With a token, setup enrolled afresh: the server stays the one enrolled with.
-	if moved := applyServer(cfg, false, "https://other.example", nil, false); moved != "" || cfg.Server != "https://chonkbase.net/maclab" {
-		t.Fatalf("with a token: %q %+v", moved, cfg)
+		t.Fatalf("the enrollment changed: %+v", cfg)
 	}
 }
 

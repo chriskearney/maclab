@@ -39,8 +39,8 @@ that means before you accept.
 6. Trust. Join only a lab whose Maintainers you trust with this machine and
    what is on it.
 
-This describes how the lab works and is recorded with your acceptance. It is
-not a legal agreement.
+This describes how the lab works. Your acceptance is recorded with the
+sha256 of this text.
 `
 
 // terms is the text a Mac's owner accepts, and its sha256.

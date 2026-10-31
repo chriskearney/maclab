@@ -966,8 +966,11 @@ proxy settings.
   from the environment are not followed. Plain `http://` reaches loopback only
   unless allowed on purpose (`--allow-plain-http`, `MACLAB_ALLOW_PLAIN_HTTP=1`).
   An agent.json from before this keeps its plain http with a warning; the next
-  `setup` records the choice. `sudo lab-agent setup --server <new URL>` moves an
-  enrolled Mac to labd's new address, keeping its enrollment.
+  `setup` records the choice. When labd moves, `sudo lab-agent move --server
+  <new URL>` points an enrolled Mac at it: it asks the new labd, with the Mac's
+  own secret, whether it knows the Mac, rewrites only labd's address, CA and
+  plain-http choice in agent.json, and restarts lab-agent; nothing else on the
+  Mac changes. (`setup` refuses to move an enrolled Mac.)
 - **Macs fetch only what their job needs:** a Mac downloads an artifact only
   if a command for its running job named it, until that job ends, or if a
   Maintainer granted it explicitly for a while

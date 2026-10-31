@@ -88,6 +88,9 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	l := &Linux{WorkDir: workDir, GUIUser: o.GUIUser}
 
 	cfg, _ := LoadConfig(ConfigPath)
+	if err := refuseMoveInSetup(cfg, o.Token, o.Server); err != nil {
+		return err
+	}
 	// How this Mac reaches labd, settled before anything is sent to it.
 	server := o.Server
 	if server == "" && cfg != nil {
@@ -193,9 +196,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if cfg == nil {
 		return fmt.Errorf("not enrolled: pass --server and --token")
 	}
-	if moved := applyServer(cfg, o.Token == "", o.Server, caPEM, o.AllowPlainHTTP); moved != "" {
-		say("labd moved: %s -> %s; this Mac keeps its enrollment as %s", moved, cfg.Server, cfg.Name)
-	}
+	applyServer(cfg, caPEM, o.AllowPlainHTTP)
 	if cfg.Enrollment.IsVolunteer() {
 		if err := refuseOnVolunteer(o.Autologin, o.StayAwake); err != nil {
 			return err
@@ -704,15 +705,19 @@ func keepAwake(user string) error {
 }
 
 // applyServer records how the Mac reaches labd in cfg: the CA it trusts and
-// whether plain http is allowed, always written. With enrolled (no token),
-// a server other than cfg's moves the Mac to labd's new URL, keeping its
-// enrollment, identity and secret; the old URL is returned. Nothing else in
-// cfg changes.
-func applyServer(cfg *Config, enrolled bool, server string, caPEM []byte, allowPlain bool) (moved string) {
-	if enrolled && server != "" && strings.TrimRight(server, "/") != strings.TrimRight(cfg.Server, "/") {
-		moved, cfg.Server = cfg.Server, server
-	}
+// whether plain http is allowed, always written. Nothing else in cfg changes;
+// moving to another labd is lab-agent move's (see move.go).
+func applyServer(cfg *Config, caPEM []byte, allowPlain bool) {
 	cfg.ServerCA = string(caPEM)
 	cfg.AllowPlainHTTP = &allowPlain
-	return moved
+}
+
+// refuseMoveInSetup is why setup won't take server for an enrolled Mac
+// without a token, or nil: moving to labd's new URL is lab-agent move's,
+// since setup would also redo the bootloader, known-good kernel and the rest.
+func refuseMoveInSetup(cfg *Config, token, server string) error {
+	if cfg == nil || token != "" || server == "" || strings.TrimRight(server, "/") == strings.TrimRight(cfg.Server, "/") {
+		return nil
+	}
+	return fmt.Errorf("this Mac is enrolled with labd at %s: to move it to %s, run `sudo lab-agent move --server %s` (it changes only labd's address). Nothing was changed", cfg.Server, server, server)
 }
