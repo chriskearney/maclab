@@ -302,7 +302,6 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := cfg.Save(ConfigPath); err != nil {
 		return err
 	}
-	activationDone(l.WorkDir)
 	if err := os.Remove(filepath.Join(l.WorkDir, leftFile)); err != nil && !os.IsNotExist(err) { // enrolling again after leaving
 		return err
 	}
@@ -348,6 +347,10 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if len(w) > 0 {
 		say("preflight warnings:\n  - %s", strings.Join(w, "\n  - "))
 	}
+	// Only now is the activation key no longer needed: a setup that stopped
+	// anywhere before here can run again with the same token and enroll with
+	// the same key, until lab-agent's first check-in uses the token up.
+	activationDone(l.WorkDir)
 	return nil
 }
 

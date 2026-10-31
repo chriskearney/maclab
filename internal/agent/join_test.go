@@ -2,6 +2,10 @@ package agent
 
 import (
 	"bytes"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -258,5 +262,57 @@ func TestTailscaleJoinWaitsForAcceptedTerms(t *testing.T) {
 	}
 	if len(said) != 0 {
 		t.Errorf("setup did something first: %q", said)
+	}
+}
+
+// Setup forgets the activation key only once everything has succeeded: a
+// setup that fails anywhere before that (writing units, starting lab-agent)
+// leaves the key, so running the same one-liner again enrolls with it, which
+// labd takes as the same activation until the Mac's first check-in. Checked
+// in setup's source, since setup itself changes the Mac: the only call to
+// activationDone is the last statement before Setup's final return.
+func TestSetupKeepsTheActivationKeyUntilItSucceeds(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "setup.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body []ast.Stmt
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "Setup" {
+			body = fn.Body.List
+		}
+	}
+	if len(body) < 2 {
+		t.Fatal("no Setup")
+	}
+	calls := 0
+	ast.Inspect(f, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if id, ok := c.Fun.(*ast.Ident); ok && id.Name == "activationDone" {
+				calls++
+			}
+		}
+		return true
+	})
+	isCall := func(s ast.Stmt) bool {
+		e, ok := s.(*ast.ExprStmt)
+		if !ok {
+			return false
+		}
+		c, ok := e.X.(*ast.CallExpr)
+		id, ok2 := c.Fun.(*ast.Ident)
+		return ok && ok2 && id.Name == "activationDone"
+	}
+	ret, ok := body[len(body)-1].(*ast.ReturnStmt)
+	if calls != 1 || !isCall(body[len(body)-2]) || !ok || len(ret.Results) != 1 || fmt.Sprint(ret.Results[0]) != "nil" {
+		t.Errorf("activationDone is called %d time(s), and not only as the step before Setup's final return nil", calls)
+	}
+	// A run that failed before that point leaves the key; the next run of the
+	// same one-liner finds it.
+	dir := t.TempDir()
+	k1, _ := activationKey(dir, "enr_x")
+	if k2, _ := activationKey(dir, "enr_x"); k2 != k1 {
+		t.Error("the key of a failed run was not kept")
 	}
 }

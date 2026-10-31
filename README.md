@@ -283,9 +283,11 @@ transfer. lab-agent's own request timeouts are `http_timeout_sec` and
 An enrollment token activates one Mac, once. The first enrollment with it uses
 it up for that Mac's activation key, which `setup` keeps until it has finished:
 a `setup` that stopped half way can run again on the same Mac with the same
-token until the Mac first checks in, while labd keeps running. Another Mac
-holding a copy of the token gets nothing. After a labd restart, or once the
-token has expired, `lab forget <name>` and make a new one. `lab enroll <name>
+token until the Mac first checks in, while labd keeps running. Once lab-agent
+has started and checked in (which uses the token up), finish with `sudo
+lab-agent setup` and no token. Another Mac holding a copy of the token gets
+nothing. After a labd restart, or once the token has expired, `lab forget
+<name>` and make a new one. `lab enroll <name>
 --revoke` withdraws a token.
 
 On the Mac, `lab enroll`'s one-liner (also in the web UI) downloads lab-agent,
