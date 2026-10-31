@@ -149,6 +149,8 @@ func TestPlainHTTPReachesOnlyLoopbackUnlessAllowed(t *testing.T) {
 		{"http://10.1.1.55:7770/api/devices", true, true},
 		{"https://lab.example.com/api/devices", false, true},
 		{"ftp://lab.example.com/", true, false},
+		{"https://user:pass@lab.example.com/maclab", false, false},
+		{"http://user@127.0.0.1:7770/", false, false},
 	} {
 		base := &countingRT{}
 		g := &guard{base: base, allowPlain: c.allow}
@@ -157,7 +159,7 @@ func TestPlainHTTPReachesOnlyLoopbackUnlessAllowed(t *testing.T) {
 		if (err == nil) != c.ok || (base.n.Load() == 1) != c.ok {
 			t.Errorf("%s allow=%v: err %v, sent %d, want ok=%v", c.url, c.allow, err, base.n.Load(), c.ok)
 		}
-		if !c.ok && strings.HasPrefix(c.url, "http:") && !errors.Is(err, ErrPlainHTTP) {
+		if !c.ok && strings.HasPrefix(c.url, "http:") && !strings.Contains(c.url, "@") && !errors.Is(err, ErrPlainHTTP) {
 			t.Errorf("%s: %v, want ErrPlainHTTP", c.url, err)
 		}
 	}
@@ -194,5 +196,25 @@ func writeFile(t *testing.T, p, s string) {
 	t.Helper()
 	if err := os.WriteFile(p, []byte(s), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Requests go straight to labd, whatever the environment says about proxies.
+func TestEnvironmentProxiesAreNotUsed(t *testing.T) {
+	var viaProxy atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { viaProxy.Add(1) }))
+	defer proxy.Close()
+	labd := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer labd.Close()
+	t.Setenv("HTTP_PROXY", proxy.URL)
+	t.Setenv("http_proxy", proxy.URL)
+	t.Setenv("HTTPS_PROXY", proxy.URL)
+	t.Setenv("NO_PROXY", "")
+	c, _ := Policy{AllowPlainHTTP: true}.Client(5 * time.Second)
+	if _, err := get(t, c, labd.URL); err != nil {
+		t.Fatal(err)
+	}
+	if n := viaProxy.Load(); n != 0 {
+		t.Errorf("%d requests went through the environment's proxy", n)
 	}
 }

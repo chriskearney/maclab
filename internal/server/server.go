@@ -525,6 +525,9 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
+	// healthz answers that labd is up, to anyone: a Kubernetes probe. It
+	// says nothing else.
+	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.maintainer(s.hRecoveryMode))
 	m.HandleFunc("GET /api/recovery", s.viewer(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})

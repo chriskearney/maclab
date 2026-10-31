@@ -333,6 +333,11 @@ func (r *jobRun) canceledAfter(outcome, summary string) (string, string) {
 func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, r.s.now()) }
 
 func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
+	// The Mac's authority over the job ends before anyone can see the job
+	// done: no more fetching its artifacts or adding its files.
+	if r.v != nil {
+		r.v.endJobLocked(r.j.ID)
+	}
 	r.s.updateJob(r.j, func(j *api.Job) {
 		j.State, j.Outcome, j.Summary = api.JobDone, outcome, summary
 		if j.Result.Mesa != nil && outcome != api.OutcomePass {

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"path"
 	"regexp"
 	"strings"
 )
@@ -176,12 +177,15 @@ func (s *Server) edge(h http.Handler) http.Handler {
 		}
 		if base != "" {
 			rest, found := strings.CutPrefix(r.URL.Path, base)
-			if !found || (rest != "" && rest[0] != '/') {
+			// A path the router would clean (//, /./, /../) gets 404, not
+			// its redirect: that would name a path outside the prefix.
+			if !found || (rest != "" && rest[0] != '/') || (rest != "" && path.Clean(rest) != strings.TrimSuffix(rest, "/") && path.Clean(rest) != rest) {
 				hdr.Set("Content-Security-Policy", "sandbox; default-src 'none'")
 				http.NotFound(w, r)
 				return
 			}
 			r = stripPrefix(r, base, rest)
+			w = &prefixedRedirects{ResponseWriter: w, base: base}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
 			hdr.Set("Content-Security-Policy", "sandbox; default-src 'none'; frame-ancestors 'none'")
@@ -193,6 +197,34 @@ func (s *Server) edge(h http.Handler) http.Handler {
 		}
 		h.ServeHTTP(w, r)
 	})
+}
+
+// prefixedRedirects puts labd's prefix back in front of the path a redirect
+// names: the router and file server below it know only the stripped path,
+// and a redirect to /ui/ would otherwise leave labd for its neighbours.
+type prefixedRedirects struct {
+	http.ResponseWriter
+	base string
+}
+
+func (p *prefixedRedirects) WriteHeader(code int) {
+	if code >= 300 && code < 400 {
+		if loc := p.Header().Get("Location"); strings.HasPrefix(loc, "/") && !strings.HasPrefix(loc, "//") {
+			p.Header().Set("Location", p.base+loc)
+		}
+	}
+	p.ResponseWriter.WriteHeader(code)
+}
+
+// Unwrap lets http.ResponseController reach the writer below (flushing a
+// stream, its deadlines).
+func (p *prefixedRedirects) Unwrap() http.ResponseWriter { return p.ResponseWriter }
+
+// Flush flushes, for the handlers that ask the writer itself.
+func (p *prefixedRedirects) Flush() {
+	if f, ok := p.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // stripPrefix is r with base taken off its path once; rest is what follows

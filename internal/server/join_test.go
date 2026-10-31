@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -242,8 +243,8 @@ func TestJoinCommandKeepsTheTokenOutOfURLsAndLogs(t *testing.T) {
 	cmd, tok := t1.JoinCommand, t1.Token
 	sum := j.s.agentSHA256()
 	for _, want := range []string{
-		"T='" + tok + "'", "U='https://chonkbase.net/maclab'", "--proto '=https' --tlsv1.2",
-		`-H "Authorization: Bearer $T"`, `"$U/api/join/lab-agent"`, "echo '" + sum + "  '",
+		" T='" + tok + "'", "U='https://chonkbase.net/maclab'", "--proto '=https' --tlsv1.2",
+		`printf 'Authorization: Bearer %s\n' "$T" | curl`, "-H @-", `"$U/api/join/lab-agent"`, "echo '" + sum + "  '",
 		"sha256sum -c --quiet", `printf '%s\n' "$T" | sudo "$D/lab-agent" setup --server "$U" --token-stdin`,
 	} {
 		if !strings.Contains(cmd, want) {
@@ -293,5 +294,67 @@ func TestJoinCommandForPlainHTTPAndUnsafeURLs(t *testing.T) {
 	}
 	if cmd := s.joinCommand(httptest.NewRequest("POST", "http://10.1.1.55:7770/", nil), "enr_x';id;'"); cmd != "" {
 		t.Errorf("a one-liner for an unsafe token: %s", cmd)
+	}
+}
+
+// The one-liner itself, run by bash with stand-ins for curl and sudo that
+// record what they were given: the token reaches both on stdin, and no
+// process's arguments, while the download is checked against its sha256.
+func TestJoinCommandRunsWithTheTokenInNoArguments(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("no bash")
+	}
+	for _, tool := range []string{"mktemp", "sha256sum", "chmod", "cat"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip("no " + tool)
+		}
+	}
+	j := newJoinLab(t)
+	t1 := j.invite("argv")
+	bin := t.TempDir()
+	rec := t.TempDir()
+	agent, _ := os.ReadFile(j.s.cfg.AgentBinary)
+	os.WriteFile(filepath.Join(rec, "agent"), agent, 0o600)
+	// curl: record argv and stdin, write the agent where -o says.
+	os.WriteFile(filepath.Join(bin, "curl"), []byte(`#!/bin/bash
+printf '%s\n' "$@" > "$REC/curl.argv"
+cat > "$REC/curl.stdin"
+while [ $# -gt 0 ]; do if [ "$1" = -o ]; then cp "$REC/agent" "$2"; fi; shift; done
+`), 0o755)
+	os.WriteFile(filepath.Join(bin, "sudo"), []byte(`#!/bin/bash
+printf '%s\n' "$@" > "$REC/sudo.argv"
+cat > "$REC/sudo.stdin"
+`), 0o755)
+	path := bin
+	for _, tool := range []string{"mktemp", "sha256sum", "chmod", "cat", "cp"} {
+		p, _ := exec.LookPath(tool)
+		path += ":" + filepath.Dir(p)
+	}
+	cmd := exec.Command(bash, "-c", t1.JoinCommand)
+	cmd.Env = []string{"PATH=" + path, "REC=" + rec, "USER=owner", "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("the one-liner: %v\n%s", err, out)
+	}
+	read := func(f string) string { b, _ := os.ReadFile(filepath.Join(rec, f)); return string(b) }
+	if strings.Contains(read("curl.argv"), t1.Token) || strings.Contains(read("sudo.argv"), t1.Token) {
+		t.Errorf("the token is in a command's arguments:\ncurl %q\nsudo %q", read("curl.argv"), read("sudo.argv"))
+	}
+	if read("curl.stdin") != "Authorization: Bearer "+t1.Token+"\n" || read("sudo.stdin") != t1.Token+"\n" {
+		t.Errorf("stdin: curl %q, sudo %q", read("curl.stdin"), read("sudo.stdin"))
+	}
+	if !strings.Contains(read("curl.argv"), "https://chonkbase.net/maclab/api/join/lab-agent") || !strings.Contains(read("sudo.argv"), "--token-stdin") {
+		t.Errorf("curl %q sudo %q", read("curl.argv"), read("sudo.argv"))
+	}
+	// A download that isn't labd's lab-agent never runs.
+	os.WriteFile(filepath.Join(rec, "agent"), []byte("#!/bin/sh\necho pwned\n"), 0o600)
+	os.Remove(filepath.Join(rec, "sudo.argv"))
+	cmd = exec.Command(bash, "-c", t1.JoinCommand)
+	cmd.Env = []string{"PATH=" + path, "REC=" + rec, "USER=owner", "HOME=" + t.TempDir(), "TMPDIR=" + t.TempDir()}
+	if err := cmd.Run(); err == nil {
+		t.Error("the one-liner went on with a wrong download")
+	}
+	if _, err := os.Stat(filepath.Join(rec, "sudo.argv")); err == nil {
+		t.Error("sudo ran with a wrong download")
 	}
 }

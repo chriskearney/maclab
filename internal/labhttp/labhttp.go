@@ -11,6 +11,9 @@
 //     show to the network.
 //   - Redirects are never followed. labd never redirects an API request, and
 //     a redirect would carry the token to wherever it points.
+//   - No proxy from the environment (HTTP_PROXY and the like) is used, and a
+//     URL may not carry credentials of its own: requests go straight to the
+//     labd URL given, with the token in the Authorization header only.
 package labhttp
 
 import (
@@ -56,6 +59,7 @@ func (p Policy) Transport() (http.RoundTripper, error) {
 	t := http.DefaultTransport.(*http.Transport).Clone()
 	t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots}
 	t.ForceAttemptHTTP2 = true
+	t.Proxy = nil
 	return &guard{base: t, allowPlain: p.AllowPlainHTTP}, nil
 }
 
@@ -97,6 +101,9 @@ func (g *guard) RoundTrip(r *http.Request) (*http.Response, error) {
 // CheckURL is why a client won't send a request to u, or nil: only http and
 // https, and http only to loopback unless allowPlain.
 func CheckURL(u *url.URL, allowPlain bool) error {
+	if u.User != nil {
+		return fmt.Errorf("labd URL %s carries credentials: give the token separately", u.Redacted())
+	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
 		return nil

@@ -820,7 +820,7 @@ function enrollForm() {
       // labd writes the one-liner (it knows its public URL and its lab-agent's
       // sha256); without a lab-agent to hand out, the Mac gets one copied over.
       const base = new URL('.', document.baseURI).href.replace(/\/$/, '');
-      const cmd = t.join_command || `sudo ./lab-agent setup --server ${base} --token ${t.token} --gui-user $USER`;
+      const cmd = t.join_command || `printf '%s\\n' '${t.token}' | sudo ./lab-agent setup --server ${base} --token-stdin --gui-user "$USER"`;
       const where = t.join_command ? `On ${esc(name)}, in a terminal: it shows the lab's terms and joins once its owner types yes` : `On ${esc(name)}, with lab-agent copied over`;
       $('#en-out').innerHTML = `<div class="lbl" style="margin-bottom:6px">${where}</div>
         <pre class="term plain" style="white-space:pre-wrap;word-break:break-all;border-radius:6px;border:1px solid var(--line)"><span class="l">${esc(cmd)}</span></pre>

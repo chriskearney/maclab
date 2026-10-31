@@ -188,7 +188,7 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if t.JoinCommand != "" {
 			fmt.Printf("The Mac's owner runs this in a terminal on the Mac; it shows the lab's terms, and joins once they type yes:\n\n  %s\n\n", t.JoinCommand)
 		} else {
-			fmt.Printf("labd has no lab-agent to hand out: copy lab-agent to the Mac and run\n\n  sudo ./lab-agent setup --server %s --token %s [--gui-user <you>]\n\n", c.URL, t.Token)
+			fmt.Printf("labd has no lab-agent to hand out: copy lab-agent to the Mac and run\n\n  printf '%%s\\n' '%s' | sudo ./lab-agent setup --server %s --token-stdin --gui-user \"$USER\"\n\n", t.Token, c.URL)
 		}
 		fmt.Printf("Revoke it unused: lab enroll %s --revoke. Then: lab baseline %s\n", pos[0], pos[0])
 		return nil

@@ -111,8 +111,11 @@ func (s *Server) joinCommand(r *http.Request, token string) string {
 	if !strings.HasPrefix(base, "https://") {
 		curl, plain = "curl -fsS", " --allow-plain-http"
 	}
-	return "T='" + token + "' U='" + base + "' D=\"$(mktemp -d)\" && " +
-		curl + " -H \"Authorization: Bearer $T\" -o \"$D/lab-agent\" \"$U/api/join/lab-agent\" && " +
+	// The token is in no process's arguments: printf is the shell's own, and
+	// curl and setup read it on stdin. The leading space keeps the line out
+	// of the shell's history where it ignores such lines.
+	return " T='" + token + "' U='" + base + "' D=\"$(mktemp -d)\" && " +
+		"printf 'Authorization: Bearer %s\\n' \"$T\" | " + curl + " -H @- -o \"$D/lab-agent\" \"$U/api/join/lab-agent\" && " +
 		"echo '" + sum + "  '\"$D/lab-agent\" | sha256sum -c --quiet && chmod +x \"$D/lab-agent\" && " +
 		"printf '%s\\n' \"$T\" | sudo \"$D/lab-agent\" setup --server \"$U\" --token-stdin --gui-user \"$USER\"" + plain
 }

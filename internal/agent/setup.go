@@ -110,11 +110,18 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	}
 	policy := labhttp.Policy{CAPEM: caPEM, AllowPlainHTTP: o.AllowPlainHTTP}
 	// Joining with a token: the owner accepts labd's participation terms
-	// before setup changes anything on the Mac. Only a Tailscale join comes
-	// first, when labd is reachable on the tailnet alone: a Maintainer's
-	// --tailscale-authkey setup of a Lab-owned Mac.
+	// before setup changes anything on the Mac. With --tailscale-authkey labd
+	// is reachable only after the join, so the terms are accepted beforehand
+	// by their sha256 (checked below), and labd's are checked against it once
+	// the join has made it reachable.
 	if o.Token != "" && o.Server == "" {
 		return fmt.Errorf("--token needs --server")
+	}
+	// labd is reachable only after the Tailscale join, so its terms can't be
+	// shown first: they must have been accepted already, by their sha256,
+	// and the join waits for that. After it, labd's terms must be those.
+	if o.Token != "" && o.TailscaleAuthKey != "" && o.AcceptTerms == "" {
+		return fmt.Errorf("with --tailscale-authkey, accept labd's participation terms first with --accept-terms <sha256> (read them at %s/api/join/terms): nothing was changed", strings.TrimRight(o.Server, "/"))
 	}
 	var terms *api.JoinTerms
 	takeTerms := func() error {

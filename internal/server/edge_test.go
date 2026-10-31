@@ -79,6 +79,8 @@ func TestPrefixIsServedExactlyOnce(t *testing.T) {
 		{"a sibling path", "/maclabx/api/devices", tok, 404},
 		{"a sibling path's UI", "/maclab-old/", fromIngress, 404},
 		{"the prefix twice", "/maclab/maclab/api/devices", tok, 404},
+		{"the probe", "/maclab/healthz", fromIngress, 200},
+		{"the probe outside the prefix", "/healthz", fromIngress, 404},
 		{"a forwarded prefix", "/other/api/devices", with(tok, "X-Forwarded-Prefix", "/other"), 404},
 		{"a forwarded prefix inside", "/maclab/api/devices", with(tok, "X-Forwarded-Prefix", "/other"), 200},
 	} {
@@ -258,5 +260,34 @@ func TestForwardedRequestsNeverGetTailnetIdentity(t *testing.T) {
 		if c := get(hd, "203.0.113.7"); c != 401 {
 			t.Errorf("relayed with %s: %d, want 401", hd, c)
 		}
+	}
+}
+
+// Nothing labd answers under its prefix points outside it: a path the router
+// would clean is refused, and a redirect it or the file server makes keeps
+// the prefix.
+func TestRedirectsStayUnderThePrefix(t *testing.T) {
+	h := edgeServer(t)
+	tok := with(fromIngress, "Authorization", "Bearer adm_secret")
+	for _, p := range []string{"/maclab//api/devices", "/maclab/api/../api/devices", "/maclab/./api/devices", "/maclab/ui/../api/devices", "/maclab/api/%2e%2e/api/devices"} {
+		if w := edgeDo(h, "GET", p, viaProxy, tok); w.Code != 404 {
+			t.Errorf("GET %s: %d %s, want 404", p, w.Code, w.Header().Get("Location"))
+		}
+	}
+	for _, p := range []string{"/maclab/ui", "/maclab/ui/index.html", "/maclab/ui/fonts"} {
+		w := edgeDo(h, "GET", p, viaProxy, tok)
+		loc := w.Header().Get("Location")
+		if w.Code < 300 || w.Code >= 400 {
+			continue
+		}
+		if strings.HasPrefix(loc, "/") && !strings.HasPrefix(loc, "/maclab/") {
+			t.Errorf("GET %s: %d to %s, outside the prefix", p, w.Code, loc)
+		}
+		if strings.Contains(loc, "://") || strings.HasPrefix(loc, "//") {
+			t.Errorf("GET %s: %d to another origin %s", p, w.Code, loc)
+		}
+	}
+	if w := edgeDo(h, "GET", "/maclab/ui", viaProxy, tok); w.Header().Get("Location") != "/maclab/ui/" {
+		t.Errorf("GET /maclab/ui: %d %q, want a redirect to /maclab/ui/", w.Code, w.Header().Get("Location"))
 	}
 }

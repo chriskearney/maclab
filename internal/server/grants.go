@@ -93,6 +93,22 @@ func artifactsIn(c api.Command) []string {
 	return slices.DeleteFunc(shas, func(sha string) bool { return !reSHA.MatchString(sha) })
 }
 
+// endJobLocked ends the Mac's authority over job: it is no longer the Mac's
+// active job, and its grants go. Despite the name it takes v.mu itself; it
+// is the lock under which the job stops being the Mac's.
+func (v *dev) endJobLocked(job string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.d.ActiveJob == job {
+		v.d.ActiveJob = ""
+	}
+	for sha, j := range v.grants {
+		if j == job {
+			delete(v.grants, sha)
+		}
+	}
+}
+
 // mayFetchLocked is whether the Mac may fetch sha now. Caller holds v.mu.
 func (v *dev) mayFetchLocked(sha string, now time.Time) bool {
 	if v.forgotten {
@@ -266,14 +282,22 @@ func (s *Server) hUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, "%v", err)
 		return
 	}
-	if !v.ownsActiveJob(j) { // the job ended, or the enrollment did, meanwhile
-		os.Remove(tmp)
-		httpErr(w, 404, "no such job for this device")
-		return
+	// The job may have ended, or the enrollment, while the body arrived: the
+	// file takes its place only if the job is still the Mac's, decided under
+	// the lock its end is.
+	v.mu.Lock()
+	ok = v.ownsActiveJobLocked(j)
+	if ok {
+		err = os.Rename(tmp, p)
 	}
-	if err := os.Rename(tmp, p); err != nil {
+	v.mu.Unlock()
+	if !ok || err != nil {
 		os.Remove(tmp)
-		httpErr(w, 500, "%v", err)
+		if !ok {
+			httpErr(w, 404, "no such job for this device")
+		} else {
+			httpErr(w, 500, "%v", err)
+		}
 		return
 	}
 	w.Write([]byte("ok"))
@@ -284,5 +308,10 @@ func (s *Server) hUpload(w http.ResponseWriter, r *http.Request) {
 func (v *dev) ownsActiveJob(j *api.Job) bool {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	return v.ownsActiveJobLocked(j)
+}
+
+// ownsActiveJobLocked is ownsActiveJob for a caller holding v.mu.
+func (v *dev) ownsActiveJobLocked(j *api.Job) bool {
 	return !v.forgotten && j.DeviceID != "" && j.DeviceID == v.d.ID && j.Spec.Device == v.d.Name && v.d.ActiveJob == j.ID
 }

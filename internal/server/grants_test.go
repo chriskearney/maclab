@@ -347,3 +347,45 @@ func (l *lab) waitJob(id string, cond func(*api.Job) bool) *api.Job {
 	l.t.Fatalf("job %s: timed out", id)
 	return nil
 }
+
+// The Mac's authority over a job ends before anyone can see the job done:
+// whoever learns it is done (the stream, a wait) finds its grants gone and
+// its files closed. An explicit grant is separate and stays until it expires.
+func TestJobAuthorityEndsBeforeTheJobIsSeenDone(t *testing.T) {
+	j := newJoinLab(t)
+	_, e := j.enroll(j.invite("ending").Token, keyA, termsSum())
+	kernel, _ := putArtifactForTest(j.s, "the job's kernel")
+	pkg, _ := putArtifactForTest(j.s, "a granted package")
+	if code, _ := j.do("POST", "/api/devices/ending/artifact-grants", "adm_secret", `{"artifacts":["`+pkg+`"]}`); code != 200 {
+		t.Fatal("grant")
+	}
+	job := &api.Job{ID: "j-ending", Spec: api.JobSpec{Device: "ending", Kernel: kernel}, DeviceID: e.DeviceID, State: api.JobTesting}
+	j.s.store.saveJob(job)
+	v := j.s.dev("ending")
+	args, _ := json.Marshal(api.StageArgs{Artifact: kernel})
+	v.mu.Lock()
+	v.d.ActiveJob = job.ID
+	v.grantLocked(api.Command{Kind: api.CmdStage, JobID: job.ID, Args: args})
+	v.mu.Unlock()
+	if code, _ := j.do("GET", "/api/agent/artifacts/"+kernel, e.Secret, ""); code != 200 {
+		t.Fatal("the running job's kernel")
+	}
+	sb := j.s.hub.subscribe("ending")
+	defer j.s.hub.unsubscribe(sb)
+	(&jobRun{s: j.s, v: v, j: job}).finish(api.OutcomePass, "done")
+	for ev := range sb.ch {
+		if ev.kind != "job" || !strings.Contains(string(ev.data), `"state":"done"`) {
+			continue
+		}
+		if code, _ := j.do("GET", "/api/agent/artifacts/"+kernel, e.Secret, ""); code != 404 {
+			t.Errorf("the job's kernel once it is seen done: %d", code)
+		}
+		if code, _ := j.do("POST", "/api/agent/upload?job=j-ending&name=late", e.Secret, "late"); code != 404 {
+			t.Errorf("an upload once the job is seen done: %d", code)
+		}
+		if code, _ := j.do("GET", "/api/agent/artifacts/"+pkg, e.Secret, ""); code != 200 {
+			t.Errorf("the explicit grant ended with the job: %d", code)
+		}
+		return
+	}
+}
