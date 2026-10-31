@@ -117,7 +117,11 @@ func Move(ctx context.Context, o MoveOptions) error {
 		return err
 	}
 	if err := replaceFile(path, b); err != nil {
-		return err
+		var nd *notDurableError
+		if errors.As(err, &nd) {
+			return fmt.Errorf("%w. lab-agent was not restarted; once that is fixed, restart it (systemctl restart lab-agent.service) or run move again", err)
+		}
+		return fmt.Errorf("agent.json was not changed: %w", err)
 	}
 	say("agent.json now names labd at %s (was %s); this Mac keeps its enrollment as %s", server, cfg.Server, cfg.Name)
 	restart := o.Restart
@@ -167,7 +171,22 @@ func knowsThisMac(ctx context.Context, server string, cfg Config, p labhttp.Poli
 	return nil
 }
 
+// notDurableError is a file replaced by its rename whose directory couldn't
+// be synced: the new file is in place, but a power cut could undo that.
+type notDurableError struct {
+	path string
+	err  error
+}
+
+func (e *notDurableError) Error() string {
+	return fmt.Sprintf("%s was replaced, but syncing its directory failed, so a power cut could undo it: %v", e.path, e.err)
+}
+
+func (e *notDurableError) Unwrap() error { return e.err }
+
 // replaceFile writes b to path in one rename, durably, keeping it private.
+// An error before the rename leaves path as it was; one after it is a
+// notDurableError: path holds b, but its directory wasn't synced.
 func replaceFile(path string, b []byte) error {
 	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
 	if err != nil {
@@ -191,9 +210,16 @@ func replaceFile(path string, b []byte) error {
 		os.Remove(tmp)
 		return err
 	}
-	if d, err := os.Open(filepath.Dir(path)); err == nil {
-		d.Sync()
-		d.Close()
+	d, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return &notDurableError{path, err}
+	}
+	err = d.Sync()
+	if cerr := d.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return &notDurableError{path, err}
 	}
 	return nil
 }

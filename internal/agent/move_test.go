@@ -252,3 +252,41 @@ func TestMoveRefusesToRunInsideLabAgent(t *testing.T) {
 		t.Errorf("it acted: config changed=%v, %d requests, %d restarts", string(b) != string(orig), f.hits.Load(), f.restarts.Load())
 	}
 }
+
+// A rename that lands but whose directory can't be synced is not reported as
+// a durable success, nor as nothing changed: move says the file was replaced
+// and may not survive a power cut, and doesn't restart lab-agent. (Here the
+// directory can be written but not opened for reading, so its sync fails.)
+func TestMoveSaysWhenTheNewConfigMayNotBeDurable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads any directory; run as a user (the sandbox runner drops capabilities)")
+	}
+	f := newMoveFixture(t)
+	if err := os.Chmod(f.dir, 0o300); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(f.dir, 0o700)
+	if d, err := os.Open(f.dir); err == nil {
+		d.Close()
+		t.Skip("this user can still open the directory; the test needs it unreadable")
+	}
+	err := Move(context.Background(), f.opts(f.srv.URL+"/maclab", f.caFile(t)))
+	if err == nil || !strings.Contains(err.Error(), "power cut") || !strings.Contains(err.Error(), "not restarted") || strings.Contains(err.Error(), "Nothing was changed") {
+		t.Fatalf("move with an unsyncable directory: %v", err)
+	}
+	if f.restarts.Load() != 0 {
+		t.Error("lab-agent was restarted")
+	}
+	os.Chmod(f.dir, 0o700)
+	var server string
+	json.Unmarshal(f.fields(t)["server"], &server)
+	if !strings.HasSuffix(server, "/maclab") {
+		t.Errorf("the replaced file: server %q", server)
+	}
+	// Config.Save says the same.
+	os.Chmod(f.dir, 0o300)
+	cfg := &Config{Server: "https://maclab.example.com", DeviceID: "d-1", Secret: "dev_s"}
+	if err := cfg.Save(f.cfg); err == nil || !strings.Contains(err.Error(), "power cut") {
+		t.Errorf("Save with an unsyncable directory: %v", err)
+	}
+}
