@@ -11,5 +11,5 @@ resources:
   - deployment.yaml
 images:
   - name: maclab
-    newName: ghcr.io/iconidentify/maclab
+    newName: ghcr.io/chriskearney/maclab
     newTag: SET-IMAGE-TAG

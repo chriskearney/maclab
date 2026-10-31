@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
 # labd, the maclab controller, as a container (docs/https.md, deploy/k8s/).
 #
-#   docker build -t ghcr.io/iconidentify/maclab:<tag> .                      (the cluster's own architecture)
-#   docker buildx build --platform linux/amd64 -t ghcr.io/iconidentify/maclab:<tag> .
+#   docker build -t ghcr.io/chriskearney/maclab:<tag> .                      (the cluster's own architecture)
+#   docker buildx build --platform linux/amd64 -t ghcr.io/chriskearney/maclab:<tag> .
 #
 # The image holds labd and, next to it, lab-agent for the Macs (linux/arm64), which labd hands out to invited Macs.
 # What labd itself runs or reads at run time (the calls it can reach; docs/https.md, "The container"):

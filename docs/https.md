@@ -89,10 +89,17 @@ They follow the cluster's existing conventions (the chonkbase and slopblender na
   token file's *path* (`log in with lab login <url> "$(cat /data/admin.token)"`), never a token.
 
 ### Before the first apply: two values to set
-1. **The image tag.** Build and push:
-   `docker buildx build --platform linux/amd64 -t ghcr.io/iconidentify/maclab:<tag> --push .` (the Dockerfile is at the repo root).
-   Then run `cd deploy/k8s/base && kustomize edit set image maclab=ghcr.io/iconidentify/maclab:<tag>`, or edit `newTag`.
-   Copy `ghcr-secret` into the `maclab` namespace the way slopblender's deploy script does.
+1. **The image, by digest.**
+   - Publish a commit on main with `gh workflow run publish.yml -f commit=<full sha>` (Actions > publish > Run workflow). It:
+     - builds that commit for linux/amd64 and runs the image smoke at both URLs;
+     - pushes a tag of that run's own, `ghcr.io/chriskearney/maclab:<full sha>-<run id>-<run attempt>`, so no run pushes over another's
+       (there's no bare-sha or moving tag);
+     - reads it back and prints `ghcr.io/chriskearney/maclab@sha256:<digest>` in the job summary.
+   - Pin that digest, not a tag:
+     `cd deploy/k8s/base && kustomize edit set image maclab=ghcr.io/chriskearney/maclab@sha256:<digest>`, or put `digest:` in place
+     of `newTag` in its `images:` entry.
+   - **Pull secret:** a public package needs none, so remove the Deployment's `imagePullSecrets`. A private one needs a pull secret named
+     `ghcr-secret` in the `maclab` namespace whose token can read `ghcr.io/chriskearney/maclab`. Check that access before you rely on it.
 2. **The trusted proxy.** `--trusted-proxy` must name the addresses the ingress-nginx controller's pods connect *from*: the
    cluster's pod network.
    - Find it with `kubectl get nodes -o jsonpath='{.items[*].spec.podCIDR}'` and `kubectl -n ingress-nginx get pods -o wide`.
