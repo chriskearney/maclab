@@ -55,7 +55,7 @@ class Base(unittest.TestCase):
 
     def test_args_match_the_prefix_contract(self):
         a = container(self.o)['args']
-        self.assertIn('--public-url=https://chonkbase.net/maclab', a)
+        self.assertIn('--public-url=https://maclab.chonkbase.net', a)
         self.assertIn('--data=/data', a)
         self.assertIn('--listen=0.0.0.0:7770', a)
         self.assertIn('--allow-plain-http', a)
@@ -63,11 +63,11 @@ class Base(unittest.TestCase):
         tp = [x for x in a if x.startswith('--trusted-proxy=')]
         self.assertEqual(len(tp), 1)
         self.assertEqual(tp[0], '--trusted-proxy=SET-INGRESS-NGINX-POD-CIDR', 'unset placeholder must stay a non-CIDR')
-        self.assertEqual(container(self.o)['readinessProbe']['httpGet']['path'], '/maclab/healthz')
-        self.assertEqual(container(self.o)['livenessProbe']['httpGet']['path'], '/maclab/healthz')
+        self.assertEqual(container(self.o)['readinessProbe']['httpGet']['path'], '/healthz')
+        self.assertEqual(container(self.o)['livenessProbe']['httpGet']['path'], '/healthz')
         for p in ('readinessProbe', 'livenessProbe'):
             self.assertEqual(container(self.o)[p]['httpGet']['httpHeaders'], [{'name': 'X-Forwarded-Proto', 'value': 'https'},
-                             {'name': 'X-Forwarded-Host', 'value': 'chonkbase.net'}], 'probe names the public origin')
+                             {'name': 'X-Forwarded-Host', 'value': 'maclab.chonkbase.net'}], 'probe names the public origin')
         self.assertEqual(container(self.o)['image'], 'ghcr.io/iconidentify/maclab:SET-IMAGE-TAG')
 
     def test_ingress_passes_the_prefix_through_and_holds_long_requests(self):
@@ -79,7 +79,9 @@ class Base(unittest.TestCase):
         self.assertEqual(ann['nginx.ingress.kubernetes.io/proxy-buffering'], 'off')
         self.assertEqual(ann['nginx.ingress.kubernetes.io/proxy-request-buffering'], 'off')
         r = i['spec']['rules'][0]
-        self.assertEqual((r['host'], r['http']['paths'][0]['path'], r['http']['paths'][0]['pathType']), ('chonkbase.net', '/maclab', 'Prefix'))
+        self.assertEqual((r['host'], r['http']['paths'][0]['path'], r['http']['paths'][0]['pathType']), ('maclab.chonkbase.net', '/', 'Prefix'))
+        self.assertEqual(self.o[('Certificate', 'maclab-tls')]['spec']['dnsNames'], ['maclab.chonkbase.net'])
+        self.assertEqual(i['spec']['tls'][0]['hosts'], ['maclab.chonkbase.net'])
         self.assertEqual(i['spec']['tls'][0]['secretName'], self.o[('Certificate', 'maclab-tls')]['spec']['secretName'])
 
     def test_network_policy_matches_the_pod(self):
@@ -100,18 +102,20 @@ class Base(unittest.TestCase):
 
 @unittest.skipUnless(Path(KUBECTL).exists(), 'kubectl (kustomize) needed')
 class Overlays(unittest.TestCase):
-    def test_dedicated_host(self):
-        o = render(K / 'dedicated-host')
+    def test_path_prefix_compatibility_layout(self):
+        o = render(K / 'path-prefix')
         r = o[('Ingress', 'maclab')]['spec']['rules'][0]
-        self.assertEqual((r['host'], r['http']['paths'][0]['path']), ('maclab.chonkbase.net', '/'))
-        self.assertEqual(o[('Certificate', 'maclab-tls')]['spec']['dnsNames'], ['maclab.chonkbase.net'])
+        self.assertEqual((r['host'], r['http']['paths'][0]['path'], r['http']['paths'][0]['pathType']), ('chonkbase.net', '/maclab', 'Prefix'))
+        self.assertEqual(o[('Certificate', 'maclab-tls')]['spec']['dnsNames'], ['chonkbase.net'])
+        self.assertEqual(o[('Ingress', 'maclab')]['spec']['tls'][0]['hosts'], ['chonkbase.net'])
         a = container(o)['args']
-        self.assertIn('--public-url=https://maclab.chonkbase.net', a)
-        self.assertNotIn('--public-url=https://chonkbase.net/maclab', a)
-        self.assertEqual(container(o)['readinessProbe']['httpGet']['path'], '/healthz')
-        self.assertEqual(container(o)['livenessProbe']['httpGet']['path'], '/healthz')
+        self.assertIn('--public-url=https://chonkbase.net/maclab', a)
+        self.assertNotIn('--public-url=https://maclab.chonkbase.net', a)
         for p in ('readinessProbe', 'livenessProbe'):
-            self.assertEqual(container(o)[p]['httpGet']['httpHeaders'][1], {'name': 'X-Forwarded-Host', 'value': 'maclab.chonkbase.net'})
+            self.assertEqual(container(o)[p]['httpGet']['path'], '/maclab/healthz')
+            self.assertEqual(container(o)[p]['httpGet']['httpHeaders'][1], {'name': 'X-Forwarded-Host', 'value': 'chonkbase.net'})
+        ann = o[('Ingress', 'maclab')]['metadata']['annotations']
+        self.assertFalse([k for k in ann if 'rewrite' in k or 'x-forwarded-prefix' in k])
 
     def test_terms_file(self):
         with tempfile.TemporaryDirectory() as d:

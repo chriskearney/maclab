@@ -4,8 +4,9 @@ labd can run as a plain HTTPS service. Maintainers use the web UI, `lab` and its
 outbound requests only: check-in long polls, reports, uploads, and artifact downloads with resume. There are no WebSockets,
 and nothing connects *to* a Mac. Tailscale still works as before, but nothing here needs it.
 
-The main deployment is a Kubernetes workload at **https://chonkbase.net/maclab**, replacing slopblender's place on that host.
-A reverse proxy or labd's own TLS work too (see [Other ways to serve HTTPS](#other-ways-to-serve-https)).
+The main deployment is a Kubernetes workload at **https://maclab.chonkbase.net**, labd's own origin on the cluster that serves
+chonkbase.net. `https://chonkbase.net/maclab` remains a supported compatibility layout. A reverse proxy or labd's own TLS work
+too (see [Other ways to serve HTTPS](#other-ways-to-serve-https)).
 
 ## labd's flags for HTTPS
 
@@ -23,34 +24,40 @@ A non-canonical path under the prefix (`//`, `/./`, `/../`) is 404 too, and any 
 `GET <prefix>/healthz` answers 200 `ok` with no credentials, for health checks. A request from a `--trusted-proxy` address must
 still name the public origin in `X-Forwarded-Proto`/`X-Forwarded-Host`, or it gets 421; the manifests' probes always send both.
 
-## Kubernetes at chonkbase.net/maclab
+## Kubernetes at maclab.chonkbase.net
 
 The manifests are in `deploy/k8s/`:
-- `base/` is the deployment at `/maclab`.
-- `dedicated-host/` puts labd on its own origin instead.
+- `base/` is the deployment at **https://maclab.chonkbase.net**, served at `/`.
+- `path-prefix/` is the compatibility layout at `https://chonkbase.net/maclab` (see [Origin and trust](#origin-and-trust)).
 - `terms/` supplies your own terms text.
 
-They follow the cluster's existing conventions (the slopblender namespace on the same LKE cluster):
+They follow the cluster's existing conventions (the chonkbase and slopblender namespaces on the same LKE cluster):
 - ingress-nginx;
-- cert-manager `letsencrypt-production` (DNS-01);
+- cert-manager's `letsencrypt-production` ClusterIssuer (DNS-01 through the Linode webhook);
 - `linode-block-storage-retain`;
 - images in `ghcr.io/iconidentify` with the `ghcr-secret` pull secret.
 
-### Origin and trust: read before choosing `/maclab`
+### DNS: straight to the ingress, no CDN proxy
+- `maclab.chonkbase.net` needs an A (and AAAA, if the ingress has one) record in the chonkbase.net zone, pointing at the
+  ingress-nginx LoadBalancer address. That is the same address `api.chonkbase.net` and `app.chonkbase.net` use; the zone is
+  on Linode DNS, as the DNS-01 issuer needs.
+- Keep it a plain DNS record. **Don't put a proxying CDN in front of it.** A synchronous `lab exec` can be silent for up to
+  about an hour (3630 s), and the event stream, console and long polls stay open. Common CDN proxies cut an idle request far
+  sooner (often after 100 s).
+- If a proxy must sit in front, its read timeout must exceed 3700 s and it must not buffer streams. Otherwise `lab exec` fails at
+  the proxy while the command keeps running on the Mac.
+- The Ingress's own timeouts (3700 s) already cover this.
 
-`/maclab` separates paths, not origins. The UI keeps the Maintainer's token in the browser's `localStorage`, and that storage
-belongs to the whole origin `https://chonkbase.net`. Any script served from **any** path of that origin can read the token,
-call labd's API with it, or frame `/maclab`.
-
-So `chonkbase.net/maclab` is right only when **every app on chonkbase.net is trusted as much as labd**. Today that includes:
-- the chonkbase frontend at `/`;
-- slopblender at `/slopblender`, until it is removed.
-
-slopblender serves other people's uploads on that origin. Its README says they are extension-allow-listed (no HTML, SVG or JS)
-and served with `nosniff` and a `sandbox` CSP. That is its own control, not labd's.
-
-If the origin can't be trusted that far, use the supported alternative, labd on its own host: `kubectl kustomize deploy/k8s/dedicated-host`
-gives `https://maclab.chonkbase.net` at `/`, with the same image and flags but no path.
+### Origin and trust
+- On `maclab.chonkbase.net`, the UI's token storage (`localStorage`) belongs to labd's origin alone. Pages on chonkbase.net and
+  its other subdomains can't read it. That is why it is the default.
+- The `path-prefix/` layout serves labd at `https://chonkbase.net/maclab`. A path is not an origin: the token then lives in the
+  storage of the whole origin `https://chonkbase.net`, and any script served from any path there can read it, call labd's API
+  with it, or frame `/maclab`.
+- So use that layout only when every app on chonkbase.net is trusted as much as labd. Today that means:
+  - the chonkbase frontend at `/`;
+  - slopblender at `/slopblender` until it is removed. It serves other people's uploads on that origin, under its own
+    allow-list, `nosniff` and `sandbox` CSP (its README, "Security notes").
 
 ### What the manifests set
 - **One writer.** SQLite (WAL mode) on a ReadWriteOnce volume means `replicas: 1` and `strategy: Recreate`. A rollout stops the
@@ -65,10 +72,12 @@ gives `https://maclab.chonkbase.net` at `/`, with the same image and flags but n
   - a read-only root filesystem, all capabilities dropped, the RuntimeDefault seccomp profile;
   - no service-account token;
   - no hostPath, and nothing from i9beef.
-- **labd's args:** `--listen=0.0.0.0:7770 --allow-plain-http --data=/data --public-url=https://chonkbase.net/maclab --trusted-proxy=<CIDR> --maintainer=chris`.
+- **labd's args:** `--listen=0.0.0.0:7770 --allow-plain-http --data=/data --public-url=https://maclab.chonkbase.net --trusted-proxy=<CIDR> --maintainer=chris`
+  (`path-prefix/` changes `--public-url` to `https://chonkbase.net/maclab`).
   Plain HTTP stays inside the cluster, from the ingress controller only; TLS ends at the Ingress.
 - **Ingress:**
-  - path `/maclab`, `Prefix`, passed through **unchanged**: no rewrite-target, no snippet;
+  - host `maclab.chonkbase.net`, path `/` (`path-prefix/`: host `chonkbase.net`, path `/maclab`), passed through **unchanged**: no
+    rewrite-target, no snippet;
   - `proxy-read-timeout`/`proxy-send-timeout` 3700 s (`lab exec` is synchronous for up to 3630 s);
   - `proxy-buffering off` (the event stream, serial console and build log are streamed);
   - `proxy-request-buffering off`, `proxy-body-size 4g`.
@@ -90,9 +99,12 @@ gives `https://maclab.chonkbase.net` at `/`, with the same image and flags but n
    - The shipped value, `SET-INGRESS-NGINX-POD-CIDR`, is deliberately not a CIDR, so labd refuses to start until it is set.
    - The NetworkPolicy keeps every other pod in that range away from labd, so trusting the range trusts only the controller.
 
-Render with `kubectl kustomize deploy/k8s/base` and check it. `deploy/k8s/test_manifests.py` runs the same checks offline.
+- **Probes:** readiness and liveness on `/healthz` (`/maclab/healthz` for `path-prefix/`). Each names the public origin in
+  `X-Forwarded-Proto`/`X-Forwarded-Host`, which labd needs if the probe's source address falls inside `--trusted-proxy`.
+
+Render with `kubectl kustomize deploy/k8s/base` (or `deploy/k8s/path-prefix`) and check it. `deploy/k8s/test_manifests.py` runs the same checks offline.
 Apply in this order:
-1. namespace, PVC, Certificate;
+1. the DNS record (above), then namespace, PVC, Certificate;
 2. wait for `certificate/maclab-tls` to be Ready;
 3. Service, NetworkPolicy, Ingress, Deployment.
 
@@ -105,7 +117,7 @@ Apply in this order:
   - It holds a one-time activation token, `enr_…`, valid for 24 h. The token travels only in an `Authorization` header, never in a URL,
     and is in no process's arguments: curl reads that header on stdin (`-H @-`), and setup reads the token on stdin too.
   - The command starts with a space, so shells that skip such lines (bash with `HISTCONTROL=ignorespace`) leave it out of history.
-  - It downloads lab-agent over https, checks its sha256, and runs `sudo lab-agent setup --server https://chonkbase.net/maclab --token-stdin`.
+  - It downloads lab-agent over https, checks its sha256, and runs `sudo lab-agent setup --server https://maclab.chonkbase.net --token-stdin`.
   - Where the UI or `lab enroll` can't make the one-liner, they show the fallback: `printf '%s\n' '<token>' | sudo ./lab-agent setup --token-stdin …`.
 - `lab-agent setup` shows the terms and needs a typed `yes` on the terminal **before it changes anything**.
   - Without a terminal it stops, unless `--accept-terms <sha256>` names the exact current terms (unattended runs by a Maintainer).
@@ -141,7 +153,7 @@ belong to lab-agent on the Macs.
   - A pod in the cloud has no route to it, so those Macs run without hard reset or serial (tier 1).
   - Keep oobd private, and don't expose it or its token to make the cloud reach it. Only a private route (a VPN to the M5's
     network) brings it back.
-- **lab-builder** polls labd outbound. It only needs `--server https://chonkbase.net/maclab`, plus `--ca-file` for a private CA.
+- **lab-builder** polls labd outbound. It only needs `--server https://maclab.chonkbase.net`, plus `--ca-file` for a private CA.
 - **The Macs** need outbound https to chonkbase.net, and **NTP** (see [The clock](#the-clock-comes-before-the-certificate)).
 - Nothing else of i9beef is needed. The desktop `--notify-cmd` hook isn't set in the pod; use `--ntfy`.
 
@@ -152,8 +164,12 @@ Move only from a stopped, consistent state. Never run the old and new labd at th
 1. **Drain.** No running or queued jobs, and no leases: `lab status`.
 2. **Point the agents first.**
    - Each Mac needs the new lab-agent binary (it understands https, `--ca-file` and the plain-http policy).
-   - Run `sudo lab-agent setup --server https://chonkbase.net/maclab` on it: through `lab exec`, or on the Mac. This keeps the Mac's
-     enrollment (its ID and secret); it only changes the URL and records the policy.
+   - Re-point it with lab-agent's **endpoint-only** reconfiguration, through `lab exec` or on the Mac. It checks the new https
+     URL (and `--ca-file`, if any), then updates only `server`, `server_ca` and `allow_plain_http` in agent.json and restarts
+     lab-agent. The Mac keeps its enrollment (ID and secret), its GUI settings and its recovery state.
+     *(The exact command is pending the frozen core.)*
+   - Don't use a full `lab-agent setup` run for this. It also redoes the bootloader, known-good, watchdog, journal and getty setup,
+     which a move of labd must not touch.
    - The agents then keep retrying until the new labd answers.
    - Check each Mac's `/etc/maclab/agent.json` afterwards: same `device_id`, new `server`, and an `allow_plain_http` key.
 3. **Stop labd on i9beef.** Run `systemctl --user disable --now labd`, then check that no labd process is left and port 7770 is closed.
@@ -167,14 +183,14 @@ Move only from a stopped, consistent state. Never run the old and new labd at th
    - Untar the archive into `/data`, then delete the one-off pod.
 6. **Start** (scale to 1).
    - Artifact grants are memory-only and start empty. That is expected: bt2 asks for a new grant each run.
-   - Check every Mac's check-in in `lab status`, then run `lab login https://chonkbase.net/maclab "<token>"` on each Maintainer machine.
+   - Check every Mac's check-in in `lab status`, then run `lab login https://maclab.chonkbase.net "<token>"` on each Maintainer machine.
 
 **Rollback**:
 1. Scale the Deployment to 0 and confirm the pod is gone.
 2. Restore data on i9beef: either copy `/data` back (to keep what happened since), or use the untouched archive from step 4.
-3. Re-point the agents to the old URL. That URL is plain HTTP to a non-loopback address, so it takes the explicit opt-in:
-   `sudo lab-agent setup --server http://<i9beef tailnet address>:7770 --allow-plain-http`. Likewise run
-   `lab login http://… "<token>" --allow-plain-http`.
+3. Re-point the agents to the old URL with the same endpoint-only reconfiguration as step 2, not a full setup. That URL is plain
+   HTTP to a non-loopback address, so it takes the explicit opt-in: `--server http://<i9beef tailnet address>:7770 --allow-plain-http`.
+   Likewise run `lab login http://… "<token>" --allow-plain-http`.
 4. Start labd on i9beef with `--allow-plain-http` on its tailnet `--listen`.
 
 Nothing falls back to plain HTTP by itself: every client or agent set up for https refuses it until told explicitly.
@@ -205,7 +221,7 @@ copy drifts:
 - `scripts/workflow/m1/controller.py`;
 - `tools/bt2/target/preflight.py`.
 
-A labd URL with a path (`https://chonkbase.net/maclab`) works everywhere: every API path is appended to it.
+A labd URL with a path (`https://chonkbase.net/maclab`, the `path-prefix/` layout) works everywhere too: every API path is appended to it.
 
 **Pinned sources.** Four Python files are pinned by sha256 elsewhere and are unchanged:
 - `scripts/boot-test/frozen-controller-ea3.py` and its identical copy in `scripts/workflow/m1/`;
@@ -233,19 +249,18 @@ explicit, journaled `grant-artifacts` step:
 **Caddy** (the simplest proxy): its defaults already pass the Host header through, have no read timeout, and flush streams and
 unknown-length responses immediately.
 ```
-chonkbase.net {
-	@maclab path /maclab /maclab/*
-	handle @maclab {
-		reverse_proxy 127.0.0.1:7770
-	}
+maclab.example.org {
+	reverse_proxy 127.0.0.1:7770
 }
 ```
-labd then runs with `--listen 127.0.0.1:7770 --public-url https://chonkbase.net/maclab --trusted-proxy 127.0.0.1/32`.
-Use `handle`, not `handle_path`: the path must reach labd unchanged.
+labd then runs with `--listen 127.0.0.1:7770 --public-url https://maclab.example.org --trusted-proxy 127.0.0.1/32`.
+
+For a path on a shared host, match exactly the prefix and use `handle`, not `handle_path`, so the path reaches labd unchanged:
+`@maclab path /maclab /maclab/*` and `handle @maclab { reverse_proxy 127.0.0.1:7770 }`, with `--public-url https://example.org/maclab`.
 
 **nginx.** Its defaults break labd, so all of this is needed:
 ```
-location /maclab {
+location / {                               # or location /maclab for a path on a shared host
 	proxy_pass http://127.0.0.1:7770;          # no URI part: the path passes through unchanged
 	proxy_http_version 1.1;
 	proxy_set_header Host $host;               # the default, $proxy_host, makes every browser change a 403

@@ -5,13 +5,16 @@ import hashlib
 import importlib.util
 import json
 import os
+import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
+sys.path.insert(0, str(HERE))   # runtime, catalog, util: also when run as a script under python3 -I (-P)
 spec = importlib.util.spec_from_file_location('fx_tls', REPO / 'tools/bt2/tests/fx_tls.py')
 fx_tls = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fx_tls)

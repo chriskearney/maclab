@@ -40,7 +40,7 @@ spec:
             - --listen=0.0.0.0:7770
             - --allow-plain-http                       # plain http inside the cluster only; TLS ends at the Ingress
             - --data=/data
-            - --public-url=https://chonkbase.net/maclab
+            - --public-url=https://maclab.chonkbase.net
             # The ingress-nginx controller's pod addresses as labd sees them. MUST be set to this cluster's real pod
             # CIDR before applying (docs/https.md, "Trusted proxy"); this placeholder is not a CIDR, so labd refuses
             # to start with it rather than trust a guess.
@@ -55,16 +55,16 @@ spec:
             # from a node address, and needs them (else 421) if the CNI sources the probe from inside --trusted-proxy
             # (Calico's node tunnel address is in the pod CIDR).
             httpGet:
-              path: /maclab/healthz
+              path: /healthz
               port: http
-              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: chonkbase.net }]
+              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: maclab.chonkbase.net }]
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
             httpGet:
-              path: /maclab/healthz
+              path: /healthz
               port: http
-              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: chonkbase.net }]
+              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: maclab.chonkbase.net }]
             initialDelaySeconds: 20
             periodSeconds: 30
             timeoutSeconds: 10

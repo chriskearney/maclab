@@ -1,6 +1,6 @@
-# chonkbase.net/maclab -> labd. The path is passed through UNCHANGED: labd serves under /maclab itself
-# (--public-url), so there is no rewrite-target or strip annotation, and X-Forwarded-Prefix is never used.
-# Prefix /maclab matches /maclab and /maclab/... but not /maclabx. The chonkbase frontend keeps "/" on this host.
+# maclab.chonkbase.net -> labd, on its own origin (docs/https.md). The path is passed through unchanged: there is no
+# rewrite-target or strip annotation, and X-Forwarded-Prefix is never used. path-prefix/ is the chonkbase.net/maclab layout.
+# DNS for this host must point straight at the ingress (DNS only, no CDN proxy): lab exec can be silent for up to ~1 h.
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -19,13 +19,13 @@ metadata:
 spec:
   ingressClassName: nginx
   tls:
-    - hosts: [chonkbase.net]
+    - hosts: [maclab.chonkbase.net]
       secretName: maclab-tls
   rules:
-    - host: chonkbase.net
+    - host: maclab.chonkbase.net
       http:
         paths:
-          - path: /maclab
+          - path: /
             pathType: Prefix
             backend:
               service:
