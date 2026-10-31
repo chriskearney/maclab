@@ -28,4 +28,13 @@ patches:
         value: --public-url=https://maclab.chonkbase.net
       - op: replace
         path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
-        value: /
+        value: /healthz
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/path
+        value: /healthz
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/httpHeaders/1/value
+        value: maclab.chonkbase.net
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/httpHeaders/1/value
+        value: maclab.chonkbase.net

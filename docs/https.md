@@ -18,6 +18,10 @@ A reverse proxy or labd's own TLS work too (see [Other ways to serve HTTPS](#oth
 | `--terms-file FILE` | The terms a Mac's owner accepts before setup. Without it, labd uses its built-in terms |
 
 `X-Forwarded-Prefix` is never read. A request outside the `--public-url` path gets 404, and so does `/maclabx` for `/maclab`.
+A non-canonical path under the prefix (`//`, `/./`, `/../`) is 404 too, and any redirect labd makes keeps the prefix.
+
+`GET <prefix>/healthz` answers 200 `ok` with no credentials, for health checks. A request from a `--trusted-proxy` address must
+still name the public origin in `X-Forwarded-Proto`/`X-Forwarded-Host`, or it gets 421; the manifests' probes always send both.
 
 ## Kubernetes at chonkbase.net/maclab
 
@@ -98,12 +102,21 @@ Apply in this order:
     and adds `--terms-file`.
   - A changed text gets a new sha256. labd refuses an enrollment that accepted any other version.
 - A Maintainer runs `lab enroll <name> --volunteer "<name>" --contact <c>`, or uses the web UI. labd answers with a **one-line join command**.
-  - It holds a one-time activation token, `enr_…`, valid for 24 h, which travels only in an `Authorization` header, never in a URL.
-  - The command downloads lab-agent over https, checks its sha256, and runs `lab-agent setup --server https://chonkbase.net/maclab --token-stdin`.
+  - It holds a one-time activation token, `enr_…`, valid for 24 h. The token travels only in an `Authorization` header, never in a URL,
+    and is in no process's arguments: curl reads that header on stdin (`-H @-`), and setup reads the token on stdin too.
+  - The command starts with a space, so shells that skip such lines (bash with `HISTCONTROL=ignorespace`) leave it out of history.
+  - It downloads lab-agent over https, checks its sha256, and runs `sudo lab-agent setup --server https://chonkbase.net/maclab --token-stdin`.
+  - Where the UI or `lab enroll` can't make the one-liner, they show the fallback: `printf '%s\n' '<token>' | sudo ./lab-agent setup --token-stdin …`.
 - `lab-agent setup` shows the terms and needs a typed `yes` on the terminal **before it changes anything**.
   - Without a terminal it stops, unless `--accept-terms <sha256>` names the exact current terms (unattended runs by a Maintainer).
-- The token is used up by the first enrollment and bound to that Mac's activation key. If setup is interrupted, re-running it on the
-  same Mac works until its first check-in; another Mac with the token gets 403.
+  - With `--tailscale-authkey` and a token, setup needs `--accept-terms <sha256>` up front, and stops before any change without it.
+    After joining the tailnet it checks that labd's terms are the ones named.
+- The token is used up by the first enrollment and bound to that Mac's activation key; another Mac with the token gets 403.
+  - If setup is interrupted, re-running it on the same Mac works until its first check-in, and only while labd keeps running: the
+    activation state is in labd's memory.
+  - After a labd restart, `lab forget <name>` and send a new invite.
+  - The Mac keeps its activation key in `/var/lib/maclab`, renamed into place. The rename is atomic, but the file isn't flushed to
+    disk first, so a power cut right after setup may lose it; then the same remedy applies.
 - `lab enroll <name> --revoke` withdraws an unused invite.
 
 ### The container
@@ -178,12 +191,13 @@ There is no hostname or private-range guessing: `.local`, `.ts.net`, single-labe
 | client | private CA | plain http to a non-loopback host |
 |---|---|---|
 | `lab`, MCP | `lab login <url> <token> --ca-file F`, or `MACLAB_CA_FILE` | `lab login … --allow-plain-http` (saved), or `MACLAB_ALLOW_PLAIN_HTTP=1` |
-| lab-agent | `setup … --ca-file F` (the PEM is kept in agent.json as `server_ca`) | `setup … --allow-plain-http`. An agent.json without the key, from an older lab-agent, keeps working over http with a warning |
+| lab-agent | `setup … --ca-file F` (the PEM is kept in agent.json as `server_ca`) | `setup … --allow-plain-http`. An agent.json without the key, from an older lab-agent, keeps plain http, with a warning, only when its own server URL is plain http to a non-loopback host |
 | lab-builder | `--ca-file F` | `--allow-plain-http` |
 | bt2, `scripts/` tools | `MACLAB_CA_FILE`, or `"ca_file"` in client.json | `MACLAB_ALLOW_PLAIN_HTTP=1`, or `"allow_plain_http": true` in client.json |
 | bt2 on the Mac (`target/preflight.py fetch`) | agent.json `server_ca` | agent.json `allow_plain_http`, by the same rule as lab-agent |
 
-The Python tools also ignore `http_proxy`/`https_proxy` and connect to labd directly.
+Every client also ignores `http_proxy`/`https_proxy` and connects to labd directly, and refuses a labd URL with credentials in it
+(`https://user:pass@…`).
 
 Their policy is one block of code, `tools/bt2/bt2/labhttp.py`. Each of these carries a byte-for-byte copy, and a test fails if any
 copy drifts:

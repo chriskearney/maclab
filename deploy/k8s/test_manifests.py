@@ -63,7 +63,11 @@ class Base(unittest.TestCase):
         tp = [x for x in a if x.startswith('--trusted-proxy=')]
         self.assertEqual(len(tp), 1)
         self.assertEqual(tp[0], '--trusted-proxy=SET-INGRESS-NGINX-POD-CIDR', 'unset placeholder must stay a non-CIDR')
-        self.assertEqual(container(self.o)['readinessProbe']['httpGet']['path'], '/maclab/')  # /api/auth 404s without --tailscale
+        self.assertEqual(container(self.o)['readinessProbe']['httpGet']['path'], '/maclab/healthz')
+        self.assertEqual(container(self.o)['livenessProbe']['httpGet']['path'], '/maclab/healthz')
+        for p in ('readinessProbe', 'livenessProbe'):
+            self.assertEqual(container(self.o)[p]['httpGet']['httpHeaders'], [{'name': 'X-Forwarded-Proto', 'value': 'https'},
+                             {'name': 'X-Forwarded-Host', 'value': 'chonkbase.net'}], 'probe names the public origin')
         self.assertEqual(container(self.o)['image'], 'ghcr.io/iconidentify/maclab:SET-IMAGE-TAG')
 
     def test_ingress_passes_the_prefix_through_and_holds_long_requests(self):
@@ -104,7 +108,10 @@ class Overlays(unittest.TestCase):
         a = container(o)['args']
         self.assertIn('--public-url=https://maclab.chonkbase.net', a)
         self.assertNotIn('--public-url=https://chonkbase.net/maclab', a)
-        self.assertEqual(container(o)['readinessProbe']['httpGet']['path'], '/')
+        self.assertEqual(container(o)['readinessProbe']['httpGet']['path'], '/healthz')
+        self.assertEqual(container(o)['livenessProbe']['httpGet']['path'], '/healthz')
+        for p in ('readinessProbe', 'livenessProbe'):
+            self.assertEqual(container(o)[p]['httpGet']['httpHeaders'][1], {'name': 'X-Forwarded-Host', 'value': 'maclab.chonkbase.net'})
 
     def test_terms_file(self):
         with tempfile.TemporaryDirectory() as d:

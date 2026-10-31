@@ -257,6 +257,14 @@ except Exception as e:
         p, w = labhttp.agent_policy({'server': 'http://100.64.0.1:7770', 'allow_plain_http': True})
         self.assertIsNone(w)
         labhttp.opener('http://100.64.0.1:7770', **p)
+        # same as lab-agent: without the key, plain http only for an agent.json whose own server is plain non-loopback
+        p, w = labhttp.agent_policy({'server': 'https://chonkbase.net/maclab'})
+        self.assertEqual((p['allow_plain_http'], w), (False, None))
+        with self.assertRaises(labhttp.TransportRefused):
+            labhttp.opener('https://chonkbase.net/maclab', **p).open('http://100.64.0.1:7770/api/agent/artifacts/x', timeout=3)
+        p, w = labhttp.agent_policy({'server': 'http://127.0.0.1:7770'})
+        self.assertEqual((p['allow_plain_http'], w), (False, None))
+        labhttp.opener('http://127.0.0.1:7770', **p)   # loopback needs no opt-in
         for bad in ({'server': 'https://x', 'allow_plain_http': 'yes'}, {'server': 'https://x', 'server_ca': 'not pem'}):
             with self.subTest(bad=bad), self.assertRaises(labhttp.TransportRefused):
                 labhttp.opener('https://x', **labhttp.agent_policy(bad)[0])

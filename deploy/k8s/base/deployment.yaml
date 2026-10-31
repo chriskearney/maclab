@@ -51,11 +51,20 @@ spec:
           ports:
             - { name: http, containerPort: 7770 }
           readinessProbe:
-            httpGet: { path: /maclab/, port: http }   # the UI under --public-url's path; /api/auth is 404 without --tailscale
+            # <prefix>/healthz: 200 "ok", no auth. The probes name the public origin in X-Forwarded-*: labd ignores those
+            # from a node address, and needs them (else 421) if the CNI sources the probe from inside --trusted-proxy
+            # (Calico's node tunnel address is in the pod CIDR).
+            httpGet:
+              path: /maclab/healthz
+              port: http
+              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: chonkbase.net }]
             periodSeconds: 10
             timeoutSeconds: 5
           livenessProbe:
-            tcpSocket: { port: http }
+            httpGet:
+              path: /maclab/healthz
+              port: http
+              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: chonkbase.net }]
             initialDelaySeconds: 20
             periodSeconds: 30
             timeoutSeconds: 10

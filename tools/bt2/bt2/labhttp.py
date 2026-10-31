@@ -95,17 +95,18 @@ def maintainer_policy(config, environ):
 
 def agent_policy(agent):
     """A Mac's choices, from /etc/maclab/agent.json, the same rule as lab-agent: "server_ca" is PEM text;
-    "allow_plain_http": true opts in, false refuses, and an agent.json without the key (written by an older lab-agent)
-    keeps plain http with a warning. Returns (policy, warning or None)."""
+    "allow_plain_http": true opts in, false refuses. An agent.json without the key (written by an older lab-agent)
+    keeps plain http, with a warning, only when its own server URL is plain http to a host other than loopback;
+    any other agent.json without the key gets no plain http. Returns (policy, warning or None)."""
     warning = None
     if 'allow_plain_http' in agent:
         if not isinstance(agent['allow_plain_http'], bool):
             raise TransportRefused('agent.json allow_plain_http must be true or false')
         allow = agent['allow_plain_http']
     else:
-        allow = True
         u = _lh_parse.urlsplit(agent.get('server') or '')
-        if u.scheme == 'http' and not _lh_loopback(u.hostname or ''):
+        allow = u.scheme == 'http' and not _lh_loopback(u.hostname or '')
+        if allow:
             warning = ('agent.json has no allow_plain_http (an older lab-agent wrote it), so plain http to %s is allowed '
                        'as before; run lab-agent setup again with --ca-file or --allow-plain-http to decide' % u.hostname)
     return {'allow_plain_http': allow, 'ca_pem': agent.get('server_ca') or None}, warning
