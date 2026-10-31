@@ -605,6 +605,46 @@ Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first buil
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
 live on `/api/stream` (`build`, `buildlog`) and `/api/builds/{id}/log?follow=1`.
 
+### Builders
+
+The controller's own `lab-builder` may use labd's `builder.token`. That token can do anything a builder can, on any build and
+any artifact, so it never leaves the controller.
+
+Any other builder is added by a Maintainer and gets a token of its own:
+
+```sh
+lab builder add m5mbp --kinds kernel -o m5mbp.token   # the token goes only into this new file (mode 0600)
+lab builder list                                       # named builders, shared-token hosts, last seen, current build
+lab builder remove m5mbp                                # its token stops working; what it was building fails
+```
+
+A named builder may only build:
+- it takes queued builds of its kinds (`kernel`, `package`);
+- for the builds it took, it reads their inputs, reports progress, uploads outputs and finishes them, naming only what it
+  uploaded for that build;
+- it reaches no Maintainer, device or job route.
+
+Removing it ends its open requests at once. Adding the same name again makes a new builder that inherits nothing. labd keeps a
+named builder's claims in memory, so a labd restart fails the builds it was running: ask for them again. **A builder's kernels boot as root on lab Macs. Add only builders whose operators you trust with that.**
+
+On the builder Mac, copy the file to a place only root can read and run, as root (a LaunchDaemon, as above):
+
+```sh
+lab-builder --server https://labd.example.com --token-file /usr/local/etc/maclab/builder.token --as-user <user>
+```
+
+- **The token:** `--token-file` refuses a file others can read. `--token` still works, but the token then shows in `ps`.
+- **What children see:** lab-builder starts the container CLI and the build VMs with no `MACLAB_` variables, so they never see
+  the token.
+- **At start:** it logs the name labd knows it by, and stops if labd refuses the token.
+- **A second lab-builder on one Mac**, for another labd, needs its own:
+  - LaunchDaemon label and binary path;
+  - token file;
+  - `--io` directory;
+  - `--volume` (and `--pkg-volume`, or `--pkg-image ''` for kernels only);
+  - `--container-prefix`, since the build VMs are named `<prefix>-<build id>`.
+  Two builders must never share a cache volume. Size `--cpus` and `--memory` so both fit.
+
 ## omarchy-m-test: hardware checks in every job
 
 On a Mac with a desktop user, every job also runs

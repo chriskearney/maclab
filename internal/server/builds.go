@@ -9,7 +9,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -41,11 +40,32 @@ type buildMgr struct {
 	builders map[string]time.Time // host -> last poll
 	cancel   map[string]bool
 	beat     map[string]time.Time // build id -> last progress
+
+	// state orders what builders do to builds (claims, reports, uploads,
+	// finishing) and removing a builder; claims (build id -> claim) are the
+	// named builders' holds, guarded by it. See builders.go.
+	state  sync.Mutex
+	claims map[string]*claim
 }
 
 func newBuildMgr(s *Server) *buildMgr {
-	return &buildMgr{s: s, changed: make(chan struct{}), builders: map[string]time.Time{}, cancel: map[string]bool{}, beat: map[string]time.Time{}}
+	return &buildMgr{s: s, changed: make(chan struct{}), builders: map[string]time.Time{}, cancel: map[string]bool{},
+		beat: map[string]time.Time{}, claims: map[string]*claim{}}
 }
+
+const time1Minute = time.Minute
+
+func splitList(s string) []string {
+	var out []string
+	for _, f := range strings.Split(s, ",") {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+func joinList(l []string) string { return strings.Join(l, ",") }
 
 func (m *buildMgr) bump() {
 	m.mu.Lock()
@@ -313,42 +333,31 @@ func (s *Server) estimate(like *api.Build) float64 {
 
 // ---- builder host API ----
 
-func (s *Server) builderAuth(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.BuilderToken == "" || subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(s.cfg.BuilderToken)) != 1 {
-			httpErr(w, 401, "bad builder token")
-			return
-		}
-		h(w, r)
-	}
-}
-
 // hBuilderPoll hands the oldest queued build to a builder, long-polling up to
 // 25s. Builders say which kinds they can run (?kinds=kernel,package); one that
-// doesn't say only gets kernel builds.
+// doesn't say only gets kernel builds. A named builder is known by its own
+// name and gets only the kinds it was given; ?host names a host that uses the
+// shared builder.token.
 func (s *Server) hBuilderPoll(w http.ResponseWriter, r *http.Request) {
+	c := builderCredOf(r)
 	host := r.URL.Query().Get("host")
-	if host == "" {
+	if !c.shared() {
+		host = c.name
+	} else if host == "" {
 		host = "builder"
+	} else if s.store.hasBuilder(host) {
+		httpErr(w, 409, "%s is a named builder; the shared builder token can't poll as it", host)
+		return
 	}
-	kinds := `json_extract(data, '$.kind') IS NULL`
-	if strings.Contains(r.URL.Query().Get("kinds"), "package") {
-		kinds = `1=1`
-	}
+	where := kindsWhere(c, r.URL.Query().Get("kinds"))
 	deadline := s.now().Add(25 * time.Second)
 	for {
-		s.builds.mu.Lock()
-		s.builds.builders[host] = s.now()
-		s.builds.mu.Unlock()
-		q, _ := s.store.builds(`state='queued' AND (` + kinds + `) ORDER BY created ASC LIMIT 1`)
-		if len(q) > 0 {
-			b := q[0]
-			b.State, b.Builder, b.Started, b.Stage = api.BuildRunning, host, s.now(), "starting"
-			b.ETA = s.estimate(b)
-			s.builds.mu.Lock()
-			s.builds.beat[b.ID] = s.now()
-			s.builds.mu.Unlock()
-			s.saveBuild(b)
+		b, err := s.claimBuild(c, host, where)
+		if errors.Is(err, errBuilderRemoved) {
+			httpErr(w, 401, "%v", err)
+			return
+		}
+		if b != nil {
 			s.log.Printf("build %s started on %s", b.ID, host)
 			a := api.BuildAssignment{Build: *b}
 			if b.Kind == api.BuildKernel {
@@ -368,14 +377,19 @@ func (s *Server) hBuilderPoll(w http.ResponseWriter, r *http.Request) {
 // hBuilderProgress takes a batch of log lines. kbuild's "@@stage x" and
 // "@@progress n total" lines update the build instead of the log.
 func (s *Server) hBuilderProgress(w http.ResponseWriter, r *http.Request) {
+	var p api.BuildProgress
+	if !decodeBody(w, r, builderReportMax, &p) {
+		return
+	}
+	s.builds.state.Lock()
+	defer s.builds.state.Unlock()
 	b, err := s.getBuild(r.PathValue("id"))
 	if err != nil {
 		httpErr(w, 404, "%v", err)
 		return
 	}
-	var p api.BuildProgress
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		httpErr(w, 400, "%v", err)
+	if err := s.ownsLocked(builderCredOf(r), b); err != nil {
+		httpErr(w, 403, "%v", err)
 		return
 	}
 	f, _ := os.OpenFile(filepath.Join(s.buildDir(b.ID), "build.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -421,6 +435,10 @@ func (s *Server) hBuilderProgress(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hBuilderArtifact(w http.ResponseWriter, r *http.Request) {
+	if c := builderCredOf(r); !c.shared() {
+		s.namedUpload(w, r, c)
+		return
+	}
 	sha, n, err := s.storeArtifact(r.Body)
 	if err != nil {
 		httpErr(w, 500, "%v", err)
@@ -430,16 +448,24 @@ func (s *Server) hBuilderArtifact(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) hBuilderDone(w http.ResponseWriter, r *http.Request) {
+	var d api.BuildResult
+	if !decodeBody(w, r, builderReportMax, &d) {
+		return
+	}
+	c := builderCredOf(r)
+	s.builds.state.Lock()
+	defer s.builds.state.Unlock()
 	b, err := s.getBuild(r.PathValue("id"))
 	if err != nil {
 		httpErr(w, 404, "%v", err)
 		return
 	}
-	var d api.BuildResult
-	if err := json.NewDecoder(r.Body).Decode(&d); err != nil {
-		httpErr(w, 400, "%v", err)
+	if err := s.ownsLocked(c, b); err != nil {
+		httpErr(w, 403, "%v", err)
 		return
 	}
+	cl := s.builds.claims[b.ID]
+	delete(s.builds.claims, b.ID)
 	b.Seconds = d.Seconds
 	b.ETA = 0
 	s.builds.mu.Lock()
@@ -470,6 +496,10 @@ func (s *Server) hBuilderDone(w http.ResponseWriter, r *http.Request) {
 		}
 		if missing || (d.Artifact == "" && len(d.Files) == 0) {
 			b.State, b.Error = api.BuildFailed, "builder reported outputs that were never uploaded"
+			break
+		}
+		if !c.shared() && !cl.uploadedAll(d) {
+			b.State, b.Error = api.BuildFailed, "builder "+c.name+" reported outputs it did not upload for this build"
 			break
 		}
 		b.State, b.Release, b.Artifact, b.Size, b.Files, b.Progress, b.Stage = api.BuildDone, d.Release, d.Artifact, size, d.Files, 1, "done"
@@ -606,28 +636,29 @@ func (s *Server) hCancelBuild(w http.ResponseWriter, r *http.Request) {
 	w.Write([]byte("canceling\n"))
 }
 
-func (s *Server) hBuilders(w http.ResponseWriter, r *http.Request) {
-	s.builds.mu.Lock()
-	out := []map[string]any{}
-	for host, t := range s.builds.builders {
-		out = append(out, map[string]any{"host": host, "last_seen": t, "alive": s.since(t) < time.Minute})
-	}
-	s.builds.mu.Unlock()
-	writeJSON(w, out)
-}
-
 // buildMonitor fails builds whose builder went silent, and on start fails
 // builds that were running when labd stopped.
 func (s *Server) buildMonitor() {
 	// A build that was running when labd stopped is usually still running on its
 	// builder, which keeps reporting to the new labd. Give it the same silence
 	// window as any build instead of failing it at once.
+	// A named builder's claim is not kept across a restart (builders.go), so
+	// what it was running fails instead.
 	running, _ := s.store.builds(`state='running'`)
+	var orphaned []*api.Build
 	s.builds.mu.Lock()
 	for _, b := range running {
+		if s.store.hasBuilder(b.Builder) {
+			orphaned = append(orphaned, b)
+			continue
+		}
 		s.builds.beat[b.ID] = s.now()
 	}
 	s.builds.mu.Unlock()
+	for _, b := range orphaned {
+		b.State, b.Error, b.ETA = api.BuildFailed, "labd restarted while builder "+b.Builder+" was running it", 0
+		s.saveBuild(b)
+	}
 	t := s.clock().NewTicker(30 * time.Second)
 	defer t.Stop()
 	for {
@@ -645,12 +676,15 @@ func (s *Server) buildMonitor() {
 			}
 		}
 		s.builds.mu.Unlock()
+		s.builds.state.Lock()
 		for _, id := range lost {
+			delete(s.builds.claims, id)
 			if b, err := s.getBuild(id); err == nil && b.State == api.BuildRunning {
 				b.State, b.Error = api.BuildFailed, "the builder stopped reporting for 10 minutes"
 				s.saveBuild(b)
 			}
 		}
+		s.builds.state.Unlock()
 	}
 }
 

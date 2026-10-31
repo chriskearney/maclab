@@ -13,11 +13,13 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"os/user"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,6 +32,7 @@ import (
 
 type builder struct {
 	server, token, host string
+	prefix              string // build VMs are named <prefix>-<build id>
 	image, volume       string
 	pkgImage, pkgVolume string // package builds (makepkg on Arch Linux ARM); empty image: kernel builds only
 	cpus, mem           string
@@ -47,8 +50,10 @@ func main() {
 	flag.StringVar(&b.server, "server", os.Getenv("MACLAB_URL"), "labd URL, e.g. https://labd.example.com/maclab")
 	caFile := flag.String("ca-file", os.Getenv("MACLAB_CA_FILE"), "PEM file of CA certificates for labd's https certificate, when the system doesn't trust it")
 	plain := flag.Bool("allow-plain-http", os.Getenv("MACLAB_ALLOW_PLAIN_HTTP") == "1", "allow an http:// labd on another machine: the builder token then crosses the network unencrypted")
-	flag.StringVar(&b.token, "token", os.Getenv("MACLAB_BUILDER_TOKEN"), "builder token (labd data dir: builder.token)")
-	flag.StringVar(&b.host, "name", strings.Split(hostname, ".")[0], "name shown in the lab")
+	flag.StringVar(&b.token, "token", "", "builder token; it shows in ps, so prefer --token-file (or MACLAB_BUILDER_TOKEN)")
+	tokenFile := flag.String("token-file", "", "file holding the builder token (from lab builder add -o, or labd's builder.token); readable by its owner only")
+	flag.StringVar(&b.host, "name", strings.Split(hostname, ".")[0], "name shown in the lab when using the shared builder.token (a named builder's name comes from labd)")
+	flag.StringVar(&b.prefix, "container-prefix", "maclab", "build VMs are named <prefix>-<build id>; give a second lab-builder on this Mac its own")
 	flag.StringVar(&b.image, "image", "maclab-kbuild:1", "builder image")
 	flag.StringVar(&b.volume, "volume", "maclab-cache", "cache volume (create with: container volume create -s 40G maclab-cache)")
 	flag.StringVar(&b.pkgImage, "pkg-image", "maclab-pkgbuild:1", "package builder image (builder/pkg); empty to take kernel builds only")
@@ -59,6 +64,15 @@ func main() {
 	flag.StringVar(&b.githubToken, "github-token-file", "", "GitHub token for cloning private github.com repos (default ~/.config/maclab/github-token of the container user)")
 	as := flag.String("as-user", "", "run container as this user, in their login session. Lets lab-builder run as a root daemon, which macOS Local Network privacy does not block")
 	flag.Parse()
+	tok, err := builderToken(b.token, *tokenFile, os.Getenv("MACLAB_BUILDER_TOKEN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	b.token = tok
+	os.Unsetenv("MACLAB_BUILDER_TOKEN") // so nothing started from here inherits it
+	if !rePrefix.MatchString(b.prefix) {
+		log.Fatalf("--container-prefix %q: letters, digits, dots, dashes and underscores, up to 32", b.prefix)
+	}
 	b.server = strings.TrimRight(b.server, "/")
 	if err := labhttp.CheckServer(b.server, *plain); err != nil {
 		log.Fatal(err)
@@ -90,12 +104,13 @@ func main() {
 		b.githubToken = filepath.Join(home, ".config", "maclab", "github-token")
 	}
 	if b.server == "" || b.token == "" {
-		log.Fatal("need --server and --token")
+		log.Fatal("need --server and a token (--token-file)")
 	}
 	b.server = strings.TrimRight(b.server, "/")
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("lab-builder %s: image %s, volume %s, %s cpus, %s", b.host, b.image, b.volume, b.cpus, b.mem)
+	b.whoami(ctx)
+	log.Printf("lab-builder %s: image %s, volume %s, %s cpus, %s, build VMs %s-*", b.host, b.image, b.volume, b.cpus, b.mem, b.prefix)
 	kinds := "kernel"
 	if b.pkgImage != "" {
 		kinds += ",package"
@@ -118,11 +133,75 @@ func main() {
 
 // container runs the container CLI, in the configured user's session if any.
 func (b *builder) container(ctx context.Context, args ...string) *exec.Cmd {
+	var cmd *exec.Cmd
 	if b.asUser == nil {
-		return exec.CommandContext(ctx, "/usr/local/bin/container", args...)
+		cmd = exec.CommandContext(ctx, "/usr/local/bin/container", args...)
+	} else {
+		full := append([]string{"asuser", b.asUser.Uid, "sudo", "-n", "-u", b.asUser.Username, "/usr/local/bin/container"}, args...)
+		cmd = exec.CommandContext(ctx, "/bin/launchctl", full...)
 	}
-	full := append([]string{"asuser", b.asUser.Uid, "sudo", "-n", "-u", b.asUser.Username, "/usr/local/bin/container"}, args...)
-	return exec.CommandContext(ctx, "/bin/launchctl", full...)
+	cmd.Env = childEnv(os.Environ())
+	return cmd
+}
+
+var rePrefix = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$`)
+
+// builderToken picks the builder token: --token-file, else --token, else
+// MACLAB_BUILDER_TOKEN. A token file must be readable by its owner only.
+func builderToken(flagTok, file, env string) (string, error) {
+	if file != "" {
+		st, err := os.Stat(file)
+		if err != nil {
+			return "", err
+		}
+		if st.Mode().Perm()&0o077 != 0 {
+			return "", fmt.Errorf("%s can be read by others than its owner (mode %o): chmod 600 it", file, st.Mode().Perm())
+		}
+		raw, err := os.ReadFile(file)
+		if err != nil {
+			return "", err
+		}
+		tok := strings.TrimSpace(string(raw))
+		if tok == "" {
+			return "", fmt.Errorf("%s holds no token", file)
+		}
+		return tok, nil
+	}
+	if flagTok != "" {
+		log.Printf("warning: a token in --token shows in ps; use --token-file")
+		return flagTok, nil
+	}
+	return strings.TrimSpace(env), nil
+}
+
+// childEnv is the environment for what lab-builder starts: its own, without
+// any MACLAB_ variable (the builder token among them).
+func childEnv(env []string) []string {
+	var out []string
+	for _, e := range env {
+		if !strings.HasPrefix(e, "MACLAB_") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// whoami asks labd who it takes this builder for, and stops if labd refuses
+// the token. A labd that can't be reached now is tried again by the poll loop.
+func (b *builder) whoami(ctx context.Context) {
+	var me api.BuilderSelf
+	code, err := b.call(ctx, "GET", "/api/builder/self", nil, &me)
+	switch {
+	case code == 401 || code == 403:
+		log.Fatalf("labd at %s refused this builder's token: %v", b.server, err)
+	case err != nil:
+		log.Printf("labd at %s: %v (polling anyway)", b.server, err)
+	case me.Shared:
+		log.Printf("labd at %s takes this builder for its own (the shared builder.token), as %s", b.server, b.host)
+	default:
+		b.host = me.Name
+		log.Printf("labd at %s knows this builder as %s (%s)", b.server, me.Name, strings.Join(me.Kinds, ","))
+	}
 }
 
 func (b *builder) chown(path string) {
@@ -184,13 +263,13 @@ func (b *builder) download(ctx context.Context, sha, dst string) error {
 	return err
 }
 
-func (b *builder) upload(ctx context.Context, path string) (string, error) {
+func (b *builder) upload(ctx context.Context, build, path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	req, _ := http.NewRequestWithContext(ctx, "POST", b.server+"/api/builder/artifacts", f)
+	req, _ := http.NewRequestWithContext(ctx, "POST", b.server+"/api/builder/artifacts?build="+url.QueryEscape(build), f)
 	req.Header.Set("Authorization", "Bearer "+b.token)
 	resp, err := labhttp.Client(b.rt, 30*time.Minute).Do(req)
 	if err != nil {
@@ -299,7 +378,8 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 			}
 		}
 	}
-	args := []string{"run", "--rm", "--name", "maclab-" + bd.ID, "--cpus", b.cpus, "--memory", b.mem,
+	vm := b.prefix + "-" + bd.ID
+	args := []string{"run", "--rm", "--name", vm, "--cpus", b.cpus, "--memory", b.mem,
 		"-v", volume + ":/cache", "-v", dir + ":/io"}
 	for _, e := range env {
 		args = append(args, "-e", e)
@@ -326,8 +406,8 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 	err := cmd.Wait()
 	pw.Close()
 	if bctx.Err() != nil {
-		b.container(context.Background(), "stop", "maclab-"+bd.ID).Run()
-		b.container(context.Background(), "delete", "--force", "maclab-"+bd.ID).Run()
+		b.container(context.Background(), "stop", vm).Run()
+		b.container(context.Background(), "delete", "--force", vm).Run()
 		result.Error = "canceled"
 		return
 	}
@@ -339,10 +419,10 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 	result.Release = strings.TrimSpace(string(rel))
 	push("@@stage upload")
 	if pkg {
-		b.uploadPackages(ctx, dir, &result, push)
+		b.uploadPackages(ctx, bd, dir, &result, push)
 		return
 	}
-	sha, err := b.upload(ctx, filepath.Join(dir, "kernel.tar.zst"))
+	sha, err := b.upload(ctx, bd.ID, filepath.Join(dir, "kernel.tar.zst"))
 	if err != nil {
 		result.Error = err.Error()
 		return
@@ -352,7 +432,7 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 
 // uploadPackages uploads everything pkgbuild left in out/. The package that
 // holds a vmlinuz becomes the build's artifact, so `lab run` can boot it.
-func (b *builder) uploadPackages(ctx context.Context, dir string, result *api.BuildResult, push func(string)) {
+func (b *builder) uploadPackages(ctx context.Context, bd api.Build, dir string, result *api.BuildResult, push func(string)) {
 	kernel, _ := os.ReadFile(filepath.Join(dir, "kernel"))
 	ents, err := os.ReadDir(filepath.Join(dir, "out"))
 	if err != nil {
@@ -369,7 +449,7 @@ func (b *builder) uploadPackages(ctx context.Context, dir string, result *api.Bu
 			result.Error = err.Error()
 			return
 		}
-		sha, err := b.upload(ctx, p)
+		sha, err := b.upload(ctx, bd.ID, p)
 		if err != nil {
 			result.Error = err.Error()
 			return
