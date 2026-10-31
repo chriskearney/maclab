@@ -29,7 +29,7 @@ import (
 	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
-const Version = "0.8.0"
+const Version = "0.9.0"
 
 type Config struct {
 	Server   string `json:"server"`
@@ -856,14 +856,13 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		// The test's budget starts once its script is in place, as its own
 		// timeout does: until then the download runs on the idle budget. A
 		// builtin downloads nothing, Script or not: Builtin wins.
+		// A script test downloads its script, then its payload files; the
+		// budget starts after the last of them, or when one fails.
 		tr := a.beginTest(testBudget(t))
 		if t.Builtin != "" || t.Script == "" {
 			a.startBudget(tr)
 		}
-		res := a.sys.RunTest(ctx, c.JobID, t, func(ctx context.Context, sha, dst string) error {
-			defer a.startBudget(tr)
-			return fetch(ctx, sha, dst)
-		}, a.quiet, dir)
+		res := a.sys.RunTest(ctx, c.JobID, t, budgetFetch(fetch, 1+len(t.Payload), func() { a.startBudget(tr) }), a.quiet, dir)
 		a.endTest(tr)
 		res.Files = a.uploadDir(ctx, c.JobID, "test-"+t.Name, dir)
 		return res, nil, nil
@@ -1289,4 +1288,17 @@ func doJSON(c *http.Client, req *http.Request, secret string, out any) error {
 func tooLarge(err error) bool {
 	var se *statusError
 	return errors.As(err, &se) && se.Code == http.StatusRequestEntityTooLarge
+}
+
+// budgetFetch calls start once the last of downloads fetches is done, or at
+// the first one that fails: the test's budget runs from there.
+func budgetFetch(fetch Fetcher, downloads int, start func()) Fetcher {
+	left := downloads
+	return func(ctx context.Context, sha, dst string) error {
+		err := fetch(ctx, sha, dst)
+		if left--; left <= 0 || err != nil {
+			start()
+		}
+		return err
+	}
 }
