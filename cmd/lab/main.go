@@ -31,6 +31,8 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab boot-test --catalog-descriptor PIN --profile ID --request FILE --review-descriptor PIN --out DIR [--compile | --execute --authorization FILE]
   lab login <labd-url> <your-maintainer-token> [--ca-file <pem>] [--allow-plain-http]
   lab maintainer add <name> | remove <name> | list   the people with their own labd token
+  lab builder add <name> [--kinds kernel[,package]] [-o FILE] | remove <name> [--generation G] | list
+                                      builder hosts with their own token (it may only build)
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
              [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one; prints the one-liner
@@ -430,6 +432,9 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 
 	case "maintainer":
 		return maintainerCmd(ctx, c, args)
+
+	case "builder":
+		return builderCmd(ctx, c, args)
 
 	case "builds":
 		l, err := c.Builds(ctx, 20)

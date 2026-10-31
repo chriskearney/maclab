@@ -190,6 +190,33 @@ func (c *Client) RemoveMaintainer(ctx context.Context, name string) error {
 	return c.do(ctx, "DELETE", "/api/maintainers/"+url.PathEscape(name), nil, nil)
 }
 
+func (c *Client) Builders(ctx context.Context) ([]api.BuilderStatus, error) {
+	var out []api.BuilderStatus
+	return out, c.do(ctx, "GET", "/api/builders", nil, &out)
+}
+
+// AddBuilder returns the new builder's token, which labd shows only this once.
+func (c *Client) AddBuilder(ctx context.Context, name string, kinds []string) (*api.NewBuilder, error) {
+	var out api.NewBuilder
+	return &out, c.do(ctx, "POST", "/api/builders", jsonBody(api.BuilderRequest{Name: name, Kinds: kinds}), &out)
+}
+
+// RemoveBuilder stops a named builder's token and fails the builds it was running.
+func (c *Client) RemoveBuilder(ctx context.Context, name string) (*api.RemovedBuilder, error) {
+	return c.RemoveBuilderGeneration(ctx, name, "")
+}
+
+// RemoveBuilderGeneration removes a named builder only while it is still the
+// generation AddBuilder returned; "" removes whatever builder has the name.
+func (c *Client) RemoveBuilderGeneration(ctx context.Context, name, generation string) (*api.RemovedBuilder, error) {
+	var out api.RemovedBuilder
+	path := "/api/builders/" + url.PathEscape(name)
+	if generation != "" {
+		path += "?generation=" + url.QueryEscape(generation)
+	}
+	return &out, c.do(ctx, "DELETE", path, nil, &out)
+}
+
 // EndEnrollment ends a Mac's enrollment: labd forgets it and revokes its device secret at once.
 func (c *Client) EndEnrollment(ctx context.Context, name string) error {
 	return c.do(ctx, "POST", "/api/devices/"+url.PathEscape(name)+"/end-enrollment", nil, nil)

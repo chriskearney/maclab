@@ -1144,6 +1144,64 @@ type NewMaintainer struct {
 	Token string `json:"token"`
 }
 
+// Builder kinds: the builds a named builder may take.
+const (
+	BuilderKernel  = "kernel"
+	BuilderPackage = "package"
+)
+
+// Builder is a named builder host, added by a Maintainer with a token of its
+// own (lab builder add).
+type Builder struct {
+	Name    string    `json:"name"`
+	Kinds   []string  `json:"kinds"`
+	Added   time.Time `json:"added"`
+	AddedBy string    `json:"added_by"`
+}
+
+type BuilderRequest struct {
+	Name  string   `json:"name"`
+	Kinds []string `json:"kinds,omitempty"` // default: kernel
+}
+
+// NewBuilder carries a new builder's token, the only time labd shows it, and
+// its generation: removing the builder with it removes only this one, never a
+// builder added under the same name since.
+type NewBuilder struct {
+	Builder
+	Token      string `json:"token"`
+	Generation string `json:"generation"`
+}
+
+// RemovedBuilder answers a builder's removal: the builds it was running,
+// which failed with it.
+type RemovedBuilder struct {
+	Removed      string   `json:"removed"`
+	FailedBuilds []string `json:"failed_builds"`
+}
+
+// BuilderSelf is who labd takes a builder's token for. Shared is the data
+// directory's builder.token, the controller's own builder.
+type BuilderSelf struct {
+	Name   string   `json:"name,omitempty"`
+	Kinds  []string `json:"kinds,omitempty"`
+	Shared bool     `json:"shared,omitempty"`
+}
+
+// BuilderStatus is one builder in GET /api/builders: a named builder, or a
+// host that polled with the shared builder.token.
+type BuilderStatus struct {
+	Host       string    `json:"host"`
+	Registered bool      `json:"registered,omitempty"`
+	Shared     bool      `json:"shared,omitempty"`
+	Kinds      []string  `json:"kinds,omitempty"`
+	Added      time.Time `json:"added,omitzero"`
+	AddedBy    string    `json:"added_by,omitempty"`
+	LastSeen   time.Time `json:"last_seen,omitzero"`
+	Alive      bool      `json:"alive"`
+	Build      string    `json:"build,omitempty"` // the build it is running
+}
+
 // EndedHeader is the header on the 401 that tells a Mac its enrollment was
 // ended by the Maintainers, not merely revoked: it holds the Maintainer's name.
 const EndedHeader = "X-Maclab-Enrollment-Ended-By"

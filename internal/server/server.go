@@ -124,6 +124,7 @@ type Server struct {
 	builds      *buildMgr
 	notifyHooks []func(Notification)
 	conns       maintainerConns
+	bconns      maintainerConns // named builders' open requests, by generation
 	serialMu    sync.Mutex
 	whoMu       sync.Mutex
 	whoCache    map[netip.Addr]whoisEntry
@@ -246,6 +247,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		return nil, err
 	}
 	for _, row := range rows {
+		unused := neverUsed(st, row.d) // as stored, before the changes below
 		d := row.d
 		for _, j := range interrupted {
 			if j.Spec.Device == d.Name && j.State != api.JobQueued && (j.Spec.RecoveryMode == api.RecoveryNetworkOnly || j.EffectiveRecoveryMode == api.RecoveryNetworkOnly) {
@@ -264,7 +266,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			d.State = api.StateOffline
 		}
 		v := newDev(s, d, row.secretHash)
-		v.dirty = true // labd may have stopped mid-job
+		v.dirty = !unused // labd may have stopped mid-job
 		s.devs[d.Name] = v
 		if l := s.screens(d.Name); len(l) > 0 {
 			v.screenAt, v.screenName = l[0].Time, l[0].Name
@@ -286,11 +288,26 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		st.saveJob(j)
 	}
 	s.builds = newBuildMgr(s)
+	s.reconcileRunningBuilds()
 	go s.monitor()
 	go s.buildMonitor()
 	go s.gcLoop()
 	go s.omtScheduler()
 	return s, nil
+}
+
+// neverUsed reports whether a stored Mac has demonstrably never been used: it
+// was New when labd stopped, with no known-good kernel and no active job, and
+// no job of any state was ever recorded under its name. After a restart labd
+// cleans up every other Mac, in case it stopped mid-job; a Mac never used has
+// nothing of the lab's to clean, and the cleanup would still rewrite its boot
+// entries. Any doubt, a failed lookup included, keeps the cleanup.
+func neverUsed(st *store, d api.Device) bool {
+	if d.Name == "" || d.State != api.StateNew || d.KnownGood != "" || d.ActiveJob != "" {
+		return false
+	}
+	jobs, err := st.jobs(d.Name, 1, false)
+	return err == nil && len(jobs) == 0
 }
 
 // OnNotify registers a hook, used by tests to observe notifications.
@@ -579,7 +596,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
 	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
-	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hBuilderFetch))
+	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hBuilderGetArtifact))
+	m.HandleFunc("GET /api/builder/self", s.builderAuth(s.hBuilderSelf))
 	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
 	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
 	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
@@ -591,6 +609,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
 	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
 	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
+	m.HandleFunc("POST /api/builders", s.maintainer(s.hAddBuilder))
+	m.HandleFunc("DELETE /api/builders/{name}", s.maintainer(s.hRemoveBuilder))
 	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
 	m.HandleFunc("GET /api/devices/{name}/audit", s.maintainer(s.hAudit))
 	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))

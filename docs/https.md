@@ -161,7 +161,8 @@ belong to lab-agent on the Macs.
   - A pod in the cloud has no route to it, so those Macs run without hard reset or serial (tier 1).
   - Keep oobd private, and don't expose it or its token to make the cloud reach it. Only a private route (a VPN to the M5's
     network) brings it back.
-- **lab-builder** polls labd outbound. It only needs `--server https://maclab.chonkbase.net`, plus `--ca-file` for a private CA.
+- **lab-builder** polls labd outbound. It needs `--server https://maclab.chonkbase.net` and `--token-file` with a token from
+  `lab builder add` (README, "Builders"), plus `--ca-file` for a private CA.
 - **The Macs** need outbound https to chonkbase.net, and **NTP** (see [The clock](#the-clock-comes-before-the-certificate)).
 - Nothing else of i9beef is needed. The desktop `--notify-cmd` hook isn't set in the pod; use `--ntfy`.
 
