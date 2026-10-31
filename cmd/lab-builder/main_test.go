@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -262,5 +263,79 @@ func TestCollect(t *testing.T) {
 				t.Error("the host marker left the host")
 			}
 		})
+	}
+}
+
+func TestPackageJobs(t *testing.T) {
+	for _, c := range []struct{ flag, cpus, want string }{
+		{"", "10", "10"}, {"", "4", "4"}, {"4", "10", "4"}, {"007", "10", "7"}, {"1024", "10", "1024"},
+	} {
+		if got, err := packageJobs(c.flag, c.cpus); err != nil || got != c.want {
+			t.Errorf("packageJobs(%q, %q) = %q, %v; want %q", c.flag, c.cpus, got, err, c.want)
+		}
+	}
+	for _, c := range []struct{ flag, cpus string }{{"0", "10"}, {"-1", "10"}, {"x", "10"}, {"1025", "10"}, {"", "x"}, {"4 5", "10"}} {
+		if got, err := packageJobs(c.flag, c.cpus); err == nil {
+			t.Errorf("packageJobs(%q, %q) = %q, want an error", c.flag, c.cpus, got)
+		}
+	}
+}
+
+// Only package builds get the job count; neither kind gets anything of lab-builder's own.
+func TestBuildEnv(t *testing.T) {
+	b := &builder{pkgJobs: "4"}
+	src := api.Source{Repo: "https://example.invalid/r", SHA: strings.Repeat("a", 40)}
+	pkg := strings.Join(b.buildEnv(api.Build{Kind: api.BuildPackage, Source: src, Pkgrel: "2"}, ""), " ")
+	if pkg != "SRC_REPO=https://example.invalid/r SRC_SHA="+src.SHA+" PKGREL=2 OMARCHY_BUILD_JOBS=4" {
+		t.Errorf("package env %q", pkg)
+	}
+	kern := strings.Join(b.buildEnv(api.Build{Source: src}, "-lab1-ab12"), " ")
+	if kern != "URL=https://example.invalid/r SHA="+src.SHA+" LABVER=-lab1-ab12" {
+		t.Errorf("kernel env %q", kern)
+	}
+	if strings.Contains(pkg+kern, "MACLAB_") || strings.Contains(pkg+kern, "bldr_") {
+		t.Error("a build env carries lab-builder's own settings")
+	}
+}
+
+// pkgbuild runs makepkg through sudo, which resets the environment: the job
+// count reaches makepkg only because as_build passes it on.
+func TestPkgbuildForwardsJobs(t *testing.T) {
+	raw, err := os.ReadFile("../../builder/pkg/pkgbuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(raw)
+	i := strings.Index(s, "[[ -z ${OMARCHY_BUILD_JOBS")
+	j := strings.Index(s[max(i, 0):], "\n}\n")
+	if i < 0 || j < 0 {
+		t.Fatal("pkgbuild has no job-count check and as_build")
+	}
+	part := s[i : i+j+3]
+	dir := t.TempDir()
+	// The image's sudo: the command after "-u build", in a reset environment.
+	os.WriteFile(filepath.Join(dir, "sudo"), []byte("#!/bin/bash\n[ \"$1\" = -u ] && shift 2\nexec /usr/bin/env -i \"$@\"\n"), 0o755)
+	run := func(jobs *string) (string, error) {
+		script := "set -euo pipefail\nC=/c W=/w\nfail() { echo \"error: $*\"; exit 1; }\n" + part +
+			"\nas_build printenv OMARCHY_BUILD_JOBS || echo '<unset>'\n"
+		cmd := exec.Command("/bin/bash", "-c", script)
+		cmd.Env = []string{"PATH=" + dir + ":/usr/bin:/bin"}
+		if jobs != nil {
+			cmd.Env = append(cmd.Env, "OMARCHY_BUILD_JOBS="+*jobs)
+		}
+		out, err := cmd.CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	four, zero, bad := "4", "0", "4;id"
+	if out, err := run(&four); err != nil || out != "4" {
+		t.Errorf("jobs 4: makepkg saw %q (%v)", out, err)
+	}
+	if out, err := run(nil); err != nil || out != "" {
+		t.Errorf("no jobs: makepkg saw %q (%v); want empty, so the recipe keeps its default", out, err)
+	}
+	for _, v := range []*string{&zero, &bad} {
+		if out, err := run(v); err == nil || !strings.Contains(out, "is not a job count") {
+			t.Errorf("jobs %q: %q %v", *v, out, err)
+		}
 	}
 }

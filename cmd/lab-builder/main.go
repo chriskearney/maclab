@@ -38,6 +38,7 @@ type builder struct {
 	image, volume       string
 	pkgImage, pkgVolume string // package builds (makepkg on Arch Linux ARM); empty image: kernel builds only
 	cpus, mem           string
+	pkgJobs             string // OMARCHY_BUILD_JOBS for package builds
 	io                  string
 	githubToken         string // file holding a GitHub token for private repos
 	asUser              *user.User
@@ -61,6 +62,7 @@ func main() {
 	flag.StringVar(&b.pkgImage, "pkg-image", "maclab-pkgbuild:1", "package builder image (builder/pkg); empty to take kernel builds only")
 	flag.StringVar(&b.pkgVolume, "pkg-volume", "maclab-pkgcache", "package build volume; needs room for a whole kernel tree (create with: container volume create -s 120G maclab-pkgcache)")
 	flag.StringVar(&b.cpus, "cpus", "10", "")
+	pkgJobs := flag.String("pkg-jobs", "", "parallel jobs for package builds, given to the recipe as OMARCHY_BUILD_JOBS (default: --cpus)")
 	flag.StringVar(&b.mem, "memory", "16G", "")
 	flag.StringVar(&b.io, "io", "", "scratch dir for inputs and the artifact; emptied after each build (default ~/maclab/io of the container user)")
 	flag.StringVar(&b.githubToken, "github-token-file", "", "GitHub token for cloning private github.com repos (default ~/.config/maclab/github-token of the container user)")
@@ -72,6 +74,9 @@ func main() {
 	}
 	b.token = tok
 	os.Unsetenv("MACLAB_BUILDER_TOKEN") // so nothing started from here inherits it
+	if b.pkgJobs, err = packageJobs(*pkgJobs, b.cpus); err != nil {
+		log.Fatal(err)
+	}
 	if !rePrefix.MatchString(b.prefix) {
 		log.Fatalf("--container-prefix %q: letters, digits, dots, dashes and underscores, up to 32", b.prefix)
 	}
@@ -116,7 +121,7 @@ func main() {
 	kinds := "kernel"
 	if b.pkgImage != "" {
 		kinds += ",package"
-		log.Printf("package builds: image %s, volume %s", b.pkgImage, b.pkgVolume)
+		log.Printf("package builds: image %s, volume %s, %s jobs", b.pkgImage, b.pkgVolume, b.pkgJobs)
 	}
 	for ctx.Err() == nil {
 		var a api.BuildAssignment
@@ -174,6 +179,30 @@ func builderToken(flagTok, file, env string) (string, error) {
 		return flagTok, nil
 	}
 	return strings.TrimSpace(env), nil
+}
+
+// packageJobs is the job count package builds get: --pkg-jobs, else --cpus,
+// a whole number from 1 to 1024.
+func packageJobs(flagJobs, cpus string) (string, error) {
+	v := flagJobs
+	if v == "" {
+		v = cpus
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 1 || n > 1024 {
+		return "", fmt.Errorf("--pkg-jobs %q: a whole number from 1 to 1024 (default: --cpus)", v)
+	}
+	return strconv.Itoa(n), nil
+}
+
+// buildEnv is the environment a build VM gets: kbuild's for a kernel build,
+// pkgbuild's for a package build, which includes the job count its recipe
+// reads (make -j"${OMARCHY_BUILD_JOBS:-N}").
+func (b *builder) buildEnv(bd api.Build, labVer string) []string {
+	if bd.Kind == api.BuildPackage {
+		return []string{"SRC_REPO=" + bd.Source.Repo, "SRC_SHA=" + bd.Source.SHA, "PKGREL=" + bd.Pkgrel, "OMARCHY_BUILD_JOBS=" + b.pkgJobs}
+	}
+	return []string{"URL=" + bd.Source.Repo, "SHA=" + bd.Source.SHA, "LABVER=" + labVer}
 }
 
 // childEnv is the environment for what lab-builder starts: its own, without
@@ -347,11 +376,10 @@ func (b *builder) run(ctx context.Context, a api.BuildAssignment) {
 
 	pkg := bd.Kind == api.BuildPackage
 	image, volume := b.image, b.volume
-	env := []string{"URL=" + bd.Source.Repo, "SHA=" + bd.Source.SHA, "LABVER=" + a.LabVer}
+	env := b.buildEnv(bd, a.LabVer)
 	input, inputSHA := "config", bd.ConfigSHA
 	if pkg {
 		image, volume = b.pkgImage, b.pkgVolume
-		env = []string{"SRC_REPO=" + bd.Source.Repo, "SRC_SHA=" + bd.Source.SHA, "PKGREL=" + bd.Pkgrel}
 		input, inputSHA = "recipe.tar", bd.Recipe
 		line := fmt.Sprintf("builder %s: packages from %s", b.host, orStr(bd.RecipeDir, "recipe "+bd.Recipe[:12]))
 		if bd.Source.SHA != "" {
