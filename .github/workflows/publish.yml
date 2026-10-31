@@ -1,0 +1,106 @@
+name: publish
+# Publishes labd's image, built from one commit already on main, as
+# ghcr.io/chriskearney/maclab:<the commit's full sha>, once it passes the smoke
+# test the image workflow runs. Only by hand, from main:
+#
+#   gh workflow run publish.yml --ref main -f commit=<full sha of a commit on main>
+#
+# Deploy what it prints, ghcr.io/chriskearney/maclab@sha256:<digest>; nothing
+# here deploys. A tag that is already published is never pushed again, and
+# there is no moving tag such as latest.
+on:
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The full 40-character sha of a commit on main
+        required: true
+        type: string
+permissions: {}
+concurrency:
+  group: publish
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read   # the checkout
+      packages: write  # the push, to this repository's own package
+    env:
+      IMAGE: ghcr.io/chriskearney/maclab
+      COMMIT: ${{ inputs.commit }}
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Check the input
+        run: |
+          if ! [[ $COMMIT =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit must be a full 40-character lowercase sha"
+            exit 1
+          fi
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.commit }}
+          fetch-depth: 0  # every branch's history, for the check that follows
+          persist-credentials: false
+      - name: Check the commit is on main
+        run: |
+          [ "$(git rev-parse HEAD)" = "$COMMIT" ]
+          git rev-parse -q --verify refs/remotes/origin/main >/dev/null
+          if ! git merge-base --is-ancestor "$COMMIT" refs/remotes/origin/main; then
+            echo "::error::$COMMIT is not on main"
+            exit 1
+          fi
+      - name: Build
+        run: |
+          docker build --platform linux/amd64 \
+            --label org.opencontainers.image.source=https://github.com/chriskearney/maclab \
+            --label org.opencontainers.image.revision="$COMMIT" \
+            -t "$IMAGE:$COMMIT" .
+          [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE:$COMMIT")" = linux/amd64 ]
+          echo "BUILT=$(docker image inspect --format '{{.Id}}' "$IMAGE:$COMMIT")" >>"$GITHUB_ENV"
+      # The commit's own smoke test, at both public URLs, before any login.
+      - name: Smoke test, on its own host
+        run: bash .github/scripts/image-smoke.sh "$IMAGE:$COMMIT" https://maclab.chonkbase.net
+      - name: Smoke test, under a prefix
+        run: bash .github/scripts/image-smoke.sh "$IMAGE:$COMMIT" https://chonkbase.net/maclab
+      - name: Push, and read it back
+        id: push
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          export DOCKER_CONFIG=$RUNNER_TEMP/ghcr  # this job's login only; the last step removes it
+          ref=$IMAGE:$COMMIT
+          docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin <<<"$TOKEN"
+          unset TOKEN
+          if docker buildx imagetools inspect --raw "$ref" >/dev/null 2>&1; then
+            echo "::error::$ref is already published: deploy the digest the run that published it printed"
+            exit 1
+          fi
+          docker push "$ref"
+          # The digest is the sha256 of the manifest the registry now serves for the tag.
+          digest=sha256:$(docker buildx imagetools inspect --raw "$ref" | sha256sum | cut -d' ' -f1)
+          # Pulled back from the registry by that digest, it is the image tested above.
+          docker image rm -f "$BUILT" >/dev/null
+          docker pull -q "$IMAGE@$digest" >/dev/null
+          [ "$(docker image inspect --format '{{.Id}}' "$IMAGE@$digest")" = "$BUILT" ]
+          [ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE@$digest")" = "$COMMIT" ]
+          echo "digest=$digest" >>"$GITHUB_OUTPUT"
+          echo "image=$IMAGE@$digest" >>"$GITHUB_OUTPUT"
+          echo "::notice title=Published::$IMAGE@$digest, built from $COMMIT"
+          {
+            echo "### Published"
+            echo
+            echo "- Image: \`$IMAGE@$digest\` (deploy by this digest)"
+            echo "- Tag: \`$ref\`"
+            echo "- Built from: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$COMMIT"
+            echo "- linux/amd64, smoke-tested at https://maclab.chonkbase.net and https://chonkbase.net/maclab"
+          } >>"$GITHUB_STEP_SUMMARY"
+      - name: Log out
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/ghcr"
