@@ -2,7 +2,7 @@
 # kbuild: fetch one commit, build it with a given config, emit a maclab kernel artifact.
 #
 # In:  URL, SHA, LABVER (release suffix) env; /io/config (a .config, e.g. from the target's /proc/config.gz)
-# Out: /io/kernel.tar.zst (usr/lib/modules/<release>/{vmlinuz,modules,dtbs}), /io/release
+# Out: /io/out/{kernel,module-build}.tar.zst, /io/release, /io/kernel
 # Keeps /cache bounded: one shared git store, one reused worktree, two build dirs, capped ccache.
 set -euo pipefail
 : "${URL:?}" "${SHA:?}" "${LABVER:?}"
@@ -105,10 +105,12 @@ M=$P/usr/lib/modules/$krel
 rm -f "$M/build" "$M/source"
 cp "$O/arch/arm64/boot/Image" "$M/vmlinuz"
 make -s O="$O" INSTALL_DTBS_PATH="$M/dtbs" dtbs_install
-tar -C "$P" --zstd -cf /io/kernel.tar.zst usr
+python3 /usr/local/bin/module-build.py "$C/src" "$O" /io "$C/git"
+tar -C "$P" --zstd -cf /io/out/kernel.tar.zst usr
+echo kernel.tar.zst > /io/kernel
 echo "$krel" > /io/release
 rm -rf "$P"
-echo "artifact: $(du -h /io/kernel.tar.zst | cut -f1)"
+echo "artifact: $(du -h /io/out/kernel.tar.zst | cut -f1)"
 
 step "tidy cache"
 lru_trees | head -n -$((KEEP_BUILDS - 1)) | xargs -r rm -rf

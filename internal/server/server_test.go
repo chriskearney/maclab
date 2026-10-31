@@ -629,7 +629,10 @@ func (l *lab) fakeBuilder(ctx context.Context, builds *int) {
 		post("/api/builder/builds/"+a.Build.ID+"/progress", strings.NewReader(lines), nil)
 		var up struct{ SHA256 string }
 		post("/api/builder/artifacts", strings.NewReader("krel=7.2-src"+a.LabVer+" behavior=ok"), &up)
-		done, _ := json.Marshal(api.BuildResult{Release: "7.2-src" + a.LabVer, Artifact: up.SHA256, Seconds: 1})
+		var headers struct{ SHA256 string }
+		post("/api/builder/artifacts", strings.NewReader("simulated module build inputs"), &headers)
+		files := []api.BuildFile{{Name: "kernel.tar.zst", SHA256: up.SHA256}, {Name: "module-build.tar.zst", SHA256: headers.SHA256}}
+		done, _ := json.Marshal(api.BuildResult{Release: "7.2-src" + a.LabVer, Artifact: up.SHA256, Files: files, Seconds: 1})
 		post("/api/builder/builds/"+a.Build.ID+"/done", bytes.NewReader(done), nil)
 	}
 }
