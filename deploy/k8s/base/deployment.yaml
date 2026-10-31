@@ -1,0 +1,89 @@
+# labd: ONE pod. SQLite on an RWO volume means exactly one writer: replicas 1 and Recreate, so a rollout stops the old
+# pod before the new one starts and two controllers never run on the same data. Artifact grants live in memory and
+# end with the pod; enrollments, jobs and tokens persist in /data.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maclab
+  namespace: maclab
+  labels:
+    app.kubernetes.io/name: maclab
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  revisionHistoryLimit: 3
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: maclab
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: maclab
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      imagePullSecrets:
+        - name: ghcr-secret
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001                  # the PVC is made writable by uid/gid 10001, never root
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: labd
+          image: maclab
+          args:
+            - --listen=0.0.0.0:7770
+            - --allow-plain-http                       # plain http inside the cluster only; TLS ends at the Ingress
+            - --data=/data
+            - --public-url=https://maclab.chonkbase.net
+            # The ingress-nginx controller's pod addresses as labd sees them. MUST be set to this cluster's real pod
+            # CIDR before applying (docs/https.md, "Trusted proxy"); this placeholder is not a CIDR, so labd refuses
+            # to start with it rather than trust a guess.
+            - --trusted-proxy=SET-INGRESS-NGINX-POD-CIDR
+            - --maintainer=chris                       # used once, on a labd with no Maintainer yet; ignored after
+          env:
+            - { name: HOME, value: /tmp }
+          ports:
+            - { name: http, containerPort: 7770 }
+          readinessProbe:
+            # <prefix>/healthz: 200 "ok", no auth. The probes name the public origin in X-Forwarded-*: labd ignores those
+            # from a node address, and needs them (else 421) if the CNI sources the probe from inside --trusted-proxy
+            # (Calico's node tunnel address is in the pod CIDR).
+            httpGet:
+              path: /healthz
+              port: http
+              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: maclab.chonkbase.net }]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              httpHeaders: [{ name: X-Forwarded-Proto, value: https }, { name: X-Forwarded-Host, value: maclab.chonkbase.net }]
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 4
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 1Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: maclab-data
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi

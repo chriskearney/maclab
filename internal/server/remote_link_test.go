@@ -13,6 +13,7 @@ import (
 
 	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 // wire is a flaky link in front of labd: it can cut an artifact response
@@ -168,7 +169,7 @@ func (l *lab) agentGet(secret, sha, rng string) (*http.Response, []byte) {
 	if rng != "" {
 		req.Header.Set("Range", rng)
 	}
-	resp, err := apiClient.Do(req)
+	resp, err := l.client().Do(req)
 	if err != nil {
 		l.t.Fatal(err)
 	}
@@ -177,10 +178,24 @@ func (l *lab) agentGet(secret, sha, rng string) (*http.Response, []byte) {
 	return resp, body
 }
 
+// grantForTest lets the lab's Mac fetch sha the way labd does when a job
+// holding the Mac stages it: the job is the Mac's active one, submitted for
+// its enrollment. (Adapted from Naeem Malik's helper in maclab PR #53.)
+func (l *lab) grantForTest(sha string) {
+	l.t.Helper()
+	args, _ := json.Marshal(api.StageArgs{Artifact: sha})
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	v.d.ActiveJob = "range-test"
+	v.grantLocked(api.Command{Kind: api.CmdStage, JobID: "range-test", Args: args})
+	v.mu.Unlock()
+}
+
 func TestArtifactIsServedWhole(t *testing.T) {
 	l := newLab(t, false)
 	content := strings.Repeat("0123456789", 100)
 	sha := l.artifact(content)
+	l.grantForTest(sha)
 	resp, body := l.agentGet(l.secret, sha, "")
 	if resp.StatusCode != 200 || string(body) != content {
 		t.Fatalf("whole artifact: %s, %d bytes", resp.Status, len(body))
@@ -194,6 +209,7 @@ func TestArtifactResumesFromTheOffsetAMacAsksFor(t *testing.T) {
 	l := newLab(t, false)
 	content := strings.Repeat("0123456789", 100)
 	sha := l.artifact(content)
+	l.grantForTest(sha)
 	resp, body := l.agentGet(l.secret, sha, "bytes=250-")
 	if resp.StatusCode != 206 || string(body) != content[250:] {
 		t.Fatalf("resume: %s, %d bytes", resp.Status, len(body))
@@ -207,6 +223,7 @@ func TestArtifactRangePastTheEndIsRefused(t *testing.T) {
 	l := newLab(t, false)
 	content := strings.Repeat("0123456789", 100)
 	sha := l.artifact(content)
+	l.grantForTest(sha)
 	for _, off := range []int{len(content), len(content) + 50} {
 		if resp, _ := l.agentGet(l.secret, sha, fmt.Sprintf("bytes=%d-", off)); resp.StatusCode != 416 {
 			t.Errorf("Range from %d of %d bytes: %s", off, len(content), resp.Status)
@@ -372,7 +389,7 @@ func (l *lab) enrollToken(name string) string {
 
 func (l *lab) enrollRaw(token string) (*http.Response, string) {
 	l.t.Helper()
-	return l.as("", "POST", "/api/agent/enroll", api.EnrollRequest{Token: token, Facts: l.sim.Facts()})
+	return l.as("", "POST", "/api/agent/enroll", api.EnrollRequest{Token: token, Facts: l.sim.Facts(), ActivationKey: testActivationKey, TermsSHA256: termsSum()})
 }
 
 func (l *lab) checkinAs(secret string) *http.Response {
@@ -386,14 +403,20 @@ const spentToken = "enrollment token unknown, used or expired"
 func TestEnrollingAgainBeforeTheFirstCheckinKeepsTheMacAndRenewsItsSecret(t *testing.T) {
 	l := newLab(t, false)
 	tok := l.enrollToken("retry-mac")
-	first, err := agent.Enroll(l.ctx, l.url, tok, l.sim.Facts())
+	act := agent.Activation{Key: agent.NewActivationKey(), TermsSHA256: termsSum()}
+	first, err := agent.EnrollWith(l.ctx, l.url, tok, l.sim.Facts(), labhttp.Policy{}, act)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Another Mac holding only the token gets nothing: the token is used up.
+	if _, err := agent.EnrollWith(l.ctx, l.url, tok, l.sim.Facts(), labhttp.Policy{}, agent.Activation{Key: agent.NewActivationKey(), TermsSHA256: termsSum()}); err == nil || !strings.Contains(err.Error(), spentToken) {
+		t.Fatalf("the used token with another activation key: %v", err)
+	}
 	// the answer never reached the Mac, so it tries again with the same token
-	second, err := agent.Enroll(l.ctx, l.url, tok, l.sim.Facts())
+	// and its own activation key
+	second, err := agent.EnrollWith(l.ctx, l.url, tok, l.sim.Facts(), labhttp.Policy{}, act)
 	if err != nil {
-		t.Fatalf("enrolling again with an unused, unexpired token: %v", err)
+		t.Fatalf("enrolling again with the same activation: %v", err)
 	}
 	if second.DeviceID != first.DeviceID || second.Name != first.Name || second.Name != "retry-mac" {
 		t.Fatalf("the retry made a different Mac: %+v then %+v", first, second)

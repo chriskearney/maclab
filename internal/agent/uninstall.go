@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	osuser "os/user"
@@ -77,7 +76,7 @@ func Leave(cfg *Config, req api.LeaveRequest) (*api.LeaveResponse, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	var resp api.LeaveResponse
-	err := postJSON(ctx, http.DefaultClient, strings.TrimRight(cfg.Server, "/")+"/api/agent/leave", cfg.Secret, req, &resp)
+	err := postJSON(ctx, cfg.client(0), strings.TrimRight(cfg.Server, "/")+"/api/agent/leave", cfg.Secret, req, &resp)
 	return &resp, err
 }
 

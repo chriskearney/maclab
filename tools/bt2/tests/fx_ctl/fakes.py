@@ -58,6 +58,7 @@ class FakeLabd:
         self.cts_behavior = None     # same, for an eryk-cts test (candidate job only)
         self.mac = None
         self.boots = 0
+        self.grants = {}             # device -> {'artifacts': [...], 'ttl_sec': n} (POST .../artifact-grants)
 
     def _dev(self, name):
         if name not in self.devices:
@@ -119,6 +120,15 @@ class FakeLabd:
         sha = H(data)
         self.artifacts[sha] = bytes(data)
         return {'sha256': sha, 'size': len(data)}
+
+    def artifact_grants(self, name, shas, ttl_sec):
+        self.calls.append(('POST', '/api/devices/%s/artifact-grants' % name, tuple(shas), ttl_sec))
+        self._dev(name)
+        assert all(s in self.artifacts for s in shas), 'grant for a sha labd does not hold'
+        self.grants[name] = {'artifacts': sorted(shas), 'ttl_sec': ttl_sec}
+        if not shas:   # as labd answers a revocation: no expires (json omitzero)
+            return {'device': name, 'artifacts': []}
+        return {'device': name, 'artifacts': sorted(shas), 'expires': iso(now() + datetime.timedelta(seconds=ttl_sec))}
 
     def exec(self, *a, **k):
         raise AssertionError('controller tests never exec through labd directly (Ops seam is faked)')
@@ -405,6 +415,8 @@ class FakeOps:
     # target command semantics (state machine only)
     def _fetch(self, run, cfg, held):
         assert all(s in self.mac.lab.artifacts for s in cfg['artifact_shas'].values()), 'fetch before upload'
+        g = self.mac.lab.grants.get(cfg['device']) or {}
+        assert g.get('artifacts') == sorted(set(cfg['artifact_shas'].values())), 'fetch without a grant for exactly its shas'
         return 0, {'changed': True, 'artifacts': {f: {'sha256': s} for f, s in cfg['artifact_shas'].items()}}
 
     def _preflight(self, run, cfg, held):

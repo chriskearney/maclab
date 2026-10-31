@@ -1,0 +1,23 @@
+# Optional: your own terms instead of labd's built-in ones (--terms-file). Put the exact text in terms.txt next to this
+# file (not shipped), then `kubectl kustomize deploy/k8s/terms`. Changing the text changes its sha256, so Macs that
+# have not enrolled yet must accept the new text; labd refuses an enrollment that accepted any other.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+configMapGenerator:
+  - name: maclab-terms
+    namespace: maclab
+    files: [terms.txt]
+patches:
+  - target: { kind: Deployment, name: maclab }
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/args/-
+        value: --terms-file=/etc/maclab/terms.txt
+      - op: add
+        path: /spec/template/spec/containers/0/volumeMounts/-
+        value: { name: terms, mountPath: /etc/maclab, readOnly: true }
+      - op: add
+        path: /spec/template/spec/volumes/-
+        value: { name: terms, configMap: { name: maclab-terms } }

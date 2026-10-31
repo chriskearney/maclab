@@ -559,6 +559,7 @@ func (s *Server) hBuildLog(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no") // a reverse proxy passes it on as it comes
 	path := filepath.Join(s.buildDir(id), "build.log")
 	if r.URL.Query().Get("follow") != "1" {
 		http.ServeFile(w, r, path)

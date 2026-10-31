@@ -37,7 +37,7 @@ func (l *lab) as(token, method, path string, body any) (*http.Response, string) 
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	resp, err := apiClient.Do(req)
+	resp, err := l.client().Do(req)
 	if err != nil {
 		l.t.Fatal(err)
 	}

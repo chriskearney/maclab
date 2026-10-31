@@ -7,7 +7,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"net/url"
 	"os"
 	"os/exec"
 	"regexp"
@@ -17,55 +16,34 @@ import (
 	"time"
 )
 
-// sameOrigin refuses a request that can change something (any method but
-// GET, HEAD and OPTIONS) when a browser sent it from another site's page.
-// Changes need a Maintainer's token, which a page can't send, so this is a
-// second guard: should a browser ever carry access by itself, say a tailnet
-// login, no page open in it may POST to /api/devices/{name}/exec. Browsers
-// name the sending page's origin in Origin on such requests, and newer ones
-// say in Sec-Fetch-Site how it relates to labd; a page can set neither.
-// labd's own UI is served from the origin it calls, so its Origin names the
-// host it asked. The lab CLI, agents, builders and curl send neither header and are
-// let through: what guards them is the token or device secret they come
-// with.
-func sameOrigin(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet, http.MethodHead, http.MethodOptions:
-			h.ServeHTTP(w, r)
-			return
-		}
-		origin := r.Header.Get("Origin")
-		if origin != "" && !originIsHost(origin, r.Host) {
-			httpErr(w, 403, "refused: a page from %s asked labd at %s to change something. Use labd's own UI at its address, or the lab CLI", origin, r.Host)
-			return
-		}
-		if site := r.Header.Get("Sec-Fetch-Site"); origin == "" && (site == "cross-site" || site == "same-site") {
-			httpErr(w, 403, "refused: a %s page asked labd at %s to change something. Use labd's own UI at its address, or the lab CLI", site, r.Host)
-			return
-		}
-		h.ServeHTTP(w, r)
-	})
-}
-
-// originIsHost reports whether origin (scheme://host[:port]) names the same
-// host and port as a request's Host header. A port left out is the
-// scheme's default in both.
-func originIsHost(origin, host string) bool {
-	u, err := url.Parse(origin)
-	if err != nil || u.Host == "" {
-		return false // "null", from a sandboxed frame or a redirect, among them
+// sameOriginOK refuses a request that can change something (any method but
+// GET, HEAD and OPTIONS) when a browser sent it from another site's page,
+// answering w, and says whether it may go on. Changes need a Maintainer's
+// token, which a page can't send, so this is a second guard: should a
+// browser ever carry access by itself, say a tailnet login, no page open in
+// it may POST to /api/devices/{name}/exec. Browsers name the sending page's
+// origin in Origin on such requests, and newer ones say in Sec-Fetch-Site how
+// it relates to labd; a page can set neither. The Origin must be the very
+// origin the request reached labd at (see externalOrigin): scheme, host and
+// port, so an http:// page on labd's own host name is another origin than
+// labd at https://. The lab CLI, agents, builders and curl send neither
+// header and are let through: what guards them is the token or device secret
+// they come with.
+func (s *Server) sameOriginOK(w http.ResponseWriter, r *http.Request, origin string) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
 	}
-	def := map[string]string{"http": "80", "https": "443"}[u.Scheme]
-	oPort := u.Port()
-	if oPort == "" {
-		oPort = def
+	o := r.Header.Get("Origin")
+	if o != "" && !sameOriginAs(o, origin) {
+		httpErr(w, 403, "refused: a page from %s asked labd at %s to change something. Use labd's own UI at its address, or the lab CLI", o, origin)
+		return false
 	}
-	hName, hPort, err := net.SplitHostPort(host)
-	if err != nil {
-		hName, hPort = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]"), def
+	if site := r.Header.Get("Sec-Fetch-Site"); o == "" && (site == "cross-site" || site == "same-site") {
+		httpErr(w, 403, "refused: a %s page asked labd at %s to change something. Use labd's own UI at its address, or the lab CLI", site, origin)
+		return false
 	}
-	return strings.EqualFold(u.Hostname(), hName) && oPort == hPort
+	return true
 }
 
 // A request that gets in without a token, by its tailnet login, counts only when its Host names labd

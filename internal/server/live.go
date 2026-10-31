@@ -346,6 +346,7 @@ func (s *Server) hConsoleRaw(w http.ResponseWriter, r *http.Request) {
 	fl, _ := w.(http.Flusher)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Accel-Buffering", "no") // a reverse proxy passes it on as it comes
 	w.WriteHeader(200)
 	if fl != nil {
 		fl.Flush()

@@ -90,7 +90,7 @@ const TOKENS = ['background', 'dark_background', 'darker_background', 'lighter_b
 
 async function loadThemes() {
   try {
-    const r = await fetch('/api/themes');
+    const r = await fetch('api/themes');
     S.themes = await r.json();
   } catch { S.themes = []; }
   applyTheme();
@@ -129,7 +129,7 @@ function applyTheme() {
   if (contrast(c.accent, c.background) < 1.6) c.accent = c.foreground;
   for (const k of TOKENS) c[k] ? root.style.setProperty('--' + k, c[k]) : root.style.removeProperty('--' + k);
   root.dataset.mode = t.mode || 'dark';
-  const bg = t.has_background ? `url("/api/themes/${S.theme === 'follow' ? 'current' : encodeURIComponent(t.name)}/background")` : 'none';
+  const bg = t.has_background ? `url("api/themes/${S.theme === 'follow' ? 'current' : encodeURIComponent(t.name)}/background")` : 'none';
   $('#wall').style.backgroundImage = bg;
   root.style.setProperty('--lockbg', bg);
   const meta = $('meta[name=theme-color]') || document.head.appendChild(Object.assign(document.createElement('meta'), { name: 'theme-color' }));
@@ -601,7 +601,7 @@ function omtSection(j) {
 }
 
 async function publishOMT(id) {
-  try { const r = await post(`/api/jobs/${enc(id)}/publish`); toast('Published', r.report_url); tick(); }
+  try { const r = await post(`api/jobs/${enc(id)}/publish`); toast('Published', r.report_url); tick(); }
   catch (e) { toast('Not published', e.message, true); }
 }
 
@@ -671,7 +671,7 @@ async function loadLog(j) {
   const want = S.logFile;
   if (!want) return;
   try {
-    const t = await api(`/api/jobs/${encodeURIComponent(j.id)}/files/${want.split('/').map(encodeURIComponent).join('/')}`);
+    const t = await api(`api/jobs/${encodeURIComponent(j.id)}/files/${want.split('/').map(encodeURIComponent).join('/')}`);
     if (S.logFile === want) { S.logText = typeof t === 'string' ? t : JSON.stringify(t, null, 2); paintJobs(); }
   } catch (e) { if (S.logFile === want) { S.logText = `[could not load: ${e.message}]`; paintJobs(); } }
 }
@@ -679,7 +679,7 @@ async function loadLog(j) {
 async function shotURL(id, f) {
   const k = id + '/' + f;
   if (!S.shots[k]) {
-    const r = await fetch(`/api/jobs/${encodeURIComponent(id)}/files/${f.split('/').map(encodeURIComponent).join('/')}`, { headers: authH() });
+    const r = await fetch(`api/jobs/${encodeURIComponent(id)}/files/${f.split('/').map(encodeURIComponent).join('/')}`, { headers: authH() });
     S.shots[k] = URL.createObjectURL(await r.blob());
   }
   return S.shots[k];
@@ -774,7 +774,7 @@ function runForm() {
           spec.tests.push({ name: f.name.replace(/\.[^.]+$/, '').replace(/[^\w.-]+/g, '-'), script: sha, gui: $('#rf-scripts-gui').checked });
         }
       }
-      const j = await post('/api/jobs', spec);
+      const j = await post('api/jobs', spec);
       toast('Job queued', `${jobKind(j)} on ${j.spec.device}`);
       S.upload = null;
       go('#/jobs/' + j.id);
@@ -786,7 +786,7 @@ function runForm() {
 function uploadBlob(file, onpct) {
   return new Promise((resolve, reject) => {
     const x = new XMLHttpRequest();
-    x.open('POST', '/api/artifacts');
+    x.open('POST', 'api/artifacts');
     if (S.token) x.setRequestHeader('Authorization', 'Bearer ' + S.token);
     x.upload.onprogress = e => e.lengthComputable && onpct && onpct(Math.floor(e.loaded / e.total * 100));
     x.onload = () => x.status === 200 ? resolve(JSON.parse(x.responseText).sha256) : reject(new Error(x.responseText || x.statusText));
@@ -816,11 +816,15 @@ function enrollForm() {
   $('#en-go').onclick = async () => {
     try {
       const name = $('#en-name').value.trim();
-      const t = await post('/api/enroll-tokens', { name, label: $('#en-label').value.trim(), model });
-      const cmd = `sudo ./lab-agent setup --server ${location.origin} --token ${t.token} --gui-user $USER`;
-      $('#en-out').innerHTML = `<div class="lbl" style="margin-bottom:6px">On ${esc(name)}, with lab-agent copied over</div>
+      const t = await post('api/enroll-tokens', { name, label: $('#en-label').value.trim(), model });
+      // labd writes the one-liner (it knows its public URL and its lab-agent's
+      // sha256); without a lab-agent to hand out, the Mac gets one copied over.
+      const base = new URL('.', document.baseURI).href.replace(/\/$/, '');
+      const cmd = t.join_command || `printf '%s\\n' '${t.token}' | sudo ./lab-agent setup --server ${base} --token-stdin --gui-user "$USER"`;
+      const where = t.join_command ? `On ${esc(name)}, in a terminal: it shows the lab's terms and joins once its owner types yes` : `On ${esc(name)}, with lab-agent copied over`;
+      $('#en-out').innerHTML = `<div class="lbl" style="margin-bottom:6px">${where}</div>
         <pre class="term plain" style="white-space:pre-wrap;word-break:break-all;border-radius:6px;border:1px solid var(--line)"><span class="l">${esc(cmd)}</span></pre>
-        <div class="row" style="margin-top:8px"><button class="btn sm" id="en-copy">${ic('copy')} Copy</button><span class="muted">one use · expires ${new Date(t.expires).toLocaleString()}</span></div>
+        <div class="row" style="margin-top:8px"><button class="btn sm" id="en-copy">${ic('copy')} Copy</button><span class="muted">one activation · expires ${new Date(t.expires).toLocaleString()} · keep it private</span></div>
         <div class="hint" style="margin-top:10px">Then run its baseline from the Macs view: it proves the one-shot boot before any test kernel runs.</div>`;
       $('#en-copy').onclick = () => copy(cmd);
     } catch (e) { toast('Could not enroll', e.message, true); }
@@ -970,7 +974,7 @@ function buildsLayout() {
     const source = $('#bn-src').value.trim();
     if (!source) { $('#bn-src').focus(); return; }
     try {
-      const b = await post('/api/builds', { source, device: $('#bn-dev').value || undefined, force: $('#bn-force').checked });
+      const b = await post('api/builds', { source, device: $('#bn-dev').value || undefined, force: $('#bn-force').checked });
       S.buildCache[b.id] = b;
       toast(b.state === 'done' ? 'Already built' : 'Build queued', `${repoName(b.source)} ${shortSha(b.source?.sha)}`);
       $('#bn-src').value = '';
@@ -1011,7 +1015,7 @@ function buildDetail(b) {
       ${b.source?.sha ? `<dt>commit</dt><dd><code>${esc(b.source.sha)}</code></dd>` : ''}
       ${b.config_sha ? `<dt>config</dt><dd><code>${esc(b.config_sha.slice(0, 16))}</code>${b.device ? ` <span class="muted">from ${esc(b.device)}'s running kernel</span>` : ''}</dd>` : ''}
       ${b.artifact && !b.files?.length ? `<dt>artifact</dt><dd><code>${esc(b.artifact.slice(0, 16))}…</code></dd>` : ''}
-      ${b.files?.length ? `<dt>files</dt><dd class="wrap bfiles">${b.files.map(f => `<div><a href="/api/builds/${enc(b.id)}/files/${enc(f.name)}" download>${ic('file')} ${esc(f.name)}</a> <span class="muted">${(f.size / 1048576).toFixed(f.size < 10485760 ? 1 : 0)} MB</span><br><code class="muted">${esc(f.sha256)}</code></div>`).join('')}</dd>` : ''}
+      ${b.files?.length ? `<dt>files</dt><dd class="wrap bfiles">${b.files.map(f => `<div><a href="api/builds/${enc(b.id)}/files/${enc(f.name)}" download>${ic('file')} ${esc(f.name)}</a> <span class="muted">${(f.size / 1048576).toFixed(f.size < 10485760 ? 1 : 0)} MB</span><br><code class="muted">${esc(f.sha256)}</code></div>`).join('')}</dd>` : ''}
       ${jobs.length ? `<dt>jobs</dt><dd class="wrap">${jobs.map(j => `<a href="#/jobs/${esc(j.id)}">${esc(j.id)}</a> <span class="muted">${esc(j.outcome || j.state)}</span>`).join(' · ')}</dd>` : ''}
     </dl>
     <div class="h">Build log <span class="muted" style="font-weight:400">${lines.length} lines${errs ? ` · <span class="bad">${errs} errors</span>` : ''}${warns ? ` · <span class="warn">${warns} warnings</span>` : ''} · compiler diagnostics and stage headers only</span></div>
@@ -1023,7 +1027,7 @@ async function loadBuildLog(id, force) {
   if ((bl.loaded && !force) || bl.loading) return;
   bl.loading = true;
   try {
-    const t = await api(`/api/builds/${enc(id)}/log`);
+    const t = await api(`api/builds/${enc(id)}/log`);
     bl.lines = String(t || '').replace(/\n$/, '').split('\n').filter(l => l.length);
     bl.loaded = true;
   } catch { bl.loaded = true; }
@@ -1032,7 +1036,7 @@ async function loadBuildLog(id, force) {
 }
 
 async function cancelBuild(id) {
-  try { await post(`/api/builds/${enc(id)}/cancel`); toast('Canceling build', id); tick(); } catch (e) { toast('Could not cancel', e.message, true); }
+  try { await post(`api/builds/${enc(id)}/cancel`); toast('Canceling build', id); tick(); } catch (e) { toast('Could not cancel', e.message, true); }
 }
 
 // Kernel builds boot on the Mac whose config they used; packages on any Mac.
@@ -1044,12 +1048,12 @@ function bootTargets(b) {
 async function bootBuild(id, device) {
   const b = S.buildCache[id] || S.builds.find(x => x.id === id);
   if (!b?.artifact || !device) return;
-  try { const j = await post('/api/jobs', { device, kernel: b.artifact, holder: 'web' }); go('#/jobs/' + j.id); }
+  try { const j = await post('api/jobs', { device, kernel: b.artifact, holder: 'web' }); go('#/jobs/' + j.id); }
   catch (e) { toast('Could not boot it', e.message, true); }
 }
 
 async function buildsTick() {
-  const [builds, builders] = await Promise.all([api('/api/builds?limit=40').catch(() => null), api('/api/builders').catch(() => null)]);
+  const [builds, builders] = await Promise.all([api('api/builds?limit=40').catch(() => null), api('api/builders').catch(() => null)]);
   if (builds) { S.builds = builds; for (const b of builds) S.buildCache[b.id] = b; }
   if (builders) S.builders = builders;
   if (S.view === 'builds' && !S.buildId && S.builds[0]) S.buildId = S.builds[0].id;
@@ -1059,7 +1063,7 @@ async function buildsTick() {
   if (S.view === 'jobs' && buildIdOf(S.jobCache[S.jobId])) want.add(buildIdOf(S.jobCache[S.jobId]));
   for (const id of want) {
     const b = S.buildCache[id];
-    if (!b && id) { try { S.buildCache[id] = await api('/api/builds/' + enc(id)); } catch { } }
+    if (!b && id) { try { S.buildCache[id] = await api('api/builds/' + enc(id)); } catch { } }
     const running = S.buildCache[id]?.state === 'running' || S.buildCache[id]?.state === 'queued';
     loadBuildLog(id, running && S.stream !== 'up');
   }
@@ -1164,7 +1168,7 @@ async function loadScreen(d, meta) {
   if (!at || sc.at === at || sc.loading === at || (sc.pinned && !meta)) return;
   sc.loading = at;
   try {
-    const url = await blobURL(`/api/devices/${enc(d.name)}/screen?t=${enc(at)}`);
+    const url = await blobURL(`api/devices/${enc(d.name)}/screen?t=${enc(at)}`);
     const img = new Image();
     await new Promise(r => { img.onload = img.onerror = r; img.src = url; });
     sc.meta = { ...(meta || sc.meta || {}), time: at, width: meta?.width || img.naturalWidth, height: meta?.height || img.naturalHeight };
@@ -1184,7 +1188,7 @@ async function capture() {
   if (sc.busy) return;
   sc.busy = true; sc.last = Date.now(); paintLive();
   try {
-    const meta = await post(`/api/devices/${enc(d.name)}/screenshot`);
+    const meta = await post(`api/devices/${enc(d.name)}/screenshot`);
     d.screen_at = meta.time;
     await loadScreen(d, meta);
   } catch (e) {
@@ -1201,7 +1205,7 @@ function hydrateCaptures(root) {
   $$('img[data-cap]', root).forEach(async img => {
     const k = img.dataset.cap;
     const [dev, file] = k.split('/');
-    caps[k] ||= blobURL(`/api/devices/${enc(dev)}/screens/${enc(file)}`).catch(() => '');
+    caps[k] ||= blobURL(`api/devices/${enc(dev)}/screens/${enc(file)}`).catch(() => '');
     const u = await caps[k];
     if (u) img.src = u;
   });
@@ -1212,14 +1216,14 @@ async function showCapture(dev, file) {
   const f = sc?.list?.find(x => x.name === file);
   if (!f) return;
   const k = dev + '/' + file;
-  caps[k] ||= blobURL(`/api/devices/${enc(dev)}/screens/${enc(file)}`).catch(() => '');
+  caps[k] ||= blobURL(`api/devices/${enc(dev)}/screens/${enc(file)}`).catch(() => '');
   const u = await caps[k];
   if (u) { sc.url = u; sc.meta = { ...f }; sc.pinned = true; paintLive(); }
 }
 
 async function loadCaptureList(d) {
   const sc = S.scr[d.name] ||= { hist: [] };
-  try { sc.list = await api(`/api/devices/${enc(d.name)}/screens`); } catch { sc.list = null; }
+  try { sc.list = await api(`api/devices/${enc(d.name)}/screens`); } catch { sc.list = null; }
   if (sc.meta?.time === 'latest' && sc.list?.[0]) sc.meta = { ...sc.meta, name: sc.list[0].name, time: sc.list[0].time };
 }
 
@@ -1237,7 +1241,7 @@ function hydrateScreens(root) {
   if (!root) return;
   $$('img[data-screen]', root).forEach(async img => {
     const k = img.dataset.screen + '|' + img.dataset.at;
-    thumbs[k] ||= blobURL(`/api/devices/${enc(img.dataset.screen)}/screen?t=${enc(img.dataset.at)}`).catch(() => '');
+    thumbs[k] ||= blobURL(`api/devices/${enc(img.dataset.screen)}/screen?t=${enc(img.dataset.at)}`).catch(() => '');
     const u = await thumbs[k];
     if (u) img.src = u; else img.closest('.thumb')?.remove();
   });
@@ -1250,9 +1254,9 @@ S.serMode = store('sermode') || 'log';
 let xtLoad;
 function loadXterm() {
   return xtLoad ||= new Promise((res, rej) => {
-    document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'stylesheet', href: '/ui/vendor/xterm/xterm.css' }));
+    document.head.appendChild(Object.assign(document.createElement('link'), { rel: 'stylesheet', href: 'ui/vendor/xterm/xterm.css' }));
     const add = src => new Promise((ok, no) => document.head.appendChild(Object.assign(document.createElement('script'), { src, onload: ok, onerror: () => no(new Error('could not load ' + src)) })));
-    add('/ui/vendor/xterm/xterm.js').then(() => add('/ui/vendor/xterm/addon-fit.js')).then(res, e => { xtLoad = null; rej(e); });
+    add('ui/vendor/xterm/xterm.js').then(() => add('ui/vendor/xterm/addon-fit.js')).then(res, e => { xtLoad = null; rej(e); });
   });
 }
 
@@ -1328,7 +1332,7 @@ async function openShell(dev) {
     sending = true;
     const b = pending; pending = '';
     try {
-      const r = await fetch(`/api/devices/${enc(dev)}/console`, { method: 'POST', headers: { ...authH(), 'Content-Type': 'application/octet-stream' }, body: new TextEncoder().encode(b) });
+      const r = await fetch(`api/devices/${enc(dev)}/console`, { method: 'POST', headers: { ...authH(), 'Content-Type': 'application/octet-stream' }, body: new TextEncoder().encode(b) });
       if (!r.ok) term.write(`\r\n\x1b[31m[${(await r.text()).trim() || r.status}]\x1b[0m\r\n`);
     } catch (e) { term.write(`\r\n\x1b[31m[send failed: ${e.message}]\x1b[0m\r\n`); }
     finally { sending = false; if (pending) flush(); }
@@ -1336,13 +1340,13 @@ async function openShell(dev) {
   term.onData(d => { pending += d; clearTimeout(sh.timer); sh.timer = setTimeout(flush, 12); });
 
   sh.state = 'arming'; paintLive();
-  try { await post(`/api/devices/${enc(dev)}/console/arm`); }
+  try { await post(`api/devices/${enc(dev)}/console/arm`); }
   catch (e) { term.write(`\x1b[33m[serial mode: ${e.message}]\x1b[0m\r\n`); }
   if (S.sh !== sh) return;
 
   const ctl = sh.ctl = new AbortController();
   try {
-    const r = await fetch(`/api/devices/${enc(dev)}/console`, { headers: authH(), signal: ctl.signal });
+    const r = await fetch(`api/devices/${enc(dev)}/console`, { headers: authH(), signal: ctl.signal });
     if (!r.ok || !r.body) throw new Error((await r.text()).trim() || r.statusText);
     sh.state = 'attached'; paintLive();
     pending += '\r'; flush(); // wake the getty so a prompt appears
@@ -1430,7 +1434,7 @@ async function loadLogs(force) {
   try {
     const q = new URLSearchParams({ source: S.logs.tab, lines: S.logs.lines });
     if (S.logs.tab === 'journal' && S.logs.unit) q.set('unit', S.logs.unit);
-    const t = await api(`/api/devices/${enc(d.name)}/logs?${q}`);
+    const t = await api(`api/devices/${enc(d.name)}/logs?${q}`);
     if (S.logs.key === key) { S.logs.text = typeof t === 'string' ? t : JSON.stringify(t, null, 2); S.logs.err = ''; }
   } catch (e) {
     if (S.logs.key === key) { S.logs.err = /404 page not found/i.test(e.message) ? 'This labd cannot read logs from the Mac yet.' : e.message; S.logs.errAt = Date.now(); }
@@ -1458,7 +1462,7 @@ async function liveTick(devices) {
   liveN++;
   const jobs = [];
   if (d.oob && S.stream !== 'up') {
-    jobs.push(api(`/api/devices/${enc(d.name)}/serial?lines=800`).then(t => {
+    jobs.push(api(`api/devices/${enc(d.name)}/serial?lines=800`).then(t => {
       const b = String(t || '').split('\n').filter(l => l.trim()).map(l => {
         const m = /^(\d{4}-\d\d-\d\dT[\d:.]+) (.*)$/.exec(l);
         return m ? { t: m[1], line: m[2] } : { t: '', line: l };
@@ -1467,8 +1471,8 @@ async function liveTick(devices) {
       if (b.length !== cur.length || b.at(-1)?.line !== cur.at(-1)?.line) { S.ser[d.name] = b; renderSerial(true); }
     }).catch(() => { }));
   }
-  if (d.oob && liveN % 7 === 1) jobs.push(api(`/api/devices/${enc(d.name)}/oob`).then(o => { S.oob[d.name] = o; }).catch(e => { S.oob[d.name] = { error: e.message }; }));
-  if (liveN % 4 === 1 || S.stream !== 'up') jobs.push(api(`/api/devices/${enc(d.name)}`).then(x => {
+  if (d.oob && liveN % 7 === 1) jobs.push(api(`api/devices/${enc(d.name)}/oob`).then(o => { S.oob[d.name] = o; }).catch(e => { S.oob[d.name] = { error: e.message }; }));
+  if (liveN % 4 === 1 || S.stream !== 'up') jobs.push(api(`api/devices/${enc(d.name)}`).then(x => {
     const seen = new Set((S.kev[d.name] || []).map(e => e.time + e.line));
     for (const e of x.recent_events || []) if (!seen.has(e.time + e.line)) (S.kev[d.name] ||= []).push(e);
     (S.kev[d.name] || []).sort((a, b) => new Date(a.time) - new Date(b.time));
@@ -1487,7 +1491,7 @@ async function stream() {
   S.streamCtl = ctl;
   let retry = 3000;
   try {
-    const r = await fetch('/api/stream', { headers: authH(), signal: ctl.signal });
+    const r = await fetch('api/stream', { headers: authH(), signal: ctl.signal });
     if (r.status === 404 || r.status === 405) { S.stream = 'none'; retry = 60000; return; }
     if (!r.ok || !r.body) throw new Error(String(r.status));
     S.stream = 'up';
@@ -1580,7 +1584,7 @@ function confirmJob(dev, kind) {
   modal(kind === 'baseline' ? `Baseline ${dev}` : `Crash-test ${dev}`, copy + `<p class="muted">Anyone using ${esc(dev)} loses their session.</p>`, [
     { label: 'Cancel', cls: 'ghost' },
     { label: kind === 'baseline' ? `${ic('shield')} Run baseline` : `${ic('flash')} Panic it`, cls: kind === 'baseline' ? 'primary' : 'danger', run: async () => {
-      try { const j = await post('/api/jobs', { device: dev, holder: 'web', ...(kind === 'baseline' ? { baseline: true } : { crash: 'panic' }) }); go('#/jobs/' + j.id); }
+      try { const j = await post('api/jobs', { device: dev, holder: 'web', ...(kind === 'baseline' ? { baseline: true } : { crash: 'panic' }) }); go('#/jobs/' + j.id); }
       catch (e) { toast('Could not start', e.message, true); }
     } },
   ]);
@@ -1590,17 +1594,17 @@ function confirmReset(dev) {
   const d = S.devices.find(x => x.name === dev);
   modal(`Reset ${dev}`, `<p>Runs the recovery ladder on ${esc(dev)}: soft reboot through the agent${d?.oob ? ', then a hard reset through its controller' : ''}, then a power-cycle request to a human if it still doesn't come back.</p>`, [
     { label: 'Cancel', cls: 'ghost' },
-    { label: `${ic('restart')} Reset`, cls: 'danger', run: async () => { try { toast('Recovery started', await post(`/api/devices/${encodeURIComponent(dev)}/reset?by=web`)); } catch (e) { toast('Could not reset', e.message, true); } } },
+    { label: `${ic('restart')} Reset`, cls: 'danger', run: async () => { try { toast('Recovery started', await post(`api/devices/${encodeURIComponent(dev)}/reset?by=web`)); } catch (e) { toast('Could not reset', e.message, true); } } },
   ]);
 }
 
 async function cancelJob(id) {
-  try { toast('Canceling', await post(`/api/jobs/${encodeURIComponent(id)}/cancel`)); tick(); } catch (e) { toast('Could not cancel', e.message, true); }
+  try { toast('Canceling', await post(`api/jobs/${encodeURIComponent(id)}/cancel`)); tick(); } catch (e) { toast('Could not cancel', e.message, true); }
 }
 
 // retryJob queues a finished job again: same Mac, kernel, tests and cmdline.
 async function retryJob(id) {
-  try { const n = await post(`/api/jobs/${enc(id)}/retry?holder=web`); go('#/jobs/' + n.id); } catch (e) { toast('Could not retry', e.message, true); }
+  try { const n = await post(`api/jobs/${enc(id)}/retry?holder=web`); go('#/jobs/' + n.id); } catch (e) { toast('Could not retry', e.message, true); }
 }
 
 function viewer(src) {
@@ -1697,7 +1701,7 @@ async function lock(msg = '') {
     S.token = tok;
     try {
       // A viewer can already read /api/devices, so ask labd what the token is worth.
-      const r = await fetch(S.viewer ? '/api/auth' : '/api/devices', { headers: { Authorization: 'Bearer ' + tok } });
+      const r = await fetch(S.viewer ? 'api/auth' : 'api/devices', { headers: { Authorization: 'Bearer ' + tok } });
       if (r.status === 401) throw new Error('That token was not accepted.');
       if (!r.ok) throw new Error(await r.text());
       if (S.viewer && (await r.json()).role !== 'admin') throw new Error('That token was not accepted.');
@@ -1710,7 +1714,7 @@ function unlock() { S.locked = false; S.laid = null; $('.lock')?.remove(); route
 
 let logoCache;
 async function logoSVG() {
-  if (!logoCache) { try { logoCache = await (await fetch('/ui/omarchy-logo.svg')).text(); } catch { logoCache = ''; } }
+  if (!logoCache) { try { logoCache = await (await fetch('ui/omarchy-logo.svg')).text(); } catch { logoCache = ''; } }
   return logoCache.replace(/<svg /, '<svg style="width:100%;height:auto" ');
 }
 
@@ -1721,7 +1725,7 @@ async function tick() {
   ticking = true;
   S.lastTick = Date.now();
   try {
-    const [devices, jobs] = await Promise.all([api('/api/devices'), api('/api/jobs?limit=40')]);
+    const [devices, jobs] = await Promise.all([api('api/devices'), api('api/jobs?limit=40')]);
     S.devices = devices; S.jobs = jobs; S.online = true;
     const want = new Set(jobs.filter(j => j.state !== 'done').map(j => j.id));
     if (S.view === 'jobs' && S.jobId) want.add(S.jobId);
@@ -1730,7 +1734,7 @@ async function tick() {
       const c = S.jobCache[id];
       if (c && c.state === 'done' && id !== S.jobId) return;
       if (c && c.state === 'done' && c.updated === jobs.find(j => j.id === id)?.updated) return;
-      try { S.jobCache[id] = await api('/api/jobs/' + encodeURIComponent(id)); } catch { }
+      try { S.jobCache[id] = await api('api/jobs/' + encodeURIComponent(id)); } catch { }
     }));
     if (S.view === 'jobs' && !S.jobId && jobs[0]) { S.jobId = jobs[0].id; }
     await buildsTick();
@@ -1758,14 +1762,14 @@ document.addEventListener('keydown', e => {
   // refused: labd was opened by a name it doesn't know as its own, which gets no access without a token.
   let refused = '';
   try {
-    const a = await (await fetch('/api/auth')).json();
+    const a = await (await fetch('api/auth')).json();
     S.open = !a.token_required;
     S.viewer = a.role === 'viewer';
     refused = a.refused || '';
   } catch { S.open = false; }
   if (!S.open && !S.token && !refused) {
     // An older labd has no /api/auth: try without a token before asking for one.
-    S.open = (await fetch('/api/devices').catch(() => null))?.ok || false;
+    S.open = (await fetch('api/devices').catch(() => null))?.ok || false;
   }
   if (!S.open && !S.token) { lock(refused); return; }
   route();

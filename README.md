@@ -255,9 +255,12 @@ is stopped (`systemctl stop lab-agent`).
 ```sh
 make                                 # binaries in bin/
 labd --maintainer <you>              # first start: you become the first Maintainer (default $USER)
-lab login http://<labd-host>:7770 "$(cat ~/.local/share/maclab/admin.token)"
-lab enroll m1air --label "MacBook Air M1, left desk"
+lab login http://127.0.0.1:7770 "$(cat ~/.local/share/maclab/admin.token)"
+lab enroll m1air --label "MacBook Air M1, left desk"   # prints the one-liner that joins the Mac
 ```
+
+To serve the lab over the internet, with no Tailscale, see
+[HTTPS without Tailscale](#https-without-tailscale).
 
 Each Maintainer has their own labd token. `lab maintainer add <name>` prints
 a new one once (labd keeps only its hash); `lab maintainer list` and
@@ -266,21 +269,44 @@ token at once. Jobs and Promotions record the Maintainer whose token asked.
 Upgrading from a labd with a single admin token keeps that token, in the same
 `admin.token` file, as the first Maintainer's (`--maintainer`, default `$USER`).
 
-labd listens on `127.0.0.1:7770` unless told otherwise. For Macs over Tailscale,
-start it with `--listen <tailnet-ip>:7770` (or `MACLAB_LISTEN`) so it is not
-reachable off the tailnet. Remote links are slow, so the timeouts that assume a
-LAN are flags: `--boot-timeout`, `--offline-after`, `--alive-window`,
-`--quiet-grace` and `--stage-timeout` (defaults are sized for remote Macs).
-Artifact downloads resume with HTTP range requests after a dropped transfer. An
-enrollment token is spent by the Mac's first check-in, so a failed `setup` can
-be run again with the same token until it expires. lab-agent's own request
-timeouts are `http_timeout_sec` and `transfer_timeout_sec` in its config file.
+labd listens on `127.0.0.1:7770` unless told otherwise. Plain http on any other
+address, such as `--listen <tailnet-ip>:7770` for Macs over Tailscale, needs
+`--allow-plain-http`: tokens and device secrets then cross that network in the
+clear. Otherwise give labd a certificate or put it behind an https proxy (see
+[HTTPS without Tailscale](#https-without-tailscale)). Remote links are slow, so
+the timeouts that assume a LAN are flags: `--boot-timeout`, `--offline-after`,
+`--alive-window`, `--quiet-grace` and `--stage-timeout` (defaults are sized for
+remote Macs). Artifact downloads resume with HTTP range requests after a dropped
+transfer. lab-agent's own request timeouts are `http_timeout_sec` and
+`transfer_timeout_sec` in its config file.
 
-On the Mac:
+An enrollment token activates one Mac, once. The first enrollment with it uses
+it up for that Mac's activation key, which `setup` keeps until it has finished:
+a `setup` that stopped half way can run again on the same Mac with the same
+token until the Mac first checks in, while labd keeps running. Once lab-agent
+has started and checked in (which uses the token up), finish with `sudo
+lab-agent setup` and no token. Another Mac holding a copy of the token gets
+nothing. After a labd restart, or once the token has expired, `lab forget
+<name>` and make a new one. `lab enroll <name>
+--revoke` withdraws a token.
+
+On the Mac, `lab enroll`'s one-liner (also in the web UI) downloads lab-agent,
+checks its sha256 and runs `setup`, handing it the token on stdin. By hand:
 
 ```sh
-sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-user <you> --autologin
+printf '%s\n' enr_... | sudo ./lab-agent setup --server https://<labd> --token-stdin --gui-user <you> --autologin
 ```
+
+Before it changes anything, `setup` shows labd's participation terms (what the
+lab may do to the Mac) and goes on only when you type `yes`. Without a terminal
+it stops, unless `--accept-terms <sha256>` names the exact terms you read
+(`GET <labd>/api/join/terms` with the token). labd keeps the sha256 of the
+terms each Mac accepted, and takes no enrollment that accepted others. With
+`--tailscale-authkey`, which joins the tailnet before labd can be reached,
+`--accept-terms` is required: the join happens on that acceptance, and if
+labd's terms then turn out to differ, setup stops before enrolling (the join
+stays). The one-liner holds the token, so keep it private; the token stays
+out of URLs, labd's log and the arguments of the curl and sudo it starts.
 
 `setup` makes these changes. Each one is idempotent and backed up:
 
@@ -912,6 +938,58 @@ browsers reach labd by another name, a DNS alias say, run labd with
 device secrets and the builder token work by any name, so the lab CLI, agents,
 builders and scripts with a token don't care.
 
+## HTTPS without Tailscale
+
+labd can run as an ordinary HTTPS service on a host of its own, such as
+`https://maclab.chonkbase.net` in Kubernetes behind ingress-nginx. Maintainers
+use the UI, `lab` and MCP over HTTPS; Macs reach labd with outbound requests
+only (long-poll check-ins, reports, uploads, artifact downloads), and nothing
+connects to a Mac. [docs/https.md](docs/https.md) has the deployment, the
+manifests in `deploy/k8s/`, moving labd from one host to another and back, and
+proxy settings.
+
+- **TLS:** `--tls-cert`/`--tls-key` serve TLS 1.2+ and re-read renewed files;
+  or listen on loopback (or, in a pod, with `--allow-plain-http`) behind an
+  https proxy.
+- **One public URL:** `--public-url https://maclab.example.com`. labd can also
+  live under a path of a shared host (`--public-url https://example.com/maclab`):
+  it serves everything under the prefix, removes it once, and answers 404
+  outside it; the proxy passes the path on unchanged. See the next point first.
+- **Proxies:** `--trusted-proxy <CIDRs>`. Only those peers may send
+  `X-Forwarded-Proto`/`X-Forwarded-Host`, and those must name the public URL,
+  or labd answers 421. They are never anyone's identity. It doesn't go with
+  `--tailscale`, and no relayed request ever counts as a tailnet viewer.
+- **Browsers:** a change must come from labd's own origin, scheme, host and
+  port. API answers, Mac uploads included, are sandboxed so an uploaded page
+  can't run in labd's origin, and HSTS is sent over https. A prefix is not an
+  origin: on a host shared with other apps, every script they serve can read
+  the token the UI keeps. That is why labd gets a host of its own; share a host
+  only with apps trusted as much as labd.
+- **Clients** (`lab`, MCP, lab-agent, lab-builder): https is verified against
+  the system's roots plus an optional private CA (`--ca-file`,
+  `MACLAB_CA_FILE`); verification can't be turned off. Redirects and proxies
+  from the environment are not followed. Plain `http://` reaches loopback only
+  unless allowed on purpose (`--allow-plain-http`, `MACLAB_ALLOW_PLAIN_HTTP=1`).
+  An agent.json from before this keeps its plain http with a warning; the next
+  `setup` records the choice. When labd moves, `sudo lab-agent move --server
+  <new URL>` points an enrolled Mac at it: it asks the new labd, with the Mac's
+  own secret, whether it knows the Mac, rewrites only labd's address, CA and
+  plain-http choice in agent.json, and restarts lab-agent; nothing else on the
+  Mac changes. (`setup` refuses to move an enrolled Mac.)
+- **Macs fetch only what their job needs:** a Mac downloads an artifact only
+  if a command for its running job named it, until that job ends, or if a
+  Maintainer granted it explicitly for a while
+  (`POST /api/devices/<name>/artifact-grants`, which bt2 uses). It adds files
+  only to its running job, up to 1 GiB each. A job runs only on the enrollment
+  it was submitted for.
+- **Probes:** `GET <prefix>/healthz` answers `ok` to anyone.
+- **The clock:** right after a reboot a Mac's clock can be decades behind until
+  NTP sets it, and labd's certificate looks not valid yet. lab-agent says so,
+  keeps trying with verification on, and gets through once the time is right.
+- **Out-of-band control** (oobd on the controller Mac) stays on the lab's
+  private network: labd calls it, so a labd in the cloud has none (tier 1)
+  unless given a private route to it. Never expose oobd publicly.
+
 ## Tailscale
 
 Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while
@@ -920,8 +998,12 @@ joins. Nothing in maclab holds a Tailscale API key; a maintainer does the
 tailnet side by hand.
 
 ```sh
-labd --listen <labd tailnet IP>:7770 --tailscale
+labd --listen <labd tailnet IP>:7770 --allow-plain-http --tailscale
 ```
+
+Tailnet traffic is encrypted by WireGuard, but labd can't tell that from the
+address, so plain http there still needs `--allow-plain-http` (and clients
+their own opt-in, or an https URL).
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5

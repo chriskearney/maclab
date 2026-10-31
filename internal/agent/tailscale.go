@@ -15,6 +15,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 // tailnet joins this Mac to the lab's tailnet. Commands and the reachability
@@ -347,10 +349,18 @@ func AuthKey(arg, file string, stdin io.Reader) (string, error) {
 }
 
 // reachable waits up to 30 seconds for labd to answer at all: routes to a
-// new tailnet peer take a moment.
+// new tailnet peer take a moment. It sends no credential, so plain http is
+// fine here; https is verified as always, against the system's roots.
 func reachable(ctx context.Context, server string) error {
-	c := &http.Client{Timeout: 5 * time.Second}
-	var err error
+	return reachableWith(ctx, server, nil)
+}
+
+// reachableWith is reachable trusting caPEM besides the system's roots.
+func reachableWith(ctx context.Context, server string, caPEM []byte) error {
+	c, err := labhttp.Policy{CAPEM: caPEM, AllowPlainHTTP: true}.Client(5 * time.Second)
+	if err != nil {
+		return err
+	}
 	for range 10 {
 		var resp *http.Response
 		if resp, err = c.Get(strings.TrimSuffix(server, "/") + "/api/auth"); err == nil {

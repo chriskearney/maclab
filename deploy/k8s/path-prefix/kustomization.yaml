@@ -1,0 +1,41 @@
+# Compatibility layout: labd at https://chonkbase.net/maclab, sharing the chonkbase.net origin with the chonkbase
+# frontend at "/". Supported, but every app on that origin must be trusted as much as labd: the UI keeps the Maintainer
+# token in the origin's localStorage (docs/https.md, "Origin and trust"). base/ (maclab.chonkbase.net) is the default.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../base
+patches:
+  - target: { kind: Certificate, name: maclab-tls }
+    patch: |-
+      - op: replace
+        path: /spec/dnsNames
+        value: [chonkbase.net]
+  - target: { kind: Ingress, name: maclab }
+    patch: |-
+      - op: replace
+        path: /spec/tls/0/hosts
+        value: [chonkbase.net]
+      - op: replace
+        path: /spec/rules/0/host
+        value: chonkbase.net
+      - op: replace
+        path: /spec/rules/0/http/paths/0/path
+        value: /maclab
+  - target: { kind: Deployment, name: maclab }
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/args/3
+        value: --public-url=https://chonkbase.net/maclab
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/path
+        value: /maclab/healthz
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/path
+        value: /maclab/healthz
+      - op: replace
+        path: /spec/template/spec/containers/0/readinessProbe/httpGet/httpHeaders/1/value
+        value: chonkbase.net
+      - op: replace
+        path: /spec/template/spec/containers/0/livenessProbe/httpGet/httpHeaders/1/value
+        value: chonkbase.net

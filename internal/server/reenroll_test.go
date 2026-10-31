@@ -10,7 +10,11 @@ import (
 	"github.com/iconidentify/maclab/internal/api"
 )
 
-func TestMacThatNeverCheckedInLosesItsNameWhenItsTokenExpires(t *testing.T) {
+// A Mac that enrolled but never checked in keeps its name, even once its
+// token has run out: activation is one-time, so a new token for the name is
+// refused, with what to do. After lab forget, the name takes a new
+// enrollment, and the old secret is worth nothing.
+func TestMacThatNeverCheckedInKeepsItsNameUntilForgotten(t *testing.T) {
 	clock := agent.NewFakeClock(time.Now())
 	l := newLabWith(t, labConfig{clock: clock})
 	first := l.enrollToken("ghost-mac")
@@ -23,16 +27,23 @@ func TestMacThatNeverCheckedInLosesItsNameWhenItsTokenExpires(t *testing.T) {
 	clock.Advance(25 * time.Hour)
 
 	resp, body = l.post("/api/enroll-tokens", api.EnrollTokenRequest{Name: "ghost-mac"})
+	if resp.StatusCode != 409 || !strings.Contains(body, "lab forget ghost-mac") {
+		t.Fatalf("a new token for a Mac that never checked in: %s %s", resp.Status, body)
+	}
+	if resp, body := l.get("DELETE", "/api/devices/ghost-mac?force=true"); resp.StatusCode != 200 {
+		t.Fatalf("forget: %s %s", resp.Status, body)
+	}
+	resp, body = l.post("/api/enroll-tokens", api.EnrollTokenRequest{Name: "ghost-mac"})
 	var tok api.EnrollTokenResponse
 	if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &tok) != nil {
-		t.Fatalf("a new token for a Mac that never checked in: %s %s", resp.Status, body)
+		t.Fatalf("a new token after forget: %s %s", resp.Status, body)
 	}
 	resp, body = l.enrollRaw(tok.Token)
 	var renewed api.EnrollResponse
 	if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &renewed) != nil {
 		t.Fatalf("enrolling with the new token: %s %s", resp.Status, body)
 	}
-	if renewed.Name != "ghost-mac" || renewed.Secret == "" || renewed.Secret == old.Secret {
+	if renewed.Name != "ghost-mac" || renewed.DeviceID == old.DeviceID || renewed.Secret == "" || renewed.Secret == old.Secret {
 		t.Fatalf("the new enrollment: %+v after %+v", renewed, old)
 	}
 	if resp := l.checkinAs(old.Secret); resp.StatusCode != 401 {

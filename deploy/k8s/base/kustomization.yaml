@@ -1,0 +1,15 @@
+# kubectl kustomize deploy/k8s/base   renders it; set the image tag and the trusted-proxy CIDR first (docs/https.md).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - namespace.yaml
+  - pvc.yaml
+  - certificate.yaml
+  - service.yaml
+  - networkpolicy.yaml
+  - ingress.yaml
+  - deployment.yaml
+images:
+  - name: maclab
+    newName: ghcr.io/iconidentify/maclab
+    newTag: SET-IMAGE-TAG

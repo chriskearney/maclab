@@ -194,7 +194,7 @@ func TestDNSRebinding(t *testing.T) {
 	}
 
 	// Agents enroll, check in and report by whatever name they were given.
-	got = try("POST", "http://evil.example:7770/api/agent/enroll", lan, "", "", `{"token":"`+tok+`"}`)
+	got = try("POST", "http://evil.example:7770/api/agent/enroll", lan, "", "", enrollJSON(tok))
 	var enr api.EnrollResponse
 	if json.Unmarshal([]byte(got.body), &enr); got.code != 200 || enr.Secret == "" {
 		t.Fatalf("enroll by any name: %d %s", got.code, got.body)

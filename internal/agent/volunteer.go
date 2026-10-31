@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"strings"
 	"time"
 
@@ -59,7 +58,7 @@ func showStatus(ctx context.Context, cfg *Config, sys System, args []string, out
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var live api.AgentEnrollment
-	if err := getJSON(ctx, http.DefaultClient, strings.TrimRight(cfg.Server, "/")+"/api/agent/enrollment", cfg.Secret, &live); err != nil {
+	if err := getJSON(ctx, cfg.client(0), strings.TrimRight(cfg.Server, "/")+"/api/agent/enrollment", cfg.Secret, &live); err != nil {
 		from = fmt.Sprintf(" (as recorded at setup; labd did not answer: %v)", err)
 	} else {
 		e = live

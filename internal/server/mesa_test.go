@@ -209,7 +209,7 @@ func TestMesaStoredJobReachesNothing(t *testing.T) {
 	now := time.Now()
 	blocked := mesaSpec(l)
 	blocked.Mesa.Mode = api.MesaInstalled
-	j := &api.Job{ID: "j1026-000001-ab12", Spec: blocked, State: api.JobQueued, Created: now, Updated: now,
+	j := &api.Job{ID: "j1026-000001-ab12", Spec: blocked, DeviceID: v.snapshot().ID, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: "queued"}}}
 	if err := l.s.store.saveJob(j); err != nil {
 		t.Fatal(err)

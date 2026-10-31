@@ -17,12 +17,22 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 type Client struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
-	http  *http.Client
+	// CAFile is a PEM file of extra CA certificates for an https labd whose
+	// certificate the system doesn't trust: a private CA, or labd's own
+	// self-signed certificate (lab login --ca-file, MACLAB_CA_FILE).
+	CAFile string `json:"ca_file,omitempty"`
+	// AllowPlainHTTP lets an http:// URL reach labd on another machine (lab
+	// login --allow-plain-http, MACLAB_ALLOW_PLAIN_HTTP=1). Without it plain
+	// http reaches loopback only: the token would cross the network in the
+	// clear. See labhttp.
+	AllowPlainHTTP bool `json:"allow_plain_http,omitempty"`
+	http           *http.Client
 }
 
 func ConfigPath() string {
@@ -30,7 +40,8 @@ func ConfigPath() string {
 	return filepath.Join(dir, "maclab", "client.json")
 }
 
-// Load reads MACLAB_URL / MACLAB_TOKEN, falling back to the saved config.
+// Load reads MACLAB_URL / MACLAB_TOKEN / MACLAB_CA_FILE /
+// MACLAB_ALLOW_PLAIN_HTTP, falling back to the saved config.
 func Load() (*Client, error) {
 	c := &Client{}
 	if b, err := os.ReadFile(ConfigPath()); err == nil {
@@ -42,12 +53,41 @@ func Load() (*Client, error) {
 	if v := os.Getenv("MACLAB_TOKEN"); v != "" {
 		c.Token = v
 	}
+	if v := os.Getenv("MACLAB_CA_FILE"); v != "" {
+		c.CAFile = v
+	}
+	if os.Getenv("MACLAB_ALLOW_PLAIN_HTTP") == "1" {
+		c.AllowPlainHTTP = true
+	}
 	if c.URL == "" || c.Token == "" {
 		return nil, fmt.Errorf("not configured: run `lab login <labd-url> <your-maintainer-token>` or set MACLAB_URL and MACLAB_TOKEN")
 	}
 	c.URL = strings.TrimRight(c.URL, "/")
-	c.http = &http.Client{}
+	if err := c.connect(); err != nil {
+		return nil, err
+	}
 	return c, nil
+}
+
+// connect sets up c's HTTP client with labhttp's policy for c.URL.
+func (c *Client) connect() error {
+	if err := labhttp.CheckServer(c.URL, c.AllowPlainHTTP); err != nil {
+		return err
+	}
+	p := labhttp.Policy{AllowPlainHTTP: c.AllowPlainHTTP}
+	if c.CAFile != "" {
+		b, err := labhttp.ReadCAFile(c.CAFile)
+		if err != nil {
+			return err
+		}
+		p.CAPEM = b
+	}
+	hc, err := p.Client(0)
+	if err != nil {
+		return err
+	}
+	c.http = hc
+	return nil
 }
 
 func (c *Client) Save() error {
@@ -124,6 +164,15 @@ func (c *Client) PatchDevice(ctx context.Context, name string, p api.DevicePatch
 func (c *Client) EnrollToken(ctx context.Context, req api.EnrollTokenRequest) (*api.EnrollTokenResponse, error) {
 	var out api.EnrollTokenResponse
 	return &out, c.do(ctx, "POST", "/api/enroll-tokens", jsonBody(req), &out)
+}
+
+// RevokeEnrollTokens revokes a name's enrollment tokens, used or not, and
+// says how many there were.
+func (c *Client) RevokeEnrollTokens(ctx context.Context, name string) (int, error) {
+	var out struct {
+		Revoked int `json:"revoked"`
+	}
+	return out.Revoked, c.do(ctx, "DELETE", "/api/enroll-tokens/"+url.PathEscape(name), nil, &out)
 }
 
 func (c *Client) Maintainers(ctx context.Context) ([]api.Maintainer, error) {
@@ -259,9 +308,21 @@ func (c *Client) Jobs(ctx context.Context, device string, limit int) ([]*api.Job
 }
 
 // Wait long-polls until the job is done or timeout passes, returning its latest state.
+// waitSlice is the longest one wait request lasts. A reverse proxy in front of
+// labd may cut a request that sends nothing for a minute (nginx's default),
+// so Wait asks again until timeout instead of holding one request open.
+const waitSlice = 50 * time.Second
+
 func (c *Client) Wait(ctx context.Context, id string, timeout time.Duration) (*api.Job, error) {
-	var out api.Job
-	return &out, c.do(ctx, "GET", fmt.Sprintf("/api/jobs/%s/wait?timeout=%d", url.PathEscape(id), int(timeout.Seconds())), nil, &out)
+	deadline := time.Now().Add(timeout)
+	for {
+		slice := min(time.Until(deadline), waitSlice)
+		var out api.Job
+		err := c.do(ctx, "GET", fmt.Sprintf("/api/jobs/%s/wait?timeout=%d", url.PathEscape(id), max(int(slice.Seconds()), 1)), nil, &out)
+		if err != nil || out.State == api.JobDone || time.Until(deadline) <= 0 {
+			return &out, err
+		}
+	}
 }
 
 // Publish uploads a job's omarchy-m-test report and returns its page.

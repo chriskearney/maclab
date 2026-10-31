@@ -93,6 +93,19 @@ func (s *Server) deviceLoop(v *dev) {
 
 func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	r := &jobRun{s: s, v: v, j: j, boot: s.cfg.BootTimeout}
+	// A job runs only on the enrollment it was submitted for: never on a Mac
+	// that took the name later, nor, when labd didn't record which, on any.
+	v.mu.Lock()
+	enrollment := v.d.ID
+	v.mu.Unlock()
+	if j.DeviceID != enrollment {
+		why := "it was submitted for an earlier enrollment of " + j.Spec.Device
+		if j.DeviceID == "" {
+			why = "it was queued before labd recorded which enrollment of a Mac a job is for"
+		}
+		r.finish(api.OutcomeCanceled, "not run: "+why+"; submit it again")
+		return
+	}
 	if err := s.beginJobRecoveryMode(ctx, v, j); err != nil {
 		r.finish(api.OutcomeInfra, "recovery mode admission failed before device commands: "+err.Error())
 		return
@@ -320,6 +333,11 @@ func (r *jobRun) canceledAfter(outcome, summary string) (string, string) {
 func (r *jobRun) finish(outcome, summary string) { r.finishAt(outcome, summary, r.s.now()) }
 
 func (r *jobRun) finishAt(outcome, summary string, at time.Time) {
+	// The Mac's authority over the job ends before anyone can see the job
+	// done: no more fetching its artifacts or adding its files.
+	if r.v != nil {
+		r.v.endJobLocked(r.j.ID)
+	}
 	r.s.updateJob(r.j, func(j *api.Job) {
 		j.State, j.Outcome, j.Summary = api.JobDone, outcome, summary
 		if j.Result.Mesa != nil && outcome != api.OutcomePass {
