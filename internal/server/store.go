@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -193,6 +194,19 @@ func (s *store) jobs(device string, limit int, unfinished bool) ([]*api.Job, err
 	}
 	q += ` ORDER BY created DESC LIMIT ?`
 	return scanJobs(s.db.Query(q, device, device, limit))
+}
+
+// jobsOn lists the newest jobs on the Macs named, up to limit.
+func (s *store) jobsOn(devices []string, limit int) ([]*api.Job, error) {
+	if len(devices) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(devices)+1)
+	for _, d := range devices {
+		args = append(args, d)
+	}
+	q := `SELECT data FROM jobs WHERE device IN (?` + strings.Repeat(",?", len(devices)-1) + `) ORDER BY created DESC LIMIT ?`
+	return scanJobs(s.db.Query(q, append(args, limit)...))
 }
 
 // kernelJobs lists the finished jobs that ran a kernel artifact, newest first.
