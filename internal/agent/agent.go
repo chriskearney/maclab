@@ -26,6 +26,7 @@ import (
 
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 const Version = "0.8.0"
@@ -43,6 +44,13 @@ type Config struct {
 	// upload; a Mac far from labd needs both longer. Zero is the default.
 	HTTPTimeoutSec     int `json:"http_timeout_sec,omitempty"`
 	TransferTimeoutSec int `json:"transfer_timeout_sec,omitempty"`
+	// ServerCA is PEM certificates trusted for labd's https besides the
+	// system's (setup --ca-file). AllowPlainHTTP is whether an http:// labd on
+	// another machine is allowed (setup --allow-plain-http); setup always
+	// writes it, and its absence means agent.json predates https support
+	// (see transport.go).
+	ServerCA       string `json:"server_ca,omitempty"`
+	AllowPlainHTTP *bool  `json:"allow_plain_http,omitempty"`
 	// Clock is where lab-agent reads time; nil is the wall clock.
 	Clock Clock `json:"-"`
 }
@@ -98,6 +106,7 @@ func (c *Config) Save(path string) error {
 type Agent struct {
 	cfg  *Config
 	sys  System
+	rt   http.RoundTripper // every request to labd, with cfg's policy
 	http *http.Client
 	log  *log.Logger
 
@@ -142,10 +151,15 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 	if logger == nil {
 		logger = log.New(os.Stderr, "lab-agent: ", log.LstdFlags)
 	}
+	rt := cfg.transport()
+	if _, legacy := cfg.transportPolicy(); legacy {
+		logger.Print(legacyPlainWarning(cfg.Server))
+	}
 	return &Agent{
 		cfg:     cfg,
 		sys:     sys,
-		http:    &http.Client{Timeout: cfg.httpTimeout()},
+		rt:      rt,
+		http:    labhttp.Client(rt, cfg.httpTimeout()),
 		log:     logger,
 		seen:    map[string]bool{},
 		running: map[string]runningCmd{},
@@ -156,10 +170,31 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 
 func (a *Agent) clock() Clock { return a.cfg.clock() }
 
-// Enroll trades a one-time token for a device identity.
+// Enroll trades a one-time token for a device identity, for a simulated Mac
+// and tests: it reads labd's participation terms and accepts them, as the
+// Mac's owner does at setup by typing yes, with a new activation key. It
+// trusts the system's roots and allows plain http to loopback only.
 func Enroll(ctx context.Context, server, token string, facts api.Facts) (*api.EnrollResponse, error) {
+	var sum string
+	if t, err := FetchTerms(ctx, server, token, labhttp.Policy{}); err == nil {
+		sum = t.SHA256
+	}
+	return EnrollWith(ctx, server, token, facts, labhttp.Policy{}, Activation{Key: NewActivationKey(), TermsSHA256: sum})
+}
+
+// EnrollWith trades a one-time token for a device identity, reaching labd as
+// p says, with act's activation key and accepted terms.
+func EnrollWith(ctx context.Context, server, token string, facts api.Facts, p labhttp.Policy, act Activation) (*api.EnrollResponse, error) {
+	if err := labhttp.CheckServer(server, p.AllowPlainHTTP); err != nil {
+		return nil, err
+	}
+	c, err := p.Client(0)
+	if err != nil {
+		return nil, err
+	}
 	var resp api.EnrollResponse
-	err := postJSON(ctx, http.DefaultClient, strings.TrimRight(server, "/")+"/api/agent/enroll", "", api.EnrollRequest{Token: token, Facts: facts}, &resp)
+	err = postJSON(ctx, c, strings.TrimRight(server, "/")+"/api/agent/enroll", "",
+		api.EnrollRequest{Token: token, Facts: facts, ActivationKey: act.Key, TermsSHA256: act.TermsSHA256}, &resp)
 	return &resp, err
 }
 
@@ -231,7 +266,7 @@ func (a *Agent) Run(ctx context.Context) error {
 			continue // the machine rebooted under the long poll
 		}
 		if err != nil && ctx.Err() == nil {
-			a.log.Printf("checkin: %v", err)
+			a.log.Printf("checkin: %v%s", err, certTimeHint(err, a.clock().Now()))
 			sleepCtx(ctx, a.clock(), 5*time.Second)
 		}
 	}
@@ -952,7 +987,7 @@ func (a *Agent) uploadScreen(ctx context.Context, path string) (string, error) {
 	req, _ := http.NewRequestWithContext(ctx, "POST", a.url("/api/agent/screen"), f)
 	req.Header.Set("Authorization", "Bearer "+a.cfg.Secret)
 	req.Header.Set("Content-Type", "image/jpeg")
-	resp, err := (&http.Client{Timeout: a.cfg.transferTimeout()}).Do(req)
+	resp, err := labhttp.Client(a.rt, a.cfg.transferTimeout()).Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -1100,7 +1135,7 @@ func (a *Agent) fetchOnce(ctx context.Context, sha, part string) (permanent bool
 	if have > 0 {
 		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
 	}
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := labhttp.Client(a.rt, 0).Do(req)
 	if err != nil {
 		return false, err
 	}
@@ -1191,7 +1226,7 @@ func (a *Agent) uploadOnce(ctx context.Context, job, name, path string) error {
 	q := url.Values{"job": {job}, "name": {name}}
 	req, _ := http.NewRequestWithContext(ctx, "POST", a.url("/api/agent/upload?"+q.Encode()), f)
 	req.Header.Set("Authorization", "Bearer "+a.cfg.Secret)
-	resp, err := (&http.Client{Timeout: a.cfg.transferTimeout()}).Do(req)
+	resp, err := labhttp.Client(a.rt, a.cfg.transferTimeout()).Do(req)
 	if err != nil {
 		return err
 	}

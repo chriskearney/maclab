@@ -39,8 +39,9 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 	if err := addColumn(db, "tokens", "requester", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
-	// A labd from before Volunteer enrollment has tokens without these.
-	for _, col := range []string{"volunteer_name", "contact"} {
+	// A labd from before Volunteer enrollment has tokens without these, and
+	// one from before one-time activation without activated_by.
+	for _, col := range []string{"volunteer_name", "contact", "activated_by"} {
 		if err := addColumn(db, "tokens", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return nil, err
 		}
@@ -149,6 +150,40 @@ func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, erro
 		return nil, sql.ErrNoRows
 	}
 	return &r, nil
+}
+
+// tokenState is token, and the hash of the activation key that used the
+// token up, "" while it is unused.
+func (s *store) tokenState(hash string, now time.Time) (*api.EnrollTokenRequest, string, error) {
+	t, err := s.token(hash, now)
+	if err != nil {
+		return nil, "", err
+	}
+	var by string
+	err = s.db.QueryRow(`SELECT activated_by FROM tokens WHERE token_hash=?`, hash).Scan(&by)
+	return t, by, err
+}
+
+// activateToken uses up an unused, unexpired token for the activation whose
+// key hashes to keyHash, and says whether it did: of two enrollments racing
+// with one token, one wins.
+func (s *store) activateToken(hash, keyHash string, now time.Time) (bool, error) {
+	res, err := s.db.Exec(`UPDATE tokens SET activated_by=? WHERE token_hash=? AND activated_by='' AND expires>=?`, keyHash, hash, now.Unix())
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// revokeTokens deletes the enrollment tokens for a name, used or not, and
+// says how many there were.
+func (s *store) revokeTokens(name string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM tokens WHERE name=?`, name)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // spendTokens uses up the enrollment tokens for a name: its Mac has checked in.

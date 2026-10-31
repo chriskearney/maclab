@@ -93,6 +93,19 @@ func (s *Server) deviceLoop(v *dev) {
 
 func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 	r := &jobRun{s: s, v: v, j: j, boot: s.cfg.BootTimeout}
+	// A job runs only on the enrollment it was submitted for: never on a Mac
+	// that took the name later, nor, when labd didn't record which, on any.
+	v.mu.Lock()
+	enrollment := v.d.ID
+	v.mu.Unlock()
+	if j.DeviceID != enrollment {
+		why := "it was submitted for an earlier enrollment of " + j.Spec.Device
+		if j.DeviceID == "" {
+			why = "it was queued before labd recorded which enrollment of a Mac a job is for"
+		}
+		r.finish(api.OutcomeCanceled, "not run: "+why+"; submit it again")
+		return
+	}
 	if err := s.beginJobRecoveryMode(ctx, v, j); err != nil {
 		r.finish(api.OutcomeInfra, "recovery mode admission failed before device commands: "+err.Error())
 		return

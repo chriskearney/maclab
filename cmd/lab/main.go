@@ -23,16 +23,18 @@ import (
 
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/client"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 const usage = `lab: run kernels and tests on Omarchy Macs
 
   lab boot-test --catalog-descriptor PIN --profile ID --request FILE --review-descriptor PIN --out DIR [--compile | --execute --authorization FILE]
-  lab login <labd-url> <your-maintainer-token>
+  lab login <labd-url> <your-maintainer-token> [--ca-file <pem>] [--allow-plain-http]
   lab maintainer add <name> | remove <name> | list   the people with their own labd token
   lab status [device]                 devices, what they're doing, and anything a human must do
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
-             [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one
+             [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one; prints the one-liner
+                                      the Mac's owner runs to join it (--revoke: revoke its unused token)
   lab remove <mac>                    end a Mac's enrollment: its device secret stops working at once, and lab-agent
                                       removes the lab from the Mac at its next check-in (a Volunteer is told)
   lab device <name> [--label ..] [--model ..] [--oob-url http://m3:7780 --oob-token ..] [--no-oob]
@@ -158,9 +160,18 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		model := fs.String("model", api.ModelLaptop, "laptop or desktop")
 		volunteer := fs.String("volunteer", "", "the Volunteer whose Mac this is (with --contact); none makes a Lab-owned Mac")
 		contact := fs.String("contact", "", "how to reach the Volunteer")
+		revoke := fs.Bool("revoke", false, "revoke the enrollment tokens for <name>, used or not, instead of making one")
 		pos := parse(fs, args)
-		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact>]`); err != nil {
+		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact>] | lab enroll <name> --revoke`); err != nil {
 			return err
+		}
+		if *revoke {
+			n, err := c.RevokeEnrollTokens(ctx, pos[0])
+			if err != nil {
+				return err
+			}
+			fmt.Printf("revoked %d enrollment token(s) for %s\n", n, pos[0])
+			return nil
 		}
 		if (strings.TrimSpace(*volunteer) == "") != (strings.TrimSpace(*contact) == "") {
 			return fmt.Errorf("a Volunteer's Mac needs both --volunteer and --contact")
@@ -173,9 +184,13 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if v := strings.TrimSpace(*volunteer); v != "" {
 			kind = "the Volunteer " + v + "'s Mac"
 		}
-		fmt.Printf("Enrollment token for %s, %s (one use, expires %s):\n\n  %s\n\n", pos[0], kind, t.Expires.Format(time.DateTime), t.Token)
-		fmt.Printf("On the Mac, copy lab-agent over and run:\n\n  sudo ./lab-agent setup --server %s --token %s [--gui-user <you>]\n\n", c.URL, t.Token)
-		fmt.Printf("Then: lab baseline %s\n", pos[0])
+		fmt.Printf("Enrollment token for %s, %s (one activation, expires %s). Keep it private.\n\n", pos[0], kind, t.Expires.Format(time.DateTime))
+		if t.JoinCommand != "" {
+			fmt.Printf("The Mac's owner runs this in a terminal on the Mac; it shows the lab's terms, and joins once they type yes:\n\n  %s\n\n", t.JoinCommand)
+		} else {
+			fmt.Printf("labd has no lab-agent to hand out: copy lab-agent to the Mac and run\n\n  sudo ./lab-agent setup --server %s --token %s [--gui-user <you>]\n\n", c.URL, t.Token)
+		}
+		fmt.Printf("Revoke it unused: lab enroll %s --revoke. Then: lab baseline %s\n", pos[0], pos[0])
 		return nil
 
 	case "device":
@@ -1093,10 +1108,28 @@ func trunc(s string, n int) string {
 }
 
 func login(args []string) error {
-	if len(args) != 2 {
-		return fmt.Errorf("usage: lab login <labd-url> <your-maintainer-token>")
+	fs := flag.NewFlagSet("login", flag.ExitOnError)
+	caFile := fs.String("ca-file", "", "PEM file of CA certificates for labd's https certificate, when the system doesn't trust it (a private CA, or labd's own certificate)")
+	plain := fs.Bool("allow-plain-http", false, "let an http:// URL reach labd on another machine: the token then crosses the network unencrypted")
+	pos := parse(fs, args)
+	if len(pos) != 2 {
+		return fmt.Errorf("usage: lab login <labd-url> <your-maintainer-token> [--ca-file <pem>] [--allow-plain-http]")
 	}
-	c := &client.Client{URL: strings.TrimRight(args[0], "/"), Token: args[1]}
+	c := &client.Client{URL: strings.TrimRight(pos[0], "/"), Token: pos[1], AllowPlainHTTP: *plain}
+	// Refused before anything is saved or sent.
+	if err := labhttp.CheckServer(c.URL, c.AllowPlainHTTP); err != nil {
+		return err
+	}
+	if *caFile != "" {
+		abs, err := filepath.Abs(*caFile)
+		if err != nil {
+			return err
+		}
+		if _, err := labhttp.ReadCAFile(abs); err != nil {
+			return err
+		}
+		c.CAFile = abs
+	}
 	if err := c.Save(); err != nil {
 		return err
 	}

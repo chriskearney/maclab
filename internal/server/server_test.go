@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,7 +27,9 @@ import (
 
 	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/labhttp"
 	"github.com/iconidentify/maclab/internal/oob"
+	"github.com/iconidentify/maclab/internal/testpki"
 )
 
 // fakeOOB is a Central-Scrutinizer-shaped controller wired to a simulated Mac.
@@ -74,6 +77,16 @@ type lab struct {
 	ctx    context.Context
 	agent  *agent.Config // the simulated Mac's enrolled lab-agent
 	logs   *logBuf
+	hc     *http.Client // the harness's client for labd; nil is apiClient
+}
+
+// client is the harness's HTTP client for labd: apiClient, or one trusting
+// the lab's test CA when labd serves https.
+func (l *lab) client() *http.Client {
+	if l.hc != nil {
+		return l.hc
+	}
+	return apiClient
 }
 
 // harnessMaintainer is the first Maintainer of every harness labd, and
@@ -124,6 +137,11 @@ type labConfig struct {
 	wrap func(http.Handler) http.Handler
 	// config adjusts labd's Config before it starts.
 	config func(*Config)
+	// tls serves labd over https with a certificate from this CA, which the
+	// simulated Mac and the harness trust; prefix serves it under that path
+	// of its public URL. Either sets --public-url.
+	tls    *testpki.CA
+	prefix string
 }
 
 func newLabWith(t *testing.T, c labConfig) *lab {
@@ -163,6 +181,17 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 	cfg := Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
 		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
 		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}
+	// labd's address is known before it starts, for its public URL.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.tls != nil || c.prefix != "" {
+		scheme := map[bool]string{true: "https", false: "http"}[c.tls != nil]
+		if cfg.PublicURL, err = ParsePublicURL(scheme + "://" + ln.Addr().String() + c.prefix); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if c.config != nil {
 		c.config(&cfg)
 	}
@@ -176,22 +205,38 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 	if c.wrap != nil {
 		handler = c.wrap(handler)
 	}
-	hs := httptest.NewServer(handler)
-	l.url = hs.URL
+	hs := &httptest.Server{Listener: ln, Config: &http.Server{Handler: handler}}
+	policy := labhttp.Policy{}
+	if c.tls != nil {
+		hs.TLS = c.tls.Leaf("127.0.0.1").ServerTLS()
+		hs.StartTLS()
+		policy.CAPEM = c.tls.PEM
+		l.hc, _ = policy.Client(time.Minute)
+	} else {
+		hs.Start()
+	}
+	l.url = hs.URL + c.prefix
 	t.Cleanup(func() { cancel(); hs.Close() })
 
-	// Enroll the simulated Mac exactly as lab-agent setup would.
+	// Enroll the simulated Mac exactly as lab-agent setup would: its owner
+	// accepts the terms, and the token is used up by its activation.
 	addToken := s.store.addTokenForTest
 	if c.volunteer {
 		addToken = s.store.addVolunteerTokenForTest
 	}
 	tok, _ := addToken(name)
-	resp, err := agent.Enroll(ctx, hs.URL, tok, sim.Facts())
+	terms, err := agent.FetchTerms(ctx, l.url, tok, policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := agent.EnrollWith(ctx, l.url, tok, sim.Facts(), policy, agent.Activation{Key: agent.NewActivationKey(), TermsSHA256: terms.SHA256})
 	if err != nil {
 		t.Fatal(err)
 	}
 	l.secret = resp.Secret
-	l.agent = &agent.Config{Server: hs.URL, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir(), Clock: clock}
+	no := false
+	l.agent = &agent.Config{Server: l.url, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: t.TempDir(), Clock: clock,
+		ServerCA: string(policy.CAPEM), AllowPlainHTTP: &no}
 	a := agent.New(l.agent, sim, logger)
 	go a.Run(ctx)
 	if withOOB {

@@ -94,6 +94,11 @@ type Device struct {
 	// latest check-in carried them. Only the Volunteer changes them, on the Mac.
 	AccessLevel string `json:"access_level,omitempty"`
 	Publish     bool   `json:"publish,omitempty"`
+	// TermsSHA256 is the participation terms the Mac's owner accepted when it
+	// joined, and TermsAccepted when; empty for a Mac that joined before
+	// labd had terms.
+	TermsSHA256   string    `json:"terms_sha256,omitempty"`
+	TermsAccepted time.Time `json:"terms_accepted,omitzero"`
 }
 
 // Access levels of a Volunteer's Mac. Qualification, the default, allows
@@ -758,6 +763,10 @@ type Job struct {
 	Canceled              bool       `json:"canceled,omitempty"`
 	// Maintainer is who submitted it, from their token; empty when labd queued it.
 	Maintainer string `json:"maintainer,omitempty"`
+	// DeviceID is the enrollment (Device.ID) of the Mac it was submitted for.
+	// Only that enrollment runs it, fetches its artifacts and adds its files;
+	// a job from before labd kept it is never run.
+	DeviceID string `json:"device_id,omitempty"`
 	// RetryOf is the job this one retries (lab retry).
 	RetryOf string `json:"retry_of,omitempty"`
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
@@ -795,6 +804,21 @@ type DeviceSnapshot struct {
 type EnrollRequest struct {
 	Token string `json:"token"`
 	Facts Facts  `json:"facts"`
+	// ActivationKey is a random secret the Mac made for this activation and
+	// keeps until it is set up. The token is used up by the first enrollment
+	// with it; only the same activation key may enroll with it again, should
+	// the answer never have reached the Mac.
+	ActivationKey string `json:"activation_key,omitempty"`
+	// TermsSHA256 is the sha256 of the participation terms the Mac's owner
+	// accepted (GET /api/join/terms). labd takes only its current terms.
+	TermsSHA256 string `json:"terms_sha256,omitempty"`
+}
+
+// JoinTerms are labd's participation terms, which a Mac's owner accepts
+// before it joins.
+type JoinTerms struct {
+	SHA256 string `json:"sha256"`
+	Text   string `json:"text"`
 }
 
 type EnrollResponse struct {
@@ -840,6 +864,11 @@ type EnrollTokenResponse struct {
 	Name    string    `json:"name"`
 	Token   string    `json:"token"`
 	Expires time.Time `json:"expires"`
+	// JoinCommand is the one-liner that joins a Mac with this token: run on
+	// the Mac by its owner, it downloads lab-agent, checks its sha256, shows
+	// the terms and sets the Mac up. Empty when labd has no lab-agent to
+	// hand out.
+	JoinCommand string `json:"join_command,omitempty"`
 }
 
 type DevicePatch struct {

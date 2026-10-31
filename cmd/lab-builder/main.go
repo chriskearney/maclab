@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 type builder struct {
@@ -36,13 +37,16 @@ type builder struct {
 	githubToken         string // file holding a GitHub token for private repos
 	asUser              *user.User
 	http                *http.Client
+	rt                  http.RoundTripper // every request to labd, with labhttp's policy
 }
 
 func main() {
 	home, _ := os.UserHomeDir()
 	hostname, _ := os.Hostname()
-	b := &builder{http: &http.Client{Timeout: 60 * time.Second}}
-	flag.StringVar(&b.server, "server", os.Getenv("MACLAB_URL"), "labd URL")
+	b := &builder{}
+	flag.StringVar(&b.server, "server", os.Getenv("MACLAB_URL"), "labd URL, e.g. https://labd.example.com/maclab")
+	caFile := flag.String("ca-file", os.Getenv("MACLAB_CA_FILE"), "PEM file of CA certificates for labd's https certificate, when the system doesn't trust it")
+	plain := flag.Bool("allow-plain-http", os.Getenv("MACLAB_ALLOW_PLAIN_HTTP") == "1", "allow an http:// labd on another machine: the builder token then crosses the network unencrypted")
 	flag.StringVar(&b.token, "token", os.Getenv("MACLAB_BUILDER_TOKEN"), "builder token (labd data dir: builder.token)")
 	flag.StringVar(&b.host, "name", strings.Split(hostname, ".")[0], "name shown in the lab")
 	flag.StringVar(&b.image, "image", "maclab-kbuild:1", "builder image")
@@ -55,6 +59,23 @@ func main() {
 	flag.StringVar(&b.githubToken, "github-token-file", "", "GitHub token for cloning private github.com repos (default ~/.config/maclab/github-token of the container user)")
 	as := flag.String("as-user", "", "run container as this user, in their login session. Lets lab-builder run as a root daemon, which macOS Local Network privacy does not block")
 	flag.Parse()
+	b.server = strings.TrimRight(b.server, "/")
+	if err := labhttp.CheckServer(b.server, *plain); err != nil {
+		log.Fatal(err)
+	}
+	pol := labhttp.Policy{AllowPlainHTTP: *plain}
+	if *caFile != "" {
+		ca, err := labhttp.ReadCAFile(*caFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pol.CAPEM = ca
+	}
+	rt, err := pol.Transport()
+	if err != nil {
+		log.Fatal(err)
+	}
+	b.rt, b.http = rt, labhttp.Client(rt, 60*time.Second)
 	if *as != "" {
 		u, err := user.Lookup(*as)
 		if err != nil {
@@ -171,7 +192,7 @@ func (b *builder) upload(ctx context.Context, path string) (string, error) {
 	defer f.Close()
 	req, _ := http.NewRequestWithContext(ctx, "POST", b.server+"/api/builder/artifacts", f)
 	req.Header.Set("Authorization", "Bearer "+b.token)
-	resp, err := (&http.Client{Timeout: 30 * time.Minute}).Do(req)
+	resp, err := labhttp.Client(b.rt, 30*time.Minute).Do(req)
 	if err != nil {
 		return "", err
 	}

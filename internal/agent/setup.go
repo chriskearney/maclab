@@ -11,6 +11,9 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+
+	"github.com/iconidentify/maclab/internal/api"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 const (
@@ -60,7 +63,19 @@ type SetupOptions struct {
 	// reaches tailscale in a file, not argv; lab-agent reads it with AuthKey.
 	TailscaleAuthKey  string
 	TailscaleHostname string // default maclab-<device name>, else this machine's hostname
-	Log               func(format string, args ...any)
+	// CAFile is a PEM file of CA certificates for labd's https certificate,
+	// kept in agent.json; empty keeps what it holds. AllowPlainHTTP allows an
+	// http:// labd on another machine on purpose. Setup always records it,
+	// so a Mac set up again chooses again (see transport.go).
+	CAFile         string
+	AllowPlainHTTP bool
+	// AcceptTerms is the owner's acceptance of labd's participation terms
+	// given beforehand, for a run without a terminal: their sha256. Without
+	// it, setup shows the terms on TTY (nil: the controlling terminal) and
+	// the owner types yes, before setup changes anything.
+	AcceptTerms string
+	TTY         io.ReadWriter
+	Log         func(format string, args ...any)
 }
 
 // Setup makes this Mac a lab device. Every step is idempotent, and every
@@ -71,21 +86,78 @@ func Setup(ctx context.Context, o SetupOptions) error {
 		return fmt.Errorf("setup must run as root")
 	}
 	l := &Linux{WorkDir: workDir, GUIUser: o.GUIUser}
+
+	cfg, _ := LoadConfig(ConfigPath)
+	// How this Mac reaches labd, settled before anything is sent to it.
+	server := o.Server
+	if server == "" && cfg != nil {
+		server = cfg.Server
+	}
+	var caPEM []byte
+	if o.CAFile != "" {
+		b, err := labhttp.ReadCAFile(o.CAFile)
+		if err != nil {
+			return err
+		}
+		caPEM = b
+	} else if cfg != nil && (o.Server == "" || o.Server == cfg.Server) {
+		caPEM = []byte(cfg.ServerCA)
+	}
+	if server != "" {
+		if err := labhttp.CheckServer(server, o.AllowPlainHTTP); err != nil {
+			return fmt.Errorf("%w\n(setup records this choice in agent.json; a Mac that used plain http before needs --allow-plain-http to keep it)", err)
+		}
+	}
+	policy := labhttp.Policy{CAPEM: caPEM, AllowPlainHTTP: o.AllowPlainHTTP}
+	// Joining with a token: the owner accepts labd's participation terms
+	// before setup changes anything on the Mac. Only a Tailscale join comes
+	// first, when labd is reachable on the tailnet alone: a Maintainer's
+	// --tailscale-authkey setup of a Lab-owned Mac.
+	if o.Token != "" && o.Server == "" {
+		return fmt.Errorf("--token needs --server")
+	}
+	var terms *api.JoinTerms
+	takeTerms := func() error {
+		if o.Token == "" {
+			return nil
+		}
+		t, err := FetchTerms(ctx, o.Server, o.Token, policy)
+		if err != nil {
+			return err
+		}
+		tty := o.TTY
+		if tty == nil && o.AcceptTerms == "" {
+			if f := openTTY(); f != nil {
+				defer f.Close()
+				tty = f
+			}
+		}
+		if err := acceptTerms(t, o.Server, o.AcceptTerms, tty); err != nil {
+			return err
+		}
+		say("participation terms %s accepted", short(t.SHA256))
+		terms = t
+		return nil
+	}
+	if o.TailscaleAuthKey == "" {
+		if err := takeTerms(); err != nil {
+			return err
+		}
+	}
 	if err := os.MkdirAll(l.WorkDir, 0o755); err != nil {
 		return err
 	}
-
-	cfg, _ := LoadConfig(ConfigPath)
 	if o.TailscaleAuthKey != "" {
-		server := o.Server
-		if server == "" && cfg != nil {
-			server = cfg.Server
-		}
 		host := o.TailscaleHostname
 		if host == "" {
 			host = tailnetHostname(cfg)
 		}
-		if err := newTailnet(say).join(ctx, o.TailscaleAuthKey, host, server); err != nil {
+		tn := newTailnet(say)
+		tn.reach = func(ctx context.Context, server string) error { return reachableWith(ctx, server, caPEM) }
+		if err := tn.join(ctx, o.TailscaleAuthKey, host, server); err != nil {
+			return err
+		}
+		if err := takeTerms(); err != nil {
 			return err
 		}
 	} else if o.TailscaleHostname != "" {
@@ -93,15 +165,18 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	}
 
 	// Enroll first: the token says what kind of Mac this is, and a Volunteer's
-	// Mac refuses some of the changes below before any of them is made. Until
-	// its first check-in the Mac can enroll again with the same token.
+	// Mac refuses some of the changes below before any of them is made. The
+	// token is used up by this Mac's activation key, which setup keeps until
+	// the Mac is set up: run again after an interruption, setup enrolls with
+	// the same key, which labd takes until the Mac's first check-in.
 	if o.Token != "" {
-		if o.Server == "" {
-			return fmt.Errorf("--token needs --server")
-		}
 		facts := l.Facts()
 		facts.AgentVersion = Version
-		resp, err := Enroll(ctx, o.Server, o.Token, facts)
+		key, err := activationKey(l.WorkDir, o.Token)
+		if err != nil {
+			return err
+		}
+		resp, err := EnrollWith(ctx, o.Server, o.Token, facts, policy, Activation{Key: key, TermsSHA256: terms.SHA256})
 		if err != nil {
 			return fmt.Errorf("enroll: %w", err)
 		}
@@ -110,6 +185,9 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	}
 	if cfg == nil {
 		return fmt.Errorf("not enrolled: pass --server and --token")
+	}
+	if moved := applyServer(cfg, o.Token == "", o.Server, caPEM, o.AllowPlainHTTP); moved != "" {
+		say("labd moved: %s -> %s; this Mac keeps its enrollment as %s", moved, cfg.Server, cfg.Name)
 	}
 	if cfg.Enrollment.IsVolunteer() {
 		if err := refuseOnVolunteer(o.Autologin, o.StayAwake); err != nil {
@@ -216,6 +294,7 @@ func Setup(ctx context.Context, o SetupOptions) error {
 	if err := cfg.Save(ConfigPath); err != nil {
 		return err
 	}
+	activationDone(l.WorkDir)
 	if err := os.Remove(filepath.Join(l.WorkDir, leftFile)); err != nil && !os.IsNotExist(err) { // enrolling again after leaving
 		return err
 	}
@@ -615,4 +694,18 @@ func keepAwake(user string) error {
 	// Omarchy's stay-awake state file: the same thing `omarchy toggle idle stay-awake` sets.
 	dir := filepath.Join(u.HomeDir, filepath.Dir(stayAwake))
 	return exec.Command("runuser", "-u", user, "--", "sh", "-c", "mkdir -p '"+dir+"' && touch '"+dir+"/stay-awake'").Run()
+}
+
+// applyServer records how the Mac reaches labd in cfg: the CA it trusts and
+// whether plain http is allowed, always written. With enrolled (no token),
+// a server other than cfg's moves the Mac to labd's new URL, keeping its
+// enrollment, identity and secret; the old URL is returned. Nothing else in
+// cfg changes.
+func applyServer(cfg *Config, enrolled bool, server string, caPEM []byte, allowPlain bool) (moved string) {
+	if enrolled && server != "" && strings.TrimRight(server, "/") != strings.TrimRight(cfg.Server, "/") {
+		moved, cfg.Server = cfg.Server, server
+	}
+	cfg.ServerCA = string(caPEM)
+	cfg.AllowPlainHTTP = &allowPlain
+	return moved
 }
