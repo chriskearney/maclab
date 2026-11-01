@@ -744,11 +744,12 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 	a.mu.Unlock()
 	a.keepAwake()
 	a.log.Printf("command %s %s job=%s", c.ID, c.Kind, c.JobID)
-	a.wd.Load().idle()
+	a.wd.Load().idle() // labd sent it
 	go func() {
 		defer stop(nil)
 		out, after, err := a.exec(ctx, c)
-		a.wd.Load().idle()
+		// ending is not a sign of labd: a command whose uploads can't reach it
+		// mustn't keep a test boot fed
 		if cause := context.Cause(ctx); err != nil && errors.Is(cause, errStoppedAtWindowClose) {
 			err = cause // whatever the command made of being stopped
 		}

@@ -239,10 +239,12 @@ Mac still shows tier 1) and feeds it only while:
   in a reset although lab-agent keeps checking in, while labd still waits for it. A test
   already running when lab-agent opens the watchdog late (on a retry) gets the same budget,
   counted from when it started, so one already past it is reset at once.
-- Outside tests, the last check-in that reached labd, or the last command starting or
-  ending, was less than 10 minutes ago. A test boot stays up for as long as labd is in
+- Outside tests, the last check-in that reached labd, or the last command labd sent
+  starting, was less than 10 minutes ago. A test boot stays up for as long as labd is in
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
-  is reset after 10 minutes without labd.
+  is reset 10 minutes after it last heard from labd. Nothing lab-agent does by itself
+  counts: a test or command ending, or an upload retrying while labd is out of reach,
+  leaves a test boot that lost labd during a test with what is left of those 10 minutes.
 
 Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
 on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd
