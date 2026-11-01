@@ -339,3 +339,46 @@ func TestPkgbuildForwardsJobs(t *testing.T) {
 		}
 	}
 }
+
+// bash parses a script one command at a time as it runs it, so a syntax error
+// late in pkgbuild fails every package build at that line, and the test above,
+// which runs only one part, never sees it. 7de96c65's jobs line did this: in
+// bash (not in POSIX mode), an apostrophe inside "${X:-...}" opens a quote.
+// The whole file must parse, and the check must catch that line.
+func TestPkgbuildParses(t *testing.T) {
+	const file = "../../builder/pkg/pkgbuild"
+	ver, err := exec.Command("/bin/bash", "-c", `echo "$BASH_VERSION"`).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("bash %s", strings.TrimSpace(string(ver)))
+	parse := func(path string) (string, error) {
+		out, err := exec.Command("/bin/bash", "-n", path).CombinedOutput()
+		return strings.TrimSpace(string(out)), err
+	}
+	if out, err := parse(file); err != nil || out != "" {
+		t.Errorf("bash -n pkgbuild: %v %s", err, out)
+	}
+
+	raw, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines, n := strings.Split(string(raw), "\n"), 0
+	for i, l := range lines {
+		if strings.HasPrefix(l, `echo "jobs: `) {
+			lines[i] = `echo "jobs: OMARCHY_BUILD_JOBS=${OMARCHY_BUILD_JOBS:-(unset: the recipe's default)}"`
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("pkgbuild has %d jobs lines, want 1", n)
+	}
+	old := filepath.Join(t.TempDir(), "pkgbuild")
+	if err := os.WriteFile(old, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := parse(old); err == nil || !strings.Contains(out, "unexpected EOF") {
+		t.Errorf("bash -n passed pkgbuild with 7de96c65's jobs line: %v %q", err, out)
+	}
+}

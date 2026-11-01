@@ -51,7 +51,7 @@ if [ -n "${SRC_SHA:-}${PKGREL:-}" ]; then
   as_build updpkgsums
 fi
 echo "toolchain: $(gcc --version | head -1); $(pacman -Q rustup rust-bindgen pahole binutils | tr '\n' ' ')"
-echo "jobs: OMARCHY_BUILD_JOBS=${OMARCHY_BUILD_JOBS:-(unset: the recipe's default)}"
+echo "jobs: OMARCHY_BUILD_JOBS=${OMARCHY_BUILD_JOBS:-(unset: the recipe default)}"
 
 step "build ($(nproc) cpus)"
 start=$(date +%s)
