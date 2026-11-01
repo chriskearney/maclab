@@ -63,10 +63,10 @@ type whoisCall struct {
 }
 
 // access decides what a request may do. A Maintainer's token gives admin,
-// and who is that Maintainer's name. With Tailscale on, any tailnet peer,
-// tagged devices included, is a viewer, and who names the peer, for error
-// messages. Without a token, a request gets in only when it asked for labd
-// by one of its own names (see ownHost).
+// and who is that Maintainer's name. With Tailscale on, a person on the
+// tailnet is a viewer, and who is their login. A tagged device is a machine,
+// not a person: it gets nothing without a token. Without a token, a request
+// gets in only when it asked for labd by one of its own names (see ownHost).
 func (s *Server) access(r *http.Request) (a access, who string) {
 	a, who, _ = s.accessHost(r)
 	return a, who
@@ -86,8 +86,9 @@ func (s *Server) accessHost(r *http.Request) (a access, who string, foreign bool
 }
 
 // tokenless is the access a request gets without a Maintainer's token: with
-// Tailscale on, a tailnet peer may look, judged by its identity; nothing
-// else gets in.
+// Tailscale on, a person on the tailnet may look, at what sees allows them;
+// nothing else gets in, tagged devices included. A Mac, Lab-owned or a
+// Volunteer's, talks to labd with its own device secret.
 func (s *Server) tokenless(r *http.Request) (access, string) {
 	if !s.cfg.Tailscale {
 		return noAccess, ""
@@ -101,8 +102,8 @@ func (s *Server) tokenless(r *http.Request) (access, string) {
 	if p == nil {
 		return noAccess, ""
 	}
-	if len(p.Tags) > 0 {
-		return viewAccess, p.Node
+	if len(p.Tags) > 0 || p.Login == "" {
+		return noAccess, ""
 	}
 	return viewAccess, p.Login
 }

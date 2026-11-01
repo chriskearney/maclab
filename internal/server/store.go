@@ -244,6 +244,34 @@ func (s *store) jobs(device string, limit int, unfinished bool) ([]*api.Job, err
 	return scanJobs(s.db.Query(q, device, device, limit))
 }
 
+// jobsOn lists the newest jobs on the Macs named, up to limit.
+func (s *store) jobsOn(devices []string, limit int) ([]*api.Job, error) {
+	if len(devices) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(devices)+1)
+	for _, d := range devices {
+		args = append(args, d)
+	}
+	q := `SELECT data FROM jobs WHERE device IN (?` + strings.Repeat(",?", len(devices)-1) + `) ORDER BY created DESC LIMIT ?`
+	return scanJobs(s.db.Query(q, append(args, limit)...))
+}
+
+// jobsOfEnrollments lists the newest jobs submitted for the enrollments
+// (Device.ID) given, up to limit: a person's jobs, which a Mac's name alone
+// can't pick out once a forgotten Mac's name is taken again.
+func (s *store) jobsOfEnrollments(ids []string, limit int) ([]*api.Job, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	q := `SELECT data FROM jobs WHERE json_extract(data, '$.device_id') IN (?` + strings.Repeat(",?", len(ids)-1) + `) ORDER BY created DESC LIMIT ?`
+	return scanJobs(s.db.Query(q, append(args, limit)...))
+}
+
 // kernelJobs lists the finished jobs that ran a kernel artifact, newest first.
 func (s *store) kernelJobs(sha string) ([]*api.Job, error) {
 	return scanJobs(s.db.Query(`SELECT data FROM jobs WHERE json_extract(data, '$.spec.kernel')=? AND state='done' ORDER BY created DESC`, sha))

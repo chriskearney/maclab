@@ -168,6 +168,20 @@ type Facts struct {
 	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
 }
 
+// StaleKnownGood is whether a preflight problem is lab-agent's known-good
+// kernel no longer being installed: a distro kernel update, or an install,
+// replaced its package. lab baseline makes the running kernel the known-good
+// again, on the Mac and on labd.
+func StaleKnownGood(problem string) bool {
+	return strings.HasPrefix(problem, "known-good kernel ") && strings.HasSuffix(problem, " is no longer installed")
+}
+
+// StaleKnownGoodFix is what to do about a StaleKnownGood problem on Mac name,
+// running kernel.
+func StaleKnownGoodFix(name, kernel string) string {
+	return fmt.Sprintf("run `lab baseline %s` to make the running kernel %s its known-good", name, kernel)
+}
+
 type Health struct {
 	Uptime      float64 `json:"uptime"`
 	SystemState string  `json:"system_state"` // systemctl is-system-running
@@ -230,10 +244,11 @@ type Quiet struct {
 // AuditEntry is one line of a Volunteer Mac's Audit log: a Maintainer action
 // that reached the Mac, written there before lab-agent acted on it.
 type AuditEntry struct {
-	Time       time.Time `json:"time"`
-	Maintainer string    `json:"maintainer,omitempty"` // "" when labd acted on its own
-	Job        string    `json:"job,omitempty"`
-	Action     string    `json:"action"` // what was done, with the command or script text
+	Time           time.Time `json:"time"`
+	Maintainer     string    `json:"maintainer,omitempty"`      // "" when labd acted on its own
+	VolunteerLogin string    `json:"volunteer_login,omitempty"` // the Mac's own Volunteer asked, through labd
+	Job            string    `json:"job,omitempty"`
+	Action         string    `json:"action"` // what was done, with the command or script text
 	// Refused is why lab-agent refused the action instead; "" when it acted.
 	Refused string `json:"refused,omitempty"`
 	// End is where the entry ends in the Mac's own log, in bytes: labd's copy
@@ -245,7 +260,10 @@ type AuditEntry struct {
 // time zone of loc.
 func (e AuditEntry) Line(loc *time.Location) string {
 	who := e.Maintainer
-	if who == "" {
+	switch {
+	case e.VolunteerLogin != "":
+		who = "Volunteer " + e.VolunteerLogin
+	case who == "":
 		who = "labd"
 	}
 	job := ""
@@ -298,7 +316,8 @@ const (
 	CmdExec        = "exec"
 	// CmdRecordKnownGood makes the running kernel the agent's known-good, as
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
-	// outside a lab boot. Promotion sends it.
+	// outside a lab boot. Promotion sends it, and so does a baseline on a Mac
+	// whose known-good kernel is no longer installed.
 	CmdRecordKnownGood = "record_known_good"
 	// CmdInstall installs a Release on the Mac as a named lab operation: the
 	// install step of an Installed run, which a Volunteer's Mac allows at
@@ -332,8 +351,11 @@ type Command struct {
 	JobID string `json:"job_id,omitempty"`
 	// Maintainer is who the command acts for: the Maintainer who asked, or
 	// whose job it is; "" when labd acts on its own.
-	Maintainer string          `json:"maintainer,omitempty"`
-	Args       json.RawMessage `json:"args,omitempty"`
+	Maintainer string `json:"maintainer,omitempty"`
+	// VolunteerLogin is the tailnet login of the Mac's own Volunteer when
+	// they asked for it through labd, such as reading its live journal.
+	VolunteerLogin string          `json:"volunteer_login,omitempty"`
+	Args           json.RawMessage `json:"args,omitempty"`
 }
 
 type CommandResult struct {
@@ -417,7 +439,7 @@ type StageResult struct {
 }
 
 // BootOnceArgs arms a Lab boot. lab-agent first writes its deadline record,
-// on its own clock: no contact (2x BootTimeoutSec from now, unless lab-agent
+// on its own clock: no contact (2x BootTimeoutSec from now, at most 9 minutes, unless lab-agent
 // reaches labd) and the hard ceiling (the job's end, JobSec from now).
 type BootOnceArgs struct {
 	Entry          string `json:"entry"`

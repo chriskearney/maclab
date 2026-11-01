@@ -125,8 +125,9 @@ reboot lands on the Mac's own entry.
   be built with `apple_wdt`, or the watchdog resets it about 60s into every
   boot; the job flags one without it.
 - Before every Lab boot, lab-agent writes a deadline record to
-  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout,
-  unless lab-agent reaches labd first) and a **hard ceiling** (the job's end).
+  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout, at most
+  9 minutes so it comes before lab-agent's own watchdog, unless lab-agent
+  reaches labd first) and a **hard ceiling** (the job's end).
   `maclab-lab-boot-deadlines.service`, an early unit with no network
   dependency, reboots a Lab boot when either passes, and on a Volunteer's Mac
   as soon as its Availability window closes. labd waits for that
@@ -239,10 +240,12 @@ Mac still shows tier 1) and feeds it only while:
   in a reset although lab-agent keeps checking in, while labd still waits for it. A test
   already running when lab-agent opens the watchdog late (on a retry) gets the same budget,
   counted from when it started, so one already past it is reset at once.
-- Outside tests, the last check-in that reached labd, or the last command starting or
-  ending, was less than 10 minutes ago. A test boot stays up for as long as labd is in
+- Outside tests, the last check-in that reached labd, or the last command labd sent
+  starting, was less than 10 minutes ago. A test boot stays up for as long as labd is in
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
-  is reset after 10 minutes without labd.
+  is reset 10 minutes after it last heard from labd. Nothing lab-agent does by itself
+  counts: a test or command ending, or an upload retrying while labd is out of reach,
+  leaves a test boot that lost labd during a test with what is left of those 10 minutes.
 
 Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
 on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd
@@ -258,6 +261,11 @@ labd --maintainer <you>              # first start: you become the first Maintai
 lab login http://127.0.0.1:7770 "$(cat ~/.local/share/maclab/admin.token)"
 lab enroll m1air --label "MacBook Air M1, left desk"   # prints the one-liner that joins the Mac
 ```
+
+On a Linux controller (an Omarchy Mac, as in `docs/adr/0003-develop-on-the-fork-with-a-lab-of-its-own.md`),
+`scripts/setup-linux-controller.sh` walks through all of it step by step: it builds the binaries,
+starts labd as a user service on the tailnet address, runs lab-builder under Docker as a root
+service, keeps the laptop awake with the lid closed on power, then enrolls a Mac and baselines it.
 
 To serve the lab over the internet, with no Tailscale, see
 [HTTPS without Tailscale](#https-without-tailscale).
@@ -355,6 +363,14 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 ```
 
 No other job runs on a Mac until its baseline passes.
+
+A distro kernel update (`pacman -Syu`) removes the known-good kernel's package, and
+preflight then holds every job back with "known-good kernel ... is no longer
+installed"; `lab status` says so with the fix. Reboot the Mac onto the new kernel,
+then run `lab baseline <mac>` again: it records the running kernel as the Mac's
+known-good, and labd's once it passes. Until it passes, the Mac has no known-good
+kernel on labd and takes no other job. The baseline passes only if a plain reboot
+comes back on that kernel, so it must be the bootloader's default entry.
 
 To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made. First it
 tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, saying why, lists it as
@@ -600,6 +616,23 @@ state is one size-capped volume (`container volume create -s 40G maclab-cache`):
 depth-1 git store, one reused worktree, at most two build dirs, and an 8 GB ccache. The host scratch
 dir is emptied after every build. labd's artifact store is garbage-collected to a budget
 (`--artifact-budget-gb`, default 20).
+
+A controller without Apple `container` can build with Docker instead (Colima, Docker Desktop):
+`lab-builder --runtime docker [--context colima]`, with the same `kbuild` image and `/cache`
+volume layout. labd sees no difference: progress, logs and reuse of earlier builds work the same.
+Colima shares only paths under `$HOME` into its VM and a bind mount of anything else is silently
+empty, so `/io` is copied into each build's container and back out with `docker cp`, never mounted.
+
+```sh
+docker build -f builder/Containerfile -t maclab-kbuild:1 builder/   # -f: the file is not named Dockerfile
+docker volume create maclab-cache
+lab-builder --runtime docker --context colima --cpus 12 --memory 24G --pkg-image '' ...
+```
+
+`--pkg-image ''` takes kernel builds only: the package builder (`builder/pkg`) has not been tried
+under Docker.
+
+Docker volumes have no size cap of their own: the cache is bounded only by what kbuild keeps on it.
 
 Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first build 9 minutes;
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
@@ -938,12 +971,13 @@ skips the search and the question.
 The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
 keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
 Then they share the labd machine with each volunteer's Tailscale account (admin
-console, Machines, Share), or invite them to the tailnet. Any person labd lets
-look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
+console, Machines, Share), or invite them to the tailnet. Any person on the
+tailnet may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
 name made from `<user>-<hostname>` and the volunteer's login as its label, and
 is marked a volunteer's: `lab gate` leaves its results out unless asked (see
-[Release gate](#release-gate)). Tagged tailnet devices, lab Macs under `tag:maclab`
-among them, are machines and get no token. Each person holds at most one unused
+[Release gate](#release-gate)), and in labd only its Volunteer and the
+Maintainers see it (see [Tailscale](#tailscale)). Tagged tailnet devices, lab
+Macs under `tag:maclab` among them, are machines and get no token. Each person holds at most one unused
 token: asking again replaces it, so running `./volunteer` again after a setup
 that stopped half way just works. At most 20 people hold one at once; the next
 gets a 429 until one is used or expires a day later. Each person may have at
@@ -957,8 +991,8 @@ comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 
 Open `http://<labd-host>:7770` and enter your Maintainer token; the UI keeps
 it. Every change needs a Maintainer's token, whatever network it comes from;
-with `--tailscale`, tailnet peers may look without one (see
-[Tailscale](#tailscale)). On a phone the UI
+with `--tailscale`, a Volunteer on the tailnet sees their own Macs without one
+(see [Tailscale](#tailscale)). On a phone the UI
 switches to a bottom tab bar and can be added to the home screen.
 
 A browser on the tailnet carries its access to every page it opens, so labd
@@ -1052,9 +1086,18 @@ their own opt-in, or an https URL).
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5
-seconds). Every peer, tagged devices included, may look with no token: the
-dashboard, Macs, jobs, builds, logs and saved screens, including the console
-output in the live view and in each job's logs. Anything that changes the
+seconds). Each request is scoped to what its caller may see. A Maintainer's
+token sees the whole lab. A person on the tailnet without one sees only the
+Macs they volunteered (see [Volunteer a Mac](#volunteer-a-mac)), while those
+stay enrolled: their records, jobs, job files, logs and saved screens,
+including the console output in each job's logs, and their events on
+`/api/stream`, which leaves out the live console lines. Any other Mac answers 404, as if it weren't
+there. Builds, builders, Installed run status and the lab's capabilities
+(`/api/recovery`, `/api/mesa`) are Maintainers' only and answer 403.
+Volunteering a Mac (`POST /api/volunteer`) stays open to any person on the
+tailnet. Tagged devices, lab Macs under `tag:maclab` and the labd host among
+them, get nothing without a token (401); a Mac reaches labd with its own
+device secret on `/api/agent/*`. Anything that changes the
 lab, the console itself (`lab shell`), the Mac's stored serial log and new
 screenshots need a Maintainer's token and answer 403 without one, and device
 views never carry the controller's token. A Maintainer's token works from
@@ -1075,8 +1118,8 @@ Setup refuses a key file that group or others may read: make a new key
 then, since anyone could have read that one. `--tailscale-authkey -` reads
 the key from stdin instead, and asks for it when stdin is a terminal. A key
 given straight to `--tailscale-authkey` is refused: by the time setup sees
-it, the process list and sudo's journal entry show it, and tailnet viewers
-can read that journal through labd. Revoke such a key and make a new one.
+it, the process list and sudo's journal entry show it, and whoever sees the
+Mac in labd can read that journal through it. Revoke such a key and make a new one.
 
 Before anything else, setup runs `tailscale up --auth-key=file:... --advertise-tags=tag:maclab
 --ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup
@@ -1100,7 +1143,8 @@ Re-joining can cut a Tailscale SSH session, and tailscale may refuse to do
 it from one; run setup from the console or over plain SSH then.
 
 A minimal policy: Macs reach only labd, admins reach labd and SSH into the
-Macs as root, and the rest of the tailnet may view labd.
+Macs as root, and the rest of the tailnet reaches labd to volunteer a Mac
+and see their own.
 
 ```hujson
 {

@@ -99,10 +99,19 @@ type labBootDeadlines struct {
 }
 
 // newLabBootDeadlines is the record for a Lab boot starting now: about twice
-// the job's boot timeout to reach labd, and the job's end as the ceiling.
+// the job's boot timeout to reach labd, but no more than watchdogIdle, and the
+// job's end as the ceiling. The cap keeps the no-contact deadline ahead of the
+// agent's own watchdog, which resets a test boot that hasn't heard from labd
+// watchdogIdle after the agent starts (later than now) and leaves no reason
+// behind: the deadline has to win, so labd hears lost_contact, not a kernel
+// that never came up. noContactMargin covers a test boot whose clock runs
+// behind, as one with no network can't set it.
 func newLabBootDeadlines(now time.Time, bootTimeout time.Duration, jobEnd time.Time) labBootDeadlines {
-	return labBootDeadlines{Armed: now, NoContact: now.Add(2 * bootTimeout), Ceiling: jobEnd}
+	return labBootDeadlines{Armed: now, NoContact: now.Add(min(2*bootTimeout, watchdogIdle-noContactMargin)), Ceiling: jobEnd}
 }
+
+// noContactMargin is how far the no-contact deadline stays inside watchdogIdle.
+const noContactMargin = time.Minute
 
 // rebootDue is whether the early unit reboots the Mac now.
 func rebootDue(d labBootDeadlines, now time.Time, contacted bool) bool {
