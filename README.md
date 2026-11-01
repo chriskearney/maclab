@@ -412,10 +412,32 @@ A Mac is Lab-owned or a Volunteer's for as long as it stays enrolled; the
 enrollment token decides which, and changing it means enrolling again.
 
 ```sh
-lab enroll ada-mbp --volunteer "Ada Lovelace" --contact ada@example.org
+lab enroll ada-mbp --volunteer "Ada Lovelace" --contact ada@example.org --login ada@github
 ```
 
-Either flag without the other is refused. labd gives the Mac its own
+Either flag without the other is refused. `--login` (optional) links the
+Volunteer's tailnet login to the Mac when it enrolls (`volunteer_login` on
+`POST /api/enroll-tokens`), so with `--tailscale` that Volunteer sees their
+Mac in labd as if they had volunteered it themselves (see
+[Tailscale](#tailscale)); without it, a Mac enrolled this way is seen only by
+Maintainers. `lab device ada-mbp --login ada@github` links an enrolled
+Volunteer's Mac later, and `lab device ada-mbp --unlink` unlinks it
+(`volunteer_login` on `PATCH /api/devices/{name}`, `""` to unlink). The login
+must look like one, `user@github` or an email, lowercased; labd refuses
+anything else, and anything that looks like a secret (`enr_`, `adm_`, `dev_`,
+`bld_`, `mnt_`, `tskey-`, or a long run of hex), since whoever holds that
+login sees the Mac's jobs and screens. Only a Volunteer's Mac is linked, and
+not one a person volunteered with `./volunteer`, which is theirs already.
+Linked Macs don't count toward the person's own limit of 3 volunteered Macs:
+that limit keeps one person from filling the lab, and a Maintainer chose to
+let these in. Forgetting a Mac drops its link with it. A link shows the
+person everything of the Mac's current enrollment, not only what happens
+after it: linking the Mac to a different person shows them its saved
+screens, its job history and their files, and the Volunteer's name, contact
+and ntfy topic on its record. Link only the Volunteer's own login; to hand a
+Mac to someone else, `lab forget` it and enroll it again. Unlinking, and any
+long wait (`/api/jobs/{id}/wait`) or live journal read under way, take
+effect at once. labd gives the Mac its own
 unguessable ntfy topic when it enrolls (on the server `--ntfy` posts to), and
 `setup` prints it with a QR code to subscribe from a phone. On a Volunteer's
 Mac `setup` refuses `--autologin` and `--stay-awake`. Setup and every
@@ -1088,7 +1110,9 @@ With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5
 seconds). Each request is scoped to what its caller may see. A Maintainer's
 token sees the whole lab. A person on the tailnet without one sees only the
-Macs they volunteered (see [Volunteer a Mac](#volunteer-a-mac)), while those
+Macs they volunteered (see [Volunteer a Mac](#volunteer-a-mac)) and those a
+Maintainer linked to their login (see [A Volunteer's
+Mac](#a-volunteers-mac)), while those
 stay enrolled: their records, jobs, job files, logs and saved screens,
 including the console output in each job's logs, and their events on
 `/api/stream`, which leaves out the live console lines. Any other Mac answers 404, as if it weren't

@@ -301,6 +301,12 @@ func (s *Server) hLogs(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 502, "%v", err)
 		return
 	}
+	// The Mac may take up to 45 s to answer: a person a Maintainer unlinked
+	// meanwhile doesn't get its journal.
+	if !s.sees(callerOf(r), r.PathValue("name")) {
+		httpErr(w, 404, "no device %q", r.PathValue("name"))
+		return
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	io.WriteString(w, out)
 }
