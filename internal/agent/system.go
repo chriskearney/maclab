@@ -30,6 +30,9 @@ type System interface {
 
 	Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetcher) (api.StageResult, error)
 	BootOnce(entry string) error
+	// CancelBootOnce clears an armed one-shot, so the next reboot boots the
+	// Mac's default entry.
+	CancelBootOnce() error
 	// Install installs a Release's packages as its installer does, fetching
 	// them from labd by sha256.
 	Install(ctx context.Context, job string, a api.InstallArgs, fetch Fetcher) error

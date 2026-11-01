@@ -351,6 +351,13 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 	return api.StageResult{KernelRelease: e.krel, Entry: entryPrefix + job, Cmdline: e.cmdline, NoAppleWDT: e.noAppleWDT}, nil
 }
 
+func (s *Sim) CancelBootOnce() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armed = ""
+	return nil
+}
+
 func (s *Sim) BootOnce(entry string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

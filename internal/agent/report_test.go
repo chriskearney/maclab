@@ -67,7 +67,7 @@ func TestReportTooLarge(t *testing.T) {
 	}
 	a.events = []api.KernelEvent{{Kind: "warn", Line: "a line"}}
 	after := false
-	a.after = []func(){func() { after = true }}
+	a.after = []afterAck{{run: func() { after = true }}}
 
 	if err := a.report(context.Background()); err != nil {
 		t.Fatalf("report: %v\n%s", err, logged.String())
