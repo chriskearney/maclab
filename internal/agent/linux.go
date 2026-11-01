@@ -274,9 +274,12 @@ func (l *Linux) Collect(ctx context.Context, boot, outDir string) error {
 		out, err := exec.CommandContext(ctx, "journalctl", args...).CombinedOutput()
 		save(name, out, err, "journalctl")
 	}
-	run("journal.txt", "-b", boot, "-o", "short-monotonic", "--no-pager")
-	run("kernel.txt", "-k", "-b", boot, "-o", "short-monotonic", "--no-pager")
-	run("dmesg-errors.txt", "-k", "-b", boot, "-p", "warning", "-o", "cat", "--no-pager")
+	// boot is dashed, as /proc/sys/kernel/random/boot_id is, but journalctl
+	// -b (systemd 262) only takes the 32-hex form: "Invalid argument".
+	id := strings.ReplaceAll(boot, "-", "")
+	run("journal.txt", "-b", id, "-o", "short-monotonic", "--no-pager")
+	run("kernel.txt", "-k", "-b", id, "-o", "short-monotonic", "--no-pager")
+	run("dmesg-errors.txt", "-k", "-b", id, "-p", "warning", "-o", "cat", "--no-pager")
 	run("boots.txt", "--list-boots", "--no-pager")
 	if boot == "0" {
 		// systemd-analyze only knows the running boot: how long firmware, loader,
