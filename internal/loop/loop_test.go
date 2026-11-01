@@ -126,6 +126,7 @@ type fakeLab struct {
 func (f *fakeLab) Device(_ context.Context, name string) (*client.Device, error) {
 	d := &client.Device{Tier: 1}
 	d.Name, d.Volunteer, d.State = name, f.volunteer, f.state
+	d.Facts.AgentVersion = "0.9.1"
 	if d.State == "" {
 		d.State = api.StateReady
 	}
@@ -151,8 +152,12 @@ func (f *fakeLab) Wait(_ context.Context, id string, _ time.Duration) (*api.Job,
 	if m == f.handsAfter {
 		f.state = api.StateNeedsHands
 	}
-	return &api.Job{ID: id, Spec: spec, State: api.JobDone, Outcome: out,
-		Result: api.JobResult{Tests: []api.TestResult{{Name: "chaos-check", Passed: true}}}}, nil
+	j := &api.Job{ID: id, Spec: spec, State: api.JobDone, Outcome: out,
+		Result: api.JobResult{Tests: []api.TestResult{{Name: "chaos-check", Passed: true}}, Logs: []string{"boot0/journal.txt"}}}
+	if Lost(j) {
+		j.Result.Logs = []string{"prevboot/collect-status.txt", "prevboot/journal.txt"}
+	}
+	return j, nil
 }
 
 func modeOf(cmdline string) Mode {
@@ -227,17 +232,24 @@ func TestANightRunsEveryBootAndScoresTheJudge(t *testing.T) {
 	if len(es) != 20 {
 		t.Fatalf("%d ledger entries, want 20", len(es))
 	}
-	wrong := 0
+	wrong, wrongClass := 0, 0
 	for _, e := range es {
 		if !e.AsPredicted || e.ChaosCheck != "pass" || e.Score == nil || !e.Score.HumanNeeded {
 			t.Errorf("boot %d %s: %+v", e.Iter, e.Mode, e)
 		}
+		if e.AgentVersion != "0.9.1" || e.Lab == nil || *e.Lab != (LabScore{AsPredicted: true, NoHands: true, Logs: true}) {
+			t.Errorf("boot %d %s: agent version %q, lab score %+v", e.Iter, e.Mode, e.AgentVersion, e.Lab)
+		}
 		if e.Score != nil && !e.Score.Fault {
 			wrong++
 		}
+		if e.Score != nil && !e.Score.Class {
+			wrongClass++
+		}
 	}
-	if wrong != 4 {
-		t.Errorf("judge wrong on %d boots, want the 4 hangs", wrong)
+	// Calling a hang none is wrong by class too: none is healthy, a hang early.
+	if wrong != 4 || wrongClass != 4 {
+		t.Errorf("judge wrong on %d boots, %d by class, want the 4 hangs", wrong, wrongClass)
 	}
 	if spec := lab.jobs[0]; spec.Holder != "lab-loop:test" || len(spec.Tests) != 1 || spec.Tests[0].Script != strings.Repeat("b", 64) {
 		t.Errorf("first job spec: %+v", spec)

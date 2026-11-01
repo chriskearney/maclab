@@ -120,24 +120,40 @@ func randomMarker() string {
 	return hex.EncodeToString(b)
 }
 
-// Predicted is the outcomes the research doc expects for a mode, from reading
-// labboot.go and the outcome definitions. serial says whether the Mac has an
-// out-of-band serial console, which lets the lab see an early panic. An
-// outcome outside these is a finding: the lab misreads a fault, or the
-// prediction misread the lab.
+// Predicted is the outcomes labd can produce for a mode, from reading
+// internal/server/runner.go. serial says whether the Mac has an out-of-band
+// serial console. An outcome outside these is a finding: the lab misreads a
+// fault, or the prediction misread the lab.
+//
+// panicked comes only from classify (runner.go:946), on a boot the Mac was
+// lost from, and only when a fatal kernel event was seen. A dying kernel's
+// events reach labd over serial (internal/server/device.go:395); lab-agent
+// reports kmsg events (internal/agent/agent.go:216) only from a kernel still
+// running to send them. So without serial no panic reads as panicked.
 func Predicted(m Mode, serial bool) []string {
 	switch m {
 	case None, Marker:
 		return []string{api.OutcomePass}
 	case OopsLate:
-		return []string{api.OutcomePanicked, api.OutcomeUnhealthy}
+		// The kernel lives through an oops, so lab-agent collects boot0 and
+		// labd reads the oops in its kernel log as booted_unhealthy
+		// (runner.go:662, :664), never panicked: that needs a lost boot.
+		return []string{api.OutcomeUnhealthy}
 	case PanicLate:
-		return []string{api.OutcomePanicked, api.OutcomeCrashedOrHung}
+		// The Mac goes down mid-test: lostDuringTest classifies it
+		// (runner.go:978), and with no kernel event seen it reads as
+		// crashed_or_hung (runner.go:979-990).
+		if serial {
+			return []string{api.OutcomePanicked, api.OutcomeCrashedOrHung}
+		}
+		return []string{api.OutcomeCrashedOrHung}
 	case PanicEarly:
+		// Down before lab-agent starts: the Mac falls back, and classify
+		// (runner.go:479, :484) has an event only from serial.
 		if serial {
 			return []string{api.OutcomePanicked}
 		}
-		return []string{api.OutcomeBootFailed, api.OutcomePanicked}
+		return []string{api.OutcomeBootFailed}
 	case HangEarly, HangLate:
 		return []string{api.OutcomeBootFailed}
 	case Netdown:
