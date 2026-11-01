@@ -50,6 +50,40 @@ func (s *Server) sees(c caller, name string) bool {
 	return !v.forgotten && v.d.State != api.StateLeft && v.volunteeredBy != "" && strings.EqualFold(v.volunteeredBy, c.login)
 }
 
+// seesJob reports whether c may read job j: a Maintainer may read any; a
+// person only one their Mac ran in its current enrollment. A forgotten Mac's
+// name can be taken again, by anyone, and the old enrollment's jobs stay with
+// the Maintainers.
+func (s *Server) seesJob(c caller, j *api.Job) bool {
+	if c.maintainer != "" {
+		return true
+	}
+	if !s.sees(c, j.Spec.Device) {
+		return false
+	}
+	v := s.dev(j.Spec.Device)
+	if v == nil {
+		return false
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return j.DeviceID != "" && j.DeviceID == v.d.ID
+}
+
+// seenEnrollments is the enrollments (Device.ID) of the Macs c sees, or of
+// the one Mac named if name isn't "".
+func (s *Server) seenEnrollments(c caller, name string) []string {
+	var ids []string
+	for _, v := range s.allDevs() {
+		if (name == "" || v.d.Name == name) && s.sees(c, v.d.Name) {
+			v.mu.Lock()
+			ids = append(ids, v.d.ID)
+			v.mu.Unlock()
+		}
+	}
+	return ids
+}
+
 // seenMacs names the Macs c sees.
 func (s *Server) seenMacs(c caller) []string {
 	var names []string
@@ -128,12 +162,12 @@ func (s *Server) macInScope(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// jobInScope answers 404 for a job on a Mac the caller doesn't see.
+// jobInScope answers 404 for a job the caller may not read (seesJob).
 func (s *Server) jobInScope(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		c, id := callerOf(r), r.PathValue("id")
 		if c.maintainer == "" {
-			if j, err := s.store.job(id); err != nil || !s.sees(c, j.Spec.Device) {
+			if j, err := s.store.job(id); err != nil || !s.seesJob(c, j) {
 				s.log.Printf("%s asked for %s %s, a job they don't see", c.login, r.Method, r.URL.Path)
 				httpErr(w, 404, "no job %s", id)
 				return

@@ -1226,6 +1226,23 @@ func (s *Server) hForgetDevice(w http.ResponseWriter, r *http.Request) {
 // write the row back, and Submit queues nothing more on it. A lease held by
 // holder doesn't count; force skips the lease and live-agent checks, never
 // the job check.
+// dropNamedState clears what labd keeps under a forgotten Mac's name, since
+// the name can be taken again by another Mac, or another person's: its
+// screens, serial log and baselines go; its Audit log is kept, renamed after
+// the enrollment (id), for Maintainers. Its jobs stay, for Maintainers only
+// (seesJob).
+func (s *Server) dropNamedState(name, id string) {
+	for _, p := range []string{s.screenDir(name), s.serialPath(name), s.baselinePath(name), s.omtBaselinePath(name)} {
+		if err := os.RemoveAll(p); err != nil {
+			s.log.Printf("forget %s: %v", name, err)
+		}
+	}
+	a := s.auditPath(name)
+	if err := os.Rename(a, strings.TrimSuffix(a, ".jsonl")+"."+id+".jsonl"); err != nil && !os.IsNotExist(err) {
+		s.log.Printf("forget %s: audit log: %v", name, err)
+	}
+}
+
 func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -1267,6 +1284,7 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	}
 	v.oobStop, v.oob, v.serialUp = nil, nil, false
 	close(v.gone)
+	s.dropNamedState(name, v.d.ID)
 	return 200, nil
 }
 
@@ -1698,12 +1716,10 @@ func (s *Server) hJobs(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case c.maintainer != "":
 		jobs, err = s.store.jobs(device, n, false)
-	case device != "":
-		if s.sees(c, device) {
-			jobs, err = s.store.jobs(device, n, false)
-		}
 	default:
-		jobs, err = s.store.jobsOn(s.seenMacs(c), n)
+		// By enrollment, not name: a Mac's name may have been someone else's
+		// Mac before it was forgotten (seesJob).
+		jobs, err = s.store.jobsOfEnrollments(s.seenEnrollments(c, device), n)
 	}
 	if err != nil {
 		httpErr(w, 500, "%v", err)
