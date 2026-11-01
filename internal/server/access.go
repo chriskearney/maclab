@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -17,8 +16,9 @@ import (
 // at Qualification (the default) labd takes no lab exec and no Maintainer's
 // script for it, and lab-agent refuses them whatever labd sends. Its screen
 // and live journal are watched only while a job or lease holds it inside its
-// window. Every Maintainer action reaching it lands in its Audit log, which
-// the Mac reports to labd for a copy. Lab-owned Macs have none of this.
+// window. Scope (see mayDo) is where labd decides these. Every Maintainer
+// action reaching it lands in its Audit log, which the Mac reports to labd
+// for a copy. Lab-owned Macs have none of this.
 
 // errAccessLevel matches lab-agent refusing or stopping a command because
 // the Mac's Access level doesn't allow it.
@@ -67,29 +67,9 @@ func needsFull(spec api.JobSpec) string {
 	return ""
 }
 
-// refuseAtAccessLevel is the error labd rejects what, which only Full allows,
-// with on a Volunteer's Mac at Qualification; nil when the Mac allows it.
-func refuseAtAccessLevel(d api.Device, what string) error {
-	if d.AllowsAnything() {
-		return nil
-	}
-	return fmt.Errorf("%s is a Volunteer's Mac at Access level Qualification, which allows no %s; only its Volunteer can raise it (sudo lab-agent access full)", d.Name, what)
-}
-
 // heldLocked is whether a job or lease holds the Mac now. Caller holds v.mu.
 func (v *dev) heldLocked() bool {
 	return v.d.ActiveJob != "" || (v.d.Lease != nil && v.s.now().Before(v.d.Lease.Expires))
-}
-
-// refuseWatching is why labd won't show a Volunteer's Mac's screen or live
-// journal now, or "": only while a job or lease holds it inside its window.
-func (v *dev) refuseWatching() string {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if !v.d.IsVolunteer() || (v.heldLocked() && !v.openUntilLocked().IsZero()) {
-		return ""
-	}
-	return fmt.Sprintf("%s is a Volunteer's Mac: at any Access level its screen and live journal are shown only while a job or lease holds it inside its Availability window", v.d.Name)
 }
 
 // ---- labd's copy of each Mac's Audit log ----
