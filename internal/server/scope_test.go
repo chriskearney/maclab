@@ -168,7 +168,7 @@ func TestPersonSeesOnlyTheirOwnMacs(t *testing.T) {
 	tok, _ := s.store.addTokenForTest("lab")
 	enroll(tok)
 	for _, d := range []string{"mine", "theirs", "lab"} {
-		if err := s.store.saveJob(&api.Job{ID: "j-" + d, Spec: api.JobSpec{Device: d}, State: api.JobDone, Created: s.now()}); err != nil {
+		if err := s.store.saveJob(&api.Job{ID: "j-" + d, Spec: api.JobSpec{Device: d}, DeviceID: s.dev(d).d.ID, State: api.JobDone, Created: s.now()}); err != nil {
 			t.Fatal(err)
 		}
 		os.MkdirAll(s.jobDir("j-"+d), 0o755)
@@ -274,6 +274,55 @@ func TestPersonSeesOnlyTheirOwnMacs(t *testing.T) {
 	}
 	if strings.Contains(got.String(), "secret") {
 		t.Errorf("the visitor's stream carried another Mac's or the fleet's events:\n%s", got.String())
+	}
+
+	// A forgotten Mac's name can be taken again. Whoever takes it gets the
+	// Mac, not the old one's history: its jobs, their files, its screens.
+	os.MkdirAll(s.screenDir("lab"), 0o755)
+	os.WriteFile(filepath.Join(s.screenDir("lab"), "old.jpg"), []byte("old screen"), 0o644)
+	oldID := s.dev("lab").d.ID
+	for i := range 25 { // more than a page: the old Mac's jobs mustn't crowd out the new one's
+		s.store.saveJob(&api.Job{ID: fmt.Sprintf("j-lab-old-%d", i), Spec: api.JobSpec{Device: "lab"}, DeviceID: oldID, State: api.JobDone, Created: s.now()})
+	}
+	for _, p := range []string{s.serialPath("lab"), s.baselinePath("lab"), s.auditPath("lab")} {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte("old lab"), 0o644)
+	}
+	if code, err := s.forget(s.dev("lab"), "", true); code != 200 {
+		t.Fatalf("forget lab: %d %v", code, err)
+	}
+	volunteer(visitor, "lab")
+	if s.dev("lab") == nil {
+		t.Fatal("the visitor didn't get the name lab")
+	}
+	for _, path := range []string{"/api/jobs/j-lab", "/api/jobs/j-lab/files/journal", "/api/jobs/j-lab/wait"} {
+		if w := do("GET", path, visitor, "", ""); w.Code != 404 {
+			t.Errorf("the new lab's Volunteer: GET %s got %d %s, want 404", path, w.Code, w.Body)
+		}
+	}
+	if got := jobs(visitor, "", ""); slices.Contains(got, "j-lab") {
+		t.Errorf("the new lab's Volunteer lists the old lab's job: %q", got)
+	}
+	s.store.saveJob(&api.Job{ID: "j-lab-new", Spec: api.JobSpec{Device: "lab"}, DeviceID: s.dev("lab").d.ID, State: api.JobDone, Created: s.now().Add(-time.Hour)})
+	if got := jobs(visitor, "", "?device=lab"); !slices.Equal(got, []string{"j-lab-new"}) {
+		t.Errorf("the new lab's Volunteer lists %q, want only the new lab's job", got)
+	}
+	for _, p := range []string{s.serialPath("lab"), s.baselinePath("lab"), s.auditPath("lab")} {
+		if _, err := os.Stat(p); err == nil {
+			t.Errorf("%s outlived the Mac it was kept for", p)
+		}
+	}
+	if _, err := os.Stat(strings.TrimSuffix(s.auditPath("lab"), ".jsonl") + "." + oldID + ".jsonl"); err != nil {
+		t.Errorf("the old lab's Audit log wasn't kept for Maintainers: %v", err)
+	}
+	if w := do("GET", "/api/devices/lab/screens", visitor, "", ""); strings.Contains(w.Body.String(), "old.jpg") {
+		t.Errorf("the new lab's Volunteer sees the old lab's screens: %s", w.Body)
+	}
+	if w := do("GET", "/api/devices/lab/screens/old.jpg", visitor, "", ""); w.Code == 200 {
+		t.Errorf("the new lab's Volunteer reads the old lab's screen: %d", w.Code)
+	}
+	if w := do("GET", "/api/jobs/j-lab", visitor, "adm_secret", ""); w.Code != 200 {
+		t.Errorf("a Maintainer reads the old lab's job: %d, want 200", w.Code)
 	}
 }
 

@@ -168,6 +168,20 @@ type Facts struct {
 	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
 }
 
+// StaleKnownGood is whether a preflight problem is lab-agent's known-good
+// kernel no longer being installed: a distro kernel update, or an install,
+// replaced its package. lab baseline makes the running kernel the known-good
+// again, on the Mac and on labd.
+func StaleKnownGood(problem string) bool {
+	return strings.HasPrefix(problem, "known-good kernel ") && strings.HasSuffix(problem, " is no longer installed")
+}
+
+// StaleKnownGoodFix is what to do about a StaleKnownGood problem on Mac name,
+// running kernel.
+func StaleKnownGoodFix(name, kernel string) string {
+	return fmt.Sprintf("run `lab baseline %s` to make the running kernel %s its known-good", name, kernel)
+}
+
 type Health struct {
 	Uptime      float64 `json:"uptime"`
 	SystemState string  `json:"system_state"` // systemctl is-system-running
@@ -302,7 +316,8 @@ const (
 	CmdExec        = "exec"
 	// CmdRecordKnownGood makes the running kernel the agent's known-good, as
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
-	// outside a lab boot. Promotion sends it.
+	// outside a lab boot. Promotion sends it, and so does a baseline on a Mac
+	// whose known-good kernel is no longer installed.
 	CmdRecordKnownGood = "record_known_good"
 	// CmdInstall installs a Release on the Mac as a named lab operation: the
 	// install step of an Installed run, which a Volunteer's Mac allows at
@@ -424,7 +439,7 @@ type StageResult struct {
 }
 
 // BootOnceArgs arms a Lab boot. lab-agent first writes its deadline record,
-// on its own clock: no contact (2x BootTimeoutSec from now, unless lab-agent
+// on its own clock: no contact (2x BootTimeoutSec from now, at most 9 minutes, unless lab-agent
 // reaches labd) and the hard ceiling (the job's end, JobSec from now).
 type BootOnceArgs struct {
 	Entry          string `json:"entry"`

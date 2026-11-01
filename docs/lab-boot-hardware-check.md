@@ -35,7 +35,7 @@ lab run <mac> --boot-timeout 3m \
 Expect:
 
 - The Mac boots the test entry to the login screen, then reboots by itself
-  about 6 minutes (twice the boot timeout) after labd armed the one-shot, and
+  about 6 minutes (twice the boot timeout, at most 9) after labd armed the one-shot, and
   comes back on its known-good kernel.
 - On a Lab-owned Mac with OOB, no hard reset in the job's `recovery`.
 - The job fails `lost_contact`, its events say which deadline rebooted the
