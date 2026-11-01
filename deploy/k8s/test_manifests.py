@@ -56,9 +56,13 @@ class Base(unittest.TestCase):
     def test_args_match_the_prefix_contract(self):
         a = container(self.o)['args']
         self.assertIn('--public-url=https://maclab.chonkbase.net', a)
+        self.assertEqual(a[3], '--public-url=https://maclab.chonkbase.net', 'path-prefix replaces this index')
         self.assertIn('--data=/data', a)
         self.assertIn('--listen=0.0.0.0:7770', a)
         self.assertIn('--allow-plain-http', a)
+        self.assertIn('--omt-publish', a)
+        self.assertFalse([x for x in a if x == '--omt-every' or x.startswith('--omt-every=')],
+                         'no periodic reboot refresh just to upload')
         self.assertNotIn('--tailscale', ' '.join(a))
         tp = [x for x in a if x.startswith('--trusted-proxy=')]
         self.assertEqual(len(tp), 1)
@@ -99,6 +103,14 @@ class Base(unittest.TestCase):
         self.assertEqual(s['ports'][0]['targetPort'], container(self.o)['ports'][0]['name'])
         self.assertEqual(s['selector'], self.o[('Deployment', 'maclab')]['spec']['selector']['matchLabels'])
 
+    def test_publish_stays_opt_in_outside_this_deployment(self):
+        root = K.parents[1]
+        src = (root / 'cmd/labd/main.go').read_text()
+        self.assertIn('flag.Bool("omt-publish", false,', src, 'a personal labd must not publish unless it passes the flag')
+        unit = (root / 'deploy/labd.service').read_text()
+        self.assertNotIn('--omt-publish', unit)
+        self.assertNotIn('--omt-every', unit)
+
 
 @unittest.skipUnless(Path(KUBECTL).exists(), 'kubectl (kustomize) needed')
 class Overlays(unittest.TestCase):
@@ -109,6 +121,9 @@ class Overlays(unittest.TestCase):
         self.assertEqual(o[('Certificate', 'maclab-tls')]['spec']['dnsNames'], ['chonkbase.net'])
         self.assertEqual(o[('Ingress', 'maclab')]['spec']['tls'][0]['hosts'], ['chonkbase.net'])
         a = container(o)['args']
+        self.assertEqual(a[3], '--public-url=https://chonkbase.net/maclab')
+        self.assertIn('--omt-publish', a)
+        self.assertFalse([x for x in a if x == '--omt-every' or x.startswith('--omt-every=')])
         self.assertIn('--public-url=https://chonkbase.net/maclab', a)
         self.assertNotIn('--public-url=https://maclab.chonkbase.net', a)
         for p in ('readinessProbe', 'livenessProbe'):
@@ -125,6 +140,8 @@ class Overlays(unittest.TestCase):
             o = render(root / 'terms')
         c = container(o)
         self.assertIn('--terms-file=/etc/maclab/terms.txt', c['args'])
+        self.assertIn('--omt-publish', c['args'])
+        self.assertFalse([x for x in c['args'] if x == '--omt-every' or x.startswith('--omt-every=')])
         self.assertIn({'name': 'terms', 'mountPath': '/etc/maclab', 'readOnly': True}, c['volumeMounts'])
         cm = [k for k in o if k[0] == 'ConfigMap']
         self.assertEqual(len(cm), 1)

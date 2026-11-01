@@ -72,8 +72,9 @@ They follow the cluster's existing conventions (the chonkbase and slopblender na
   - a read-only root filesystem, all capabilities dropped, the RuntimeDefault seccomp profile;
   - no service-account token;
   - no hostPath, and nothing from i9beef.
-- **labd's args:** `--listen=0.0.0.0:7770 --allow-plain-http --data=/data --public-url=https://maclab.chonkbase.net --trusted-proxy=<CIDR> --maintainer=chris`
-  (`path-prefix/` changes `--public-url` to `https://chonkbase.net/maclab`).
+- **labd's args:** `--listen=0.0.0.0:7770 --allow-plain-http --data=/data --public-url=https://maclab.chonkbase.net --trusted-proxy=<CIDR> --maintainer=chris --omt-publish`
+  (`path-prefix/` changes `--public-url` to `https://chonkbase.net/maclab`; that patch replaces argument index 3, so `--omt-publish` stays after `--maintainer`).
+  `--omt-publish` makes the existing publisher run for a baseline (`lab baseline`) when that job finishes. It does not publish an ordinary `lab run` on the known-good kernel, a lab-kernel comparison, or a candidate; those stay local unless the job itself passed `--publish` and then still has to pass the same publisher checks. The manifests do not pass `--omt-every`, so this deployment does not schedule refresh jobs, does not reboot idle Macs to make a report, and does not upload reports already stored. A Volunteer's Mac is still published only after `sudo lab-agent publish on`. A staged Mesa diagnostic, or a report whose installed-package identity does not match, stays private. A failed upload is recorded on the job, and the site's deletion link stays in that job's `omt-published.json`. The flag's default remains false, so a personal labd does not publish unless it passes the flag.
   Plain HTTP stays inside the cluster, from the ingress controller only; TLS ends at the Ingress.
 - **Ingress:**
   - host `maclab.chonkbase.net`, path `/` (`path-prefix/`: host `chonkbase.net`, path `/maclab`), passed through **unchanged**: no

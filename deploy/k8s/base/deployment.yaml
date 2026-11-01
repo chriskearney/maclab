@@ -46,6 +46,11 @@ spec:
             # to start with it rather than trust a guess.
             - --trusted-proxy=SET-INGRESS-NGINX-POD-CIDR
             - --maintainer=chris                       # used once, on a labd with no Maintainer yet; ignored after
+            # lab baseline uploads through the existing publisher. An ordinary
+            # known-good run, a comparison, and a candidate do not.
+            # Appended, not inserted: path-prefix replaces args/3 (--public-url).
+            # No --omt-every. The flag default stays false for a personal labd.
+            - --omt-publish
           env:
             - { name: HOME, value: /tmp }
           ports:

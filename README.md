@@ -683,6 +683,8 @@ labd --omt-publish --omt-every 24h   # refresh each idle Mac's known-good report
 labd --omt=false                     # don't add it to jobs
 ```
 
+The deployment at <https://maclab.chonkbase.net> passes `--omt-publish` and does not pass `--omt-every` (`deploy/k8s/`, and [docs/https.md](docs/https.md)). A labd that does not pass the flag, including `deploy/labd.service`, still keeps reports local. With the flag, the runner uploads only when the job asked to publish (`lab run --publish` or `lab publish`) or the job is a baseline (`lab baseline`). An ordinary `lab run` on the known-good kernel does not upload by itself, even when that run becomes the comparison reference. A scheduled refresh uploads only when `--omt-every` is also set; this deployment leaves that at its default, so it does not reboot idle Macs and does not upload reports already stored. A Volunteer's Mac still needs `publish on`. A lab-kernel comparison, a candidate, a staged Mesa diagnostic, or a report the installed packages do not describe stays private. A failed upload is recorded on the job, and the deletion link stays in `omt-published.json`.
+
 ## Release packages from a PKGBUILD
 
 ```sh
