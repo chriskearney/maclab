@@ -82,7 +82,7 @@ func TestVolunteerLimits(t *testing.T) {
 	if code, _ := ask(peer(0), "", `{"name":"`+strings.Repeat("a", 5000)+`"}`); code != 413 {
 		t.Errorf("a 5 KB request: %d, want 413", code)
 	}
-	if code, _ := ask("100.64.0.3:40000", "", `{"name":"m1air"}`); code != 403 {
+	if code, _ := ask("100.64.0.3:40000", "", `{"name":"m1air"}`); code != 401 {
 		t.Errorf("a tagged lab Mac got a token: %d", code)
 	}
 	if n := volunteerTokens(t, s); n != 0 {
