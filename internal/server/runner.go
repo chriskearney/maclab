@@ -799,7 +799,7 @@ func (r *jobRun) expectedLength() time.Duration {
 
 // noContactWait is how long past its boot timeout a Lab boot gets to come back
 // by itself: lab-agent's early unit reboots one that never reaches labd at its
-// no-contact deadline (twice the boot timeout), and the Mac then needs a boot
+// no-contact deadline (twice the boot timeout, at most 9 minutes), and the Mac then needs a boot
 // to check in.
 func (r *jobRun) noContactWait() time.Duration { return 2 * r.boot }
 

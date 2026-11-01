@@ -432,7 +432,7 @@ type StageResult struct {
 }
 
 // BootOnceArgs arms a Lab boot. lab-agent first writes its deadline record,
-// on its own clock: no contact (2x BootTimeoutSec from now, unless lab-agent
+// on its own clock: no contact (2x BootTimeoutSec from now, at most 9 minutes, unless lab-agent
 // reaches labd) and the hard ceiling (the job's end, JobSec from now).
 type BootOnceArgs struct {
 	Entry          string `json:"entry"`
