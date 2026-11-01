@@ -44,21 +44,26 @@ func (r *jobRun) park() bool {
 }
 
 // unpark queues again, in the order they were set aside, the jobs a lease no
-// longer holds back: it ended, ran out or was released.
+// longer holds back: it ended, ran out or was released. It never waits for
+// room in the queue: deviceLoop, the queue's only reader, calls it, so a
+// full queue would stop the Mac for good. What doesn't fit stays parked, in
+// order, for the next pass.
 func (v *dev) unpark() {
 	v.mu.Lock()
-	var back []string
+	defer v.mu.Unlock()
 	keep := v.parked[:0]
+	full := false
 	for _, p := range v.parked {
-		if v.leaseHoldsBackLocked(p.holder, p.maintainer) == "" {
-			back = append(back, p.id)
-		} else {
-			keep = append(keep, p)
+		if !full && v.leaseHoldsBackLocked(p.holder, p.maintainer) == "" {
+			select {
+			case v.queue <- p.id:
+				continue
+			default:
+				full = true
+			}
 		}
+		keep = append(keep, p)
 	}
+	clear(v.parked[len(keep):])
 	v.parked = keep
-	v.mu.Unlock()
-	for _, id := range back {
-		v.queue <- id
-	}
 }

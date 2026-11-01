@@ -135,3 +135,32 @@ func hasEvent(j *api.Job, want string) bool {
 	}
 	return false
 }
+
+// unpark runs on deviceLoop, the queue's only reader, so it must never wait
+// for room in the queue: with the queue full it puts back what fits and keeps
+// the rest parked, in order, for the next pass.
+func TestUnparkNeverBlocksOnAFullQueue(t *testing.T) {
+	v := newDev(&Server{}, api.Device{Name: "m"}, "")
+	v.queue = make(chan string, 2)
+	v.queue <- "already-queued"
+	v.parked = []parkedJob{{"a", "joshua@mini", "joshua"}, {"b", "joshua@mini", "joshua"}, {"c", "joshua@mini", "joshua"}}
+
+	done := make(chan struct{})
+	go func() { v.unpark(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unpark blocked on a full queue")
+	}
+	if got := []string{<-v.queue, <-v.queue}; got[0] != "already-queued" || got[1] != "a" {
+		t.Fatalf("queue after the first pass: %v", got)
+	}
+	if len(v.parked) != 2 || v.parked[0].id != "b" || v.parked[1].id != "c" {
+		t.Fatalf("what didn't fit should stay parked in order: %+v", v.parked)
+	}
+
+	v.unpark()
+	if got := []string{<-v.queue, <-v.queue}; got[0] != "b" || got[1] != "c" || len(v.parked) != 0 {
+		t.Fatalf("the next pass should queue the rest in order: %v, parked %+v", got, v.parked)
+	}
+}
