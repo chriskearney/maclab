@@ -106,7 +106,7 @@ func main() {
 		JobTimeout: *jobTimeout, ReadyTimeout: *readyTimeout, Poll: 15 * time.Second}
 	if *judge != "" {
 		n.Judge = loop.CommandJudge{Command: *judge, Timeout: *judgeTimeout,
-			Tools: []string{"lab_job", "lab_log", "lab_serial", "lab_device"}}
+			Tools: []string{"lab_job", "lab_log", "lab_serial"}}
 	}
 	log.Printf("lab-loop: %s, %d boots, seed %d, kernel %s, ledger %s", *device, len(boots), *seed, sha[:12], *ledger)
 	err = n.Run(ctx)
