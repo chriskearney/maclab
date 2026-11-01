@@ -111,6 +111,11 @@ type Device struct {
 	// latest check-in carried them. Only the Volunteer changes them, on the Mac.
 	AccessLevel string `json:"access_level,omitempty"`
 	Publish     bool   `json:"publish,omitempty"`
+	// TermsSHA256 is the participation terms the Mac's owner accepted when it
+	// joined, and TermsAccepted when; empty for a Mac that joined before
+	// labd had terms.
+	TermsSHA256   string    `json:"terms_sha256,omitempty"`
+	TermsAccepted time.Time `json:"terms_accepted,omitzero"`
 }
 
 // Access levels of a Volunteer's Mac. Qualification, the default, allows
@@ -180,6 +185,20 @@ type Facts struct {
 	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
 }
 
+// StaleKnownGood is whether a preflight problem is lab-agent's known-good
+// kernel no longer being installed: a distro kernel update, or an install,
+// replaced its package. lab baseline makes the running kernel the known-good
+// again, on the Mac and on labd.
+func StaleKnownGood(problem string) bool {
+	return strings.HasPrefix(problem, "known-good kernel ") && strings.HasSuffix(problem, " is no longer installed")
+}
+
+// StaleKnownGoodFix is what to do about a StaleKnownGood problem on Mac name,
+// running kernel.
+func StaleKnownGoodFix(name, kernel string) string {
+	return fmt.Sprintf("run `lab baseline %s` to make the running kernel %s its known-good", name, kernel)
+}
+
 type Health struct {
 	Uptime      float64 `json:"uptime"`
 	SystemState string  `json:"system_state"` // systemctl is-system-running
@@ -242,10 +261,11 @@ type Quiet struct {
 // AuditEntry is one line of a Volunteer Mac's Audit log: a Maintainer action
 // that reached the Mac, written there before lab-agent acted on it.
 type AuditEntry struct {
-	Time       time.Time `json:"time"`
-	Maintainer string    `json:"maintainer,omitempty"` // "" when labd acted on its own
-	Job        string    `json:"job,omitempty"`
-	Action     string    `json:"action"` // what was done, with the command or script text
+	Time           time.Time `json:"time"`
+	Maintainer     string    `json:"maintainer,omitempty"`      // "" when labd acted on its own
+	VolunteerLogin string    `json:"volunteer_login,omitempty"` // the Mac's own Volunteer asked, through labd
+	Job            string    `json:"job,omitempty"`
+	Action         string    `json:"action"` // what was done, with the command or script text
 	// Refused is why lab-agent refused the action instead; "" when it acted.
 	Refused string `json:"refused,omitempty"`
 	// End is where the entry ends in the Mac's own log, in bytes: labd's copy
@@ -257,7 +277,10 @@ type AuditEntry struct {
 // time zone of loc.
 func (e AuditEntry) Line(loc *time.Location) string {
 	who := e.Maintainer
-	if who == "" {
+	switch {
+	case e.VolunteerLogin != "":
+		who = "Volunteer " + e.VolunteerLogin
+	case who == "":
 		who = "labd"
 	}
 	job := ""
@@ -310,7 +333,8 @@ const (
 	CmdExec        = "exec"
 	// CmdRecordKnownGood makes the running kernel the agent's known-good, as
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
-	// outside a lab boot. Promotion sends it.
+	// outside a lab boot. Promotion sends it, and so does a baseline on a Mac
+	// whose known-good kernel is no longer installed.
 	CmdRecordKnownGood = "record_known_good"
 	// CmdInstall installs a Release on the Mac as a named lab operation: the
 	// install step of an Installed run, which a Volunteer's Mac allows at
@@ -344,8 +368,11 @@ type Command struct {
 	JobID string `json:"job_id,omitempty"`
 	// Maintainer is who the command acts for: the Maintainer who asked, or
 	// whose job it is; "" when labd acts on its own.
-	Maintainer string          `json:"maintainer,omitempty"`
-	Args       json.RawMessage `json:"args,omitempty"`
+	Maintainer string `json:"maintainer,omitempty"`
+	// VolunteerLogin is the tailnet login of the Mac's own Volunteer when
+	// they asked for it through labd, such as reading its live journal.
+	VolunteerLogin string          `json:"volunteer_login,omitempty"`
+	Args           json.RawMessage `json:"args,omitempty"`
 }
 
 type CommandResult struct {
@@ -429,7 +456,7 @@ type StageResult struct {
 }
 
 // BootOnceArgs arms a Lab boot. lab-agent first writes its deadline record,
-// on its own clock: no contact (2x BootTimeoutSec from now, unless lab-agent
+// on its own clock: no contact (2x BootTimeoutSec from now, at most 9 minutes, unless lab-agent
 // reaches labd) and the hard ceiling (the job's end, JobSec from now).
 type BootOnceArgs struct {
 	Entry          string `json:"entry"`
@@ -775,6 +802,10 @@ type Job struct {
 	Canceled              bool       `json:"canceled,omitempty"`
 	// Maintainer is who submitted it, from their token; empty when labd queued it.
 	Maintainer string `json:"maintainer,omitempty"`
+	// DeviceID is the enrollment (Device.ID) of the Mac it was submitted for.
+	// Only that enrollment runs it, fetches its artifacts and adds its files;
+	// a job from before labd kept it is never run.
+	DeviceID string `json:"device_id,omitempty"`
 	// RetryOf is the job this one retries (lab retry).
 	RetryOf string `json:"retry_of,omitempty"`
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
@@ -812,6 +843,21 @@ type DeviceSnapshot struct {
 type EnrollRequest struct {
 	Token string `json:"token"`
 	Facts Facts  `json:"facts"`
+	// ActivationKey is a random secret the Mac made for this activation and
+	// keeps until it is set up. The token is used up by the first enrollment
+	// with it; only the same activation key may enroll with it again, should
+	// the answer never have reached the Mac.
+	ActivationKey string `json:"activation_key,omitempty"`
+	// TermsSHA256 is the sha256 of the participation terms the Mac's owner
+	// accepted (GET /api/join/terms). labd takes only its current terms.
+	TermsSHA256 string `json:"terms_sha256,omitempty"`
+}
+
+// JoinTerms are labd's participation terms, which a Mac's owner accepts
+// before it joins.
+type JoinTerms struct {
+	SHA256 string `json:"sha256"`
+	Text   string `json:"text"`
 }
 
 type EnrollResponse struct {
@@ -857,6 +903,11 @@ type EnrollTokenResponse struct {
 	Name    string    `json:"name"`
 	Token   string    `json:"token"`
 	Expires time.Time `json:"expires"`
+	// JoinCommand is the one-liner that joins a Mac with this token: run on
+	// the Mac by its owner, it downloads lab-agent, checks its sha256, shows
+	// the terms and sets the Mac up. Empty when labd has no lab-agent to
+	// hand out.
+	JoinCommand string `json:"join_command,omitempty"`
 }
 
 type DevicePatch struct {
@@ -1130,6 +1181,64 @@ type MaintainerRequest struct {
 type NewMaintainer struct {
 	Maintainer
 	Token string `json:"token"`
+}
+
+// Builder kinds: the builds a named builder may take.
+const (
+	BuilderKernel  = "kernel"
+	BuilderPackage = "package"
+)
+
+// Builder is a named builder host, added by a Maintainer with a token of its
+// own (lab builder add).
+type Builder struct {
+	Name    string    `json:"name"`
+	Kinds   []string  `json:"kinds"`
+	Added   time.Time `json:"added"`
+	AddedBy string    `json:"added_by"`
+}
+
+type BuilderRequest struct {
+	Name  string   `json:"name"`
+	Kinds []string `json:"kinds,omitempty"` // default: kernel
+}
+
+// NewBuilder carries a new builder's token, the only time labd shows it, and
+// its generation: removing the builder with it removes only this one, never a
+// builder added under the same name since.
+type NewBuilder struct {
+	Builder
+	Token      string `json:"token"`
+	Generation string `json:"generation"`
+}
+
+// RemovedBuilder answers a builder's removal: the builds it was running,
+// which failed with it.
+type RemovedBuilder struct {
+	Removed      string   `json:"removed"`
+	FailedBuilds []string `json:"failed_builds"`
+}
+
+// BuilderSelf is who labd takes a builder's token for. Shared is the data
+// directory's builder.token, the controller's own builder.
+type BuilderSelf struct {
+	Name   string   `json:"name,omitempty"`
+	Kinds  []string `json:"kinds,omitempty"`
+	Shared bool     `json:"shared,omitempty"`
+}
+
+// BuilderStatus is one builder in GET /api/builders: a named builder, or a
+// host that polled with the shared builder.token.
+type BuilderStatus struct {
+	Host       string    `json:"host"`
+	Registered bool      `json:"registered,omitempty"`
+	Shared     bool      `json:"shared,omitempty"`
+	Kinds      []string  `json:"kinds,omitempty"`
+	Added      time.Time `json:"added,omitzero"`
+	AddedBy    string    `json:"added_by,omitempty"`
+	LastSeen   time.Time `json:"last_seen,omitzero"`
+	Alive      bool      `json:"alive"`
+	Build      string    `json:"build,omitempty"` // the build it is running
 }
 
 // EndedHeader is the header on the 401 that tells a Mac its enrollment was

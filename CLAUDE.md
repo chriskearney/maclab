@@ -2,7 +2,7 @@
 
 ### Issue tracker
 
-Issues are tracked in GitHub Issues on chriskearney/maclab, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+Issues are tracked in GitHub Issues on malik-na/maclab, the fork day-to-day development happens on (`docs/adr/0003-develop-on-the-fork-with-a-lab-of-its-own.md`), via the `gh` CLI. Upstream is chriskearney/maclab. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 

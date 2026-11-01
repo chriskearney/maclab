@@ -186,7 +186,7 @@ func (s *Server) hRecoveryMode(w http.ResponseWriter, r *http.Request) {
 	if v == nil {
 		return
 	}
-	if err := refuseAtAccessLevel(v.snapshot(), "recovery-policy overrides"); err != nil {
+	if err := s.mayDo(callerOf(r), v, actRecovery); err != nil {
 		httpErr(w, 403, "%v", err)
 		return
 	}

@@ -108,9 +108,9 @@ func onBattery(dir string) bool {
 func (l *Linux) Facts() api.Facts {
 	f := api.Facts{GUIUser: l.GUIUser}
 	f.Hostname, _ = os.Hostname()
-	var u syscall.Utsname
-	if syscall.Uname(&u) == nil {
-		f.Machine = charsToString(u.Machine[:])
+	var u unix.Utsname // x/sys/unix: labd builds this package on the controller Mac too
+	if unix.Uname(&u) == nil {
+		f.Machine = unix.ByteSliceToString(u.Machine[:])
 	}
 	f.DTModel = readTrim("/proc/device-tree/model")
 	if c := readTrim("/proc/device-tree/compatible"); c != "" {
@@ -133,17 +133,6 @@ func (l *Linux) Facts() api.Facts {
 		f.Bootloader = b.name()
 	}
 	return f
-}
-
-func charsToString(ca []int8) string {
-	b := make([]byte, 0, len(ca))
-	for _, c := range ca {
-		if c == 0 {
-			break
-		}
-		b = append(b, byte(c))
-	}
-	return string(b)
 }
 
 // Preflight lists everything that makes this Mac unsafe to hand to the lab,
@@ -285,9 +274,12 @@ func (l *Linux) Collect(ctx context.Context, boot, outDir string) error {
 		out, err := exec.CommandContext(ctx, "journalctl", args...).CombinedOutput()
 		save(name, out, err, "journalctl")
 	}
-	run("journal.txt", "-b", boot, "-o", "short-monotonic", "--no-pager")
-	run("kernel.txt", "-k", "-b", boot, "-o", "short-monotonic", "--no-pager")
-	run("dmesg-errors.txt", "-k", "-b", boot, "-p", "warning", "-o", "cat", "--no-pager")
+	// boot is dashed, as /proc/sys/kernel/random/boot_id is, but journalctl
+	// -b (systemd 262) only takes the 32-hex form: "Invalid argument".
+	id := strings.ReplaceAll(boot, "-", "")
+	run("journal.txt", "-b", id, "-o", "short-monotonic", "--no-pager")
+	run("kernel.txt", "-k", "-b", id, "-o", "short-monotonic", "--no-pager")
+	run("dmesg-errors.txt", "-k", "-b", id, "-p", "warning", "-o", "cat", "--no-pager")
 	run("boots.txt", "--list-boots", "--no-pager")
 	if boot == "0" {
 		// systemd-analyze only knows the running boot: how long firmware, loader,

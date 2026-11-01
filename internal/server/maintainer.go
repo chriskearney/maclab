@@ -115,14 +115,16 @@ func (s *Server) maintainer(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// viewer guards read-only endpoints, which tailnet viewers may use too.
+// viewer guards read-only endpoints, which a person on the tailnet may use
+// too, and passes on who they are (see callerOf): what they see is their
+// own Macs only (see sees).
 func (s *Server) viewer(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		switch a, who, foreign := s.accessHost(r); {
 		case a == adminAccess:
 			s.asMaintainer(w, r, who, h)
 		case a == viewAccess:
-			h(w, r)
+			asPerson(w, r, who, h)
 		case foreign:
 			foreignHost(w, r)
 		default:

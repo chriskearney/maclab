@@ -31,7 +31,7 @@ func (l *lab) enrollMac(name string, extra map[string]any, sim *agent.Sim, run b
 	if resp.StatusCode != 200 || json.Unmarshal([]byte(body), &tok) != nil {
 		l.t.Fatalf("enroll token for %s: %s %s", name, resp.Status, body)
 	}
-	resp, body = l.as("", "POST", "/api/agent/enroll", api.EnrollRequest{Token: tok.Token, Facts: sim.Facts()})
+	resp, body = l.as("", "POST", "/api/agent/enroll", api.EnrollRequest{Token: tok.Token, Facts: sim.Facts(), ActivationKey: testActivationKey, TermsSHA256: termsSum()})
 	if resp.StatusCode != 200 {
 		l.t.Fatalf("enroll %s: %s %s", name, resp.Status, body)
 	}
@@ -170,7 +170,7 @@ func TestRetriedEnrollmentOfAVolunteerMacKeepsItsTopic(t *testing.T) {
 	sim := agent.NewSim(t.TempDir())
 	var topics [2]string
 	for i := range topics {
-		resp, body = l.as("", "POST", "/api/agent/enroll", api.EnrollRequest{Token: tok.Token, Facts: sim.Facts()})
+		resp, body = l.as("", "POST", "/api/agent/enroll", api.EnrollRequest{Token: tok.Token, Facts: sim.Facts(), ActivationKey: testActivationKey, TermsSHA256: termsSum()})
 		out := map[string]any{}
 		json.Unmarshal([]byte(body), &out)
 		topics[i], _ = out["ntfy_topic"].(string)

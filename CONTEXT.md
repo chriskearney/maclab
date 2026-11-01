@@ -5,11 +5,11 @@ A test lab that boots kernels once on real Apple Silicon Macs running Omarchy, t
 ## People
 
 **Volunteer**:
-A person other than a Maintainer who lends their own Omarchy Mac to the lab from wherever it lives. They are the human who answers when their Mac needs hands.
+A person other than a Maintainer who lends their own Omarchy Mac to the lab from wherever it lives. They are the human who answers when their Mac needs hands. In the lab they see only their own Macs, and only while those stay enrolled; their Macs see only themselves.
 _Avoid_: Contributor, donor, tester
 
 **Maintainer**:
-A named person with their own access to labd who runs jobs and decides whether a Release is qualified.
+A named person with their own access to labd who runs jobs and decides whether a Release is qualified. Only Maintainers see the whole fleet.
 _Avoid_: Admin, operator
 
 ## Machines
@@ -34,7 +34,7 @@ The kernel a Mac returns to after every lab boot, recorded on both labd and the 
 A boot of a Mac from an entry the lab put there (a test kernel or an installed Release), as opposed to a boot of the Mac's own default entry.
 
 **No-contact deadline**:
-The time by which a Lab boot must reach labd, about twice the job's boot timeout; a Lab boot that hasn't reached labd by then reboots to the Known-good kernel.
+The time by which a Lab boot must reach labd, about twice the job's boot timeout, at most 9 minutes (inside lab-agent's own 10-minute watchdog); a Lab boot that hasn't reached labd by then reboots to the Known-good kernel.
 _Avoid_: Boot timeout (labd's own wait, a different thing)
 
 **Hard ceiling**:

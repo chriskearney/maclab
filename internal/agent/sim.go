@@ -81,6 +81,9 @@ type Sim struct {
 	CollectHook func(boot, outDir string) error
 	// PackagedKernels are releases installed as packages (installed-mode jobs).
 	PackagedKernels []string
+	// removedKernels are kernel packages a distro update took off the Mac;
+	// see UpgradeKernel.
+	removedKernels []string
 	// installHook, when set, is called with the Release before the simulated
 	// installer installs it; see SetInstallHook. installs are the Releases it
 	// installed, in order.
@@ -181,8 +184,48 @@ func (s *Sim) Facts() api.Facts {
 	if model == "" {
 		model = "Simulated Mac"
 	}
-	return api.Facts{Hostname: "sim", Machine: "aarch64", DTModel: model, Bootloader: "grub",
+	f := api.Facts{Hostname: "sim", Machine: "aarch64", DTModel: model, Bootloader: "grub",
 		Initramfs: "mkinitcpio", GUIUser: "sim", Watchdog: true, WatchdogArmed: true, PanicTimeout: 10, PreflightOK: true}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if kg := s.knownGoodLocked(); slices.Contains(s.removedKernels, kg) {
+		f.Problems, f.PreflightOK = []string{"known-good kernel " + kg + " is no longer installed"}, false
+	}
+	return f
+}
+
+// knownGoodLocked is the agent's recorded known-good kernel.
+func (s *Sim) knownGoodLocked() string {
+	if s.RecordedKnownGood != "" {
+		return s.RecordedKnownGood
+	}
+	return SimKnownGood
+}
+
+// UpgradeKernel is a distro update (pacman -Syu) replacing the kernel package
+// a plain reboot boots with krel, which then boots instead. The kernel it
+// replaced is no longer installed. The Mac boots krel at its next reboot.
+func (s *Sim) UpgradeKernel(krel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.DefaultKernel
+	if old == "" {
+		old = SimKnownGood
+	}
+	s.removedKernels = append(s.removedKernels, old)
+	s.PackagedKernels = append(slices.DeleteFunc(s.PackagedKernels, func(k string) bool { return k == old }), krel)
+	s.DefaultKernel = krel
+}
+
+// SetDefaultKernel makes krel, an installed kernel package, what a plain
+// reboot boots, as choosing another default entry in the bootloader does.
+func (s *Sim) SetDefaultKernel(krel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !slices.Contains(s.PackagedKernels, krel) {
+		s.PackagedKernels = append(s.PackagedKernels, krel)
+	}
+	s.DefaultKernel = krel
 }
 
 // SetSnapshotable says whether the simulated Mac's @ can be snapshotted
@@ -270,7 +313,14 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 		s.mu.Unlock()
 		return api.StageResult{KernelRelease: in.Release, Entry: entryPrefix + job, Cmdline: cmdline}, nil
 	}
-	e := simEntry{krel: SimKnownGood, behavior: "ok"}
+	s.mu.Lock()
+	kg := s.knownGoodLocked()
+	gone := slices.Contains(s.removedKernels, kg)
+	s.mu.Unlock()
+	if gone && a.Artifact == "" {
+		return api.StageResult{}, fmt.Errorf("known-good kernel %s is no longer installed", kg)
+	}
+	e := simEntry{krel: kg, behavior: "ok"}
 	if a.Artifact != "" {
 		p := filepath.Join(s.WorkDir, job+".art")
 		if err := fetch(ctx, a.Artifact, p); err != nil {
@@ -865,6 +915,10 @@ func (s *Sim) RecordKnownGood(kernel string) error {
 	defer s.mu.Unlock()
 	if s.kernel != kernel || strings.Contains(s.cmdline, "maclab.job=") {
 		return fmt.Errorf("running %s (%q), not %s outside a lab boot", s.kernel, s.cmdline, kernel)
+	}
+	if slices.Contains(s.removedKernels, kernel) {
+		// the running kernel's package was updated away, and it has not rebooted since
+		return fmt.Errorf("running kernel %s has no /usr/lib/modules/%s/vmlinuz to build a baseline UKI from", kernel, kernel)
 	}
 	s.RecordedKnownGood = kernel
 	return nil

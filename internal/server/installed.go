@@ -256,16 +256,30 @@ func (s *Server) validateInstalled(spec api.JobSpec, d api.Device) (int, error) 
 	return 0, nil
 }
 
-// installedPreflight lets an installed job past the one preflight problem the
-// install causes by design: the old known-good kernel package is gone.
-func installedPreflight(problems []string) []string {
+// withoutStaleKnownGood lets a job past the one preflight problem it is there
+// to fix: the old known-good kernel package is gone. An installed job's install
+// removes it by design, and a baseline records the running kernel in its place.
+func withoutStaleKnownGood(problems []string) []string {
 	var rest []string
 	for _, p := range problems {
-		if !(strings.HasPrefix(p, "known-good kernel ") && strings.HasSuffix(p, " is no longer installed")) {
+		if !api.StaleKnownGood(p) {
 			rest = append(rest, p)
 		}
 	}
 	return rest
+}
+
+// preflightProblems is why a Mac fails preflight, with the fix for a
+// known-good kernel that is no longer installed.
+func preflightProblems(d api.Device) string {
+	var out []string
+	for _, p := range d.Facts.Problems {
+		if api.StaleKnownGood(p) {
+			p += " (" + api.StaleKnownGoodFix(d.Name, d.Kernel) + ")"
+		}
+		out = append(out, p)
+	}
+	return strings.Join(out, "; ")
 }
 
 // installedRun is one installed job's frozen context and the evidence so far.

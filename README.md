@@ -136,8 +136,9 @@ reboot lands on the Mac's own entry.
   be built with `apple_wdt`, or the watchdog resets it about 60s into every
   boot; the job flags one without it.
 - Before every Lab boot, lab-agent writes a deadline record to
-  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout,
-  unless lab-agent reaches labd first) and a **hard ceiling** (the job's end).
+  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout, at most
+  9 minutes so it comes before lab-agent's own watchdog, unless lab-agent
+  reaches labd first) and a **hard ceiling** (the job's end).
   `maclab-lab-boot-deadlines.service`, an early unit with no network
   dependency, reboots a Lab boot when either passes, and on a Volunteer's Mac
   as soon as its Availability window closes. labd waits for that
@@ -250,10 +251,12 @@ Mac still shows tier 1) and feeds it only while:
   in a reset although lab-agent keeps checking in, while labd still waits for it. A test
   already running when lab-agent opens the watchdog late (on a retry) gets the same budget,
   counted from when it started, so one already past it is reset at once.
-- Outside tests, the last check-in that reached labd, or the last command starting or
-  ending, was less than 10 minutes ago. A test boot stays up for as long as labd is in
+- Outside tests, the last check-in that reached labd, or the last command labd sent
+  starting, was less than 10 minutes ago. A test boot stays up for as long as labd is in
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
-  is reset after 10 minutes without labd.
+  is reset 10 minutes after it last heard from labd. Nothing lab-agent does by itself
+  counts: a test or command ending, or an upload retrying while labd is out of reach,
+  leaves a test boot that lost labd during a test with what is left of those 10 minutes.
 
 Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
 on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd
@@ -266,9 +269,17 @@ is stopped (`systemctl stop lab-agent`).
 ```sh
 make                                 # binaries in bin/
 labd --maintainer <you>              # first start: you become the first Maintainer (default $USER)
-lab login http://<labd-host>:7770 "$(cat ~/.local/share/maclab/admin.token)"
-lab enroll m1air --label "MacBook Air M1, left desk"
+lab login http://127.0.0.1:7770 "$(cat ~/.local/share/maclab/admin.token)"
+lab enroll m1air --label "MacBook Air M1, left desk"   # prints the one-liner that joins the Mac
 ```
+
+On a Linux controller (an Omarchy Mac, as in `docs/adr/0003-develop-on-the-fork-with-a-lab-of-its-own.md`),
+`scripts/setup-linux-controller.sh` walks through all of it step by step: it builds the binaries,
+starts labd as a user service on the tailnet address, runs lab-builder under Docker as a root
+service, keeps the laptop awake with the lid closed on power, then enrolls a Mac and baselines it.
+
+To serve the lab over the internet, with no Tailscale, see
+[HTTPS without Tailscale](#https-without-tailscale).
 
 Each Maintainer has their own labd token. `lab maintainer add <name>` prints
 a new one once (labd keeps only its hash); `lab maintainer list` and
@@ -277,21 +288,44 @@ token at once. Jobs and Promotions record the Maintainer whose token asked.
 Upgrading from a labd with a single admin token keeps that token, in the same
 `admin.token` file, as the first Maintainer's (`--maintainer`, default `$USER`).
 
-labd listens on `127.0.0.1:7770` unless told otherwise. For Macs over Tailscale,
-start it with `--listen <tailnet-ip>:7770` (or `MACLAB_LISTEN`) so it is not
-reachable off the tailnet. Remote links are slow, so the timeouts that assume a
-LAN are flags: `--boot-timeout`, `--offline-after`, `--alive-window`,
-`--quiet-grace` and `--stage-timeout` (defaults are sized for remote Macs).
-Artifact downloads resume with HTTP range requests after a dropped transfer. An
-enrollment token is spent by the Mac's first check-in, so a failed `setup` can
-be run again with the same token until it expires. lab-agent's own request
-timeouts are `http_timeout_sec` and `transfer_timeout_sec` in its config file.
+labd listens on `127.0.0.1:7770` unless told otherwise. Plain http on any other
+address, such as `--listen <tailnet-ip>:7770` for Macs over Tailscale, needs
+`--allow-plain-http`: tokens and device secrets then cross that network in the
+clear. Otherwise give labd a certificate or put it behind an https proxy (see
+[HTTPS without Tailscale](#https-without-tailscale)). Remote links are slow, so
+the timeouts that assume a LAN are flags: `--boot-timeout`, `--offline-after`,
+`--alive-window`, `--quiet-grace` and `--stage-timeout` (defaults are sized for
+remote Macs). Artifact downloads resume with HTTP range requests after a dropped
+transfer. lab-agent's own request timeouts are `http_timeout_sec` and
+`transfer_timeout_sec` in its config file.
 
-On the Mac:
+An enrollment token activates one Mac, once. The first enrollment with it uses
+it up for that Mac's activation key, which `setup` keeps until it has finished:
+a `setup` that stopped half way can run again on the same Mac with the same
+token until the Mac first checks in, while labd keeps running. Once lab-agent
+has started and checked in (which uses the token up), finish with `sudo
+lab-agent setup` and no token. Another Mac holding a copy of the token gets
+nothing. After a labd restart, or once the token has expired, `lab forget
+<name>` and make a new one. `lab enroll <name>
+--revoke` withdraws a token.
+
+On the Mac, `lab enroll`'s one-liner (also in the web UI) downloads lab-agent,
+checks its sha256 and runs `setup`, handing it the token on stdin. By hand:
 
 ```sh
-sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-user <you> --autologin
+printf '%s\n' enr_... | sudo ./lab-agent setup --server https://<labd> --token-stdin --gui-user <you> --autologin
 ```
+
+Before it changes anything, `setup` shows labd's participation terms (what the
+lab may do to the Mac) and goes on only when you type `yes`. Without a terminal
+it stops, unless `--accept-terms <sha256>` names the exact terms you read
+(`GET <labd>/api/join/terms` with the token). labd keeps the sha256 of the
+terms each Mac accepted, and takes no enrollment that accepted others. With
+`--tailscale-authkey`, which joins the tailnet before labd can be reached,
+`--accept-terms` is required: the join happens on that acceptance, and if
+labd's terms then turn out to differ, setup stops before enrolling (the join
+stays). The one-liner holds the token, so keep it private; the token stays
+out of URLs, labd's log and the arguments of the curl and sudo it starts.
 
 `setup` makes these changes. Each one is idempotent and backed up:
 
@@ -340,6 +374,14 @@ lab crashtest m1air   # optional: deliberate panic, checks it recovers by itself
 ```
 
 No other job runs on a Mac until its baseline passes.
+
+A distro kernel update (`pacman -Syu`) removes the known-good kernel's package, and
+preflight then holds every job back with "known-good kernel ... is no longer
+installed"; `lab status` says so with the fix. Reboot the Mac onto the new kernel,
+then run `lab baseline <mac>` again: it records the running kernel as the Mac's
+known-good, and labd's once it passes. Until it passes, the Mac has no known-good
+kernel on labd and takes no other job. The baseline passes only if a plain reboot
+comes back on that kernel, so it must be the bootloader's default entry.
 
 To take a Mac out of the lab, `sudo lab-agent uninstall` undoes every change `setup` made. First it
 tells labd the Mac is leaving: labd cancels the Mac's running and queued jobs, saying why, lists it as
@@ -586,9 +628,67 @@ depth-1 git store, one reused worktree, at most two build dirs, and an 8 GB ccac
 dir is emptied after every build. labd's artifact store is garbage-collected to a budget
 (`--artifact-budget-gb`, default 20).
 
+A controller without Apple `container` can build with Docker instead (Colima, Docker Desktop):
+`lab-builder --runtime docker [--context colima]`, with the same `kbuild` image and `/cache`
+volume layout. labd sees no difference: progress, logs and reuse of earlier builds work the same.
+Colima shares only paths under `$HOME` into its VM and a bind mount of anything else is silently
+empty, so `/io` is copied into each build's container and back out with `docker cp`, never mounted.
+
+```sh
+docker build -f builder/Containerfile -t maclab-kbuild:1 builder/   # -f: the file is not named Dockerfile
+docker volume create maclab-cache
+lab-builder --runtime docker --context colima --cpus 12 --memory 24G --pkg-image '' ...
+```
+
+`--pkg-image ''` takes kernel builds only: the package builder (`builder/pkg`) has not been tried
+under Docker.
+
+Docker volumes have no size cap of their own: the cache is bounded only by what kbuild keeps on it.
+
 Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first build 9 minutes;
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
 live on `/api/stream` (`build`, `buildlog`) and `/api/builds/{id}/log?follow=1`.
+
+### Builders
+
+The controller's own `lab-builder` may use labd's `builder.token`. That token can do anything a builder can, on any build and
+any artifact, so it never leaves the controller.
+
+Any other builder is added by a Maintainer and gets a token of its own:
+
+```sh
+lab builder add m5mbp --kinds kernel -o m5mbp.token   # the token goes only into this new file (mode 0600)
+lab builder list                                       # named builders, shared-token hosts, last seen, current build
+lab builder remove m5mbp                                # its token stops working; what it was building fails
+lab builder remove m5mbp --generation G                 # only while it is the builder that add printed as G
+```
+
+A named builder may only build:
+- it takes queued builds of its kinds (`kernel`, `package`);
+- for the builds it took, it reads their inputs, reports progress, uploads outputs and finishes them, naming only what it
+  uploaded for that build;
+- it reaches no Maintainer, device or job route.
+
+Removing it ends its open requests at once. Adding the same name again makes a new builder that inherits nothing. labd keeps a
+named builder's claims in memory, so a labd restart fails the builds it was running: ask for them again. **A builder's kernels boot as root on lab Macs. Add only builders whose operators you trust with that.**
+
+On the builder Mac, copy the file to a place only root can read and run, as root (a LaunchDaemon, as above):
+
+```sh
+lab-builder --server https://labd.example.com --token-file /usr/local/etc/maclab/builder.token --as-user <user>
+```
+
+- **The token:** `--token-file` refuses a file others can read. `--token` still works, but the token then shows in `ps`.
+- **What children see:** lab-builder starts the container CLI and the build VMs with no `MACLAB_` variables, so they never see
+  the token.
+- **At start:** it logs the name labd knows it by, and stops if labd refuses the token.
+- **A second lab-builder on one Mac**, for another labd, needs its own:
+  - LaunchDaemon label and binary path;
+  - token file;
+  - `--io` directory;
+  - `--volume` (and `--pkg-volume`, or `--pkg-image ''` for kernels only);
+  - `--container-prefix`, since the build VMs are named `<prefix>-<build id>`.
+  Two builders must never share a cache volume. Size `--cpus` and `--memory` so both fit.
 
 ## omarchy-m-test: hardware checks in every job
 
@@ -664,6 +764,10 @@ lists and package metadata are identical. Contents are byte-identical except whe
 directory's path leaks in: ELF build-ids, the source paths Rust drivers embed for panics
 (`/cache/work/b/...` here), and the build timestamp in `vmlinuz`. A cold build takes 8 to 12
 minutes on a base M5.
+
+Recipes take their parallelism from `OMARCHY_BUILD_JOBS` (`make -j"${OMARCHY_BUILD_JOBS:-10}"`). lab-builder gives package builds
+`--pkg-jobs` (default: its `--cpus`), and `builder/pkg/pkgbuild` passes it through to makepkg past sudo. An image built before this
+ignores it: rebuild the image, under a new tag if another lab-builder still uses the old one.
 
 The 30+ GB work tree is deleted after every build. The volume keeps downloaded sources (the newest
 six) and the Rust toolchains. `lab-builder` takes package builds only when it has
@@ -880,12 +984,13 @@ skips the search and the question.
 The maintainer runs labd with `--tailscale` (see [Tailscale](#tailscale)) and
 keeps `make`'s `bin/lab-agent-linux-arm64` next to labd, which hands it out.
 Then they share the labd machine with each volunteer's Tailscale account (admin
-console, Machines, Share), or invite them to the tailnet. Any person labd lets
-look may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
+console, Machines, Share), or invite them to the tailnet. Any person on the
+tailnet may enroll a Mac this way (`POST /api/volunteer`): the Mac gets a free
 name made from `<user>-<hostname>` and the volunteer's login as its label, and
 is marked a volunteer's: `lab gate` leaves its results out unless asked (see
-[Release gate](#release-gate)). Tagged tailnet devices, lab Macs under `tag:maclab`
-among them, are machines and get no token. Each person holds at most one unused
+[Release gate](#release-gate)), and in labd only its Volunteer and the
+Maintainers see it (see [Tailscale](#tailscale)). Tagged tailnet devices, lab
+Macs under `tag:maclab` among them, are machines and get no token. Each person holds at most one unused
 token: asking again replaces it, so running `./volunteer` again after a setup
 that stopped half way just works. At most 20 people hold one at once; the next
 gets a 429 until one is used or expires a day later. Each person may have at
@@ -899,8 +1004,8 @@ comes its baseline, `lab baseline <name>`; after `./volunteer leave`,
 
 Open `http://<labd-host>:7770` and enter your Maintainer token; the UI keeps
 it. Every change needs a Maintainer's token, whatever network it comes from;
-with `--tailscale`, tailnet peers may look without one (see
-[Tailscale](#tailscale)). On a phone the UI
+with `--tailscale`, a Volunteer on the tailnet sees their own Macs without one
+(see [Tailscale](#tailscale)). On a phone the UI
 switches to a bottom tab bar and can be added to the home screen.
 
 A browser on the tailnet carries its access to every page it opens, so labd
@@ -925,6 +1030,58 @@ browsers reach labd by another name, a DNS alias say, run labd with
 device secrets and the builder token work by any name, so the lab CLI, agents,
 builders and scripts with a token don't care.
 
+## HTTPS without Tailscale
+
+labd can run as an ordinary HTTPS service on a host of its own, such as
+`https://maclab.chonkbase.net` in Kubernetes behind ingress-nginx. Maintainers
+use the UI, `lab` and MCP over HTTPS; Macs reach labd with outbound requests
+only (long-poll check-ins, reports, uploads, artifact downloads), and nothing
+connects to a Mac. [docs/https.md](docs/https.md) has the deployment, the
+manifests in `deploy/k8s/`, moving labd from one host to another and back, and
+proxy settings.
+
+- **TLS:** `--tls-cert`/`--tls-key` serve TLS 1.2+ and re-read renewed files;
+  or listen on loopback (or, in a pod, with `--allow-plain-http`) behind an
+  https proxy.
+- **One public URL:** `--public-url https://maclab.example.com`. labd can also
+  live under a path of a shared host (`--public-url https://example.com/maclab`):
+  it serves everything under the prefix, removes it once, and answers 404
+  outside it; the proxy passes the path on unchanged. See the next point first.
+- **Proxies:** `--trusted-proxy <CIDRs>`. Only those peers may send
+  `X-Forwarded-Proto`/`X-Forwarded-Host`, and those must name the public URL,
+  or labd answers 421. They are never anyone's identity. It doesn't go with
+  `--tailscale`, and no relayed request ever counts as a tailnet viewer.
+- **Browsers:** a change must come from labd's own origin, scheme, host and
+  port. API answers, Mac uploads included, are sandboxed so an uploaded page
+  can't run in labd's origin, and HSTS is sent over https. A prefix is not an
+  origin: on a host shared with other apps, every script they serve can read
+  the token the UI keeps. That is why labd gets a host of its own; share a host
+  only with apps trusted as much as labd.
+- **Clients** (`lab`, MCP, lab-agent, lab-builder): https is verified against
+  the system's roots plus an optional private CA (`--ca-file`,
+  `MACLAB_CA_FILE`); verification can't be turned off. Redirects and proxies
+  from the environment are not followed. Plain `http://` reaches loopback only
+  unless allowed on purpose (`--allow-plain-http`, `MACLAB_ALLOW_PLAIN_HTTP=1`).
+  An agent.json from before this keeps its plain http with a warning; the next
+  `setup` records the choice. When labd moves, `sudo lab-agent move --server
+  <new URL>` points an enrolled Mac at it: it asks the new labd, with the Mac's
+  own secret, whether it knows the Mac, rewrites only labd's address, CA and
+  plain-http choice in agent.json, and restarts lab-agent; nothing else on the
+  Mac changes. (`setup` refuses to move an enrolled Mac.)
+- **Macs fetch only what their job needs:** a Mac downloads an artifact only
+  if a command for its running job named it, until that job ends, or if a
+  Maintainer granted it explicitly for a while
+  (`POST /api/devices/<name>/artifact-grants`, which bt2 uses). It adds files
+  only to its running job, up to 1 GiB each. A job runs only on the enrollment
+  it was submitted for.
+- **Probes:** `GET <prefix>/healthz` answers `ok` to anyone.
+- **The clock:** right after a reboot a Mac's clock can be decades behind until
+  NTP sets it, and labd's certificate looks not valid yet. lab-agent says so,
+  keeps trying with verification on, and gets through once the time is right.
+- **Out-of-band control** (oobd on the controller Mac) stays on the lab's
+  private network: labd calls it, so a labd in the cloud has none (tier 1)
+  unless given a private route to it. Never expose oobd publicly.
+
 ## Tailscale
 
 Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while
@@ -933,14 +1090,27 @@ joins. Nothing in maclab holds a Tailscale API key; a maintainer does the
 tailnet side by hand.
 
 ```sh
-labd --listen <labd tailnet IP>:7770 --tailscale
+labd --listen <labd tailnet IP>:7770 --allow-plain-http --tailscale
 ```
+
+Tailnet traffic is encrypted by WireGuard, but labd can't tell that from the
+address, so plain http there still needs `--allow-plain-http` (and clients
+their own opt-in, or an https URL).
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5
-seconds). Every peer, tagged devices included, may look with no token: the
-dashboard, Macs, jobs, builds, logs and saved screens, including the console
-output in the live view and in each job's logs. Anything that changes the
+seconds). Each request is scoped to what its caller may see. A Maintainer's
+token sees the whole lab. A person on the tailnet without one sees only the
+Macs they volunteered (see [Volunteer a Mac](#volunteer-a-mac)), while those
+stay enrolled: their records, jobs, job files, logs and saved screens,
+including the console output in each job's logs, and their events on
+`/api/stream`, which leaves out the live console lines. Any other Mac answers 404, as if it weren't
+there. Builds, builders, Installed run status and the lab's capabilities
+(`/api/recovery`, `/api/mesa`) are Maintainers' only and answer 403.
+Volunteering a Mac (`POST /api/volunteer`) stays open to any person on the
+tailnet. Tagged devices, lab Macs under `tag:maclab` and the labd host among
+them, get nothing without a token (401); a Mac reaches labd with its own
+device secret on `/api/agent/*`. Anything that changes the
 lab, the console itself (`lab shell`), the Mac's stored serial log and new
 screenshots need a Maintainer's token and answer 403 without one, and device
 views never carry the controller's token. A Maintainer's token works from
@@ -961,8 +1131,8 @@ Setup refuses a key file that group or others may read: make a new key
 then, since anyone could have read that one. `--tailscale-authkey -` reads
 the key from stdin instead, and asks for it when stdin is a terminal. A key
 given straight to `--tailscale-authkey` is refused: by the time setup sees
-it, the process list and sudo's journal entry show it, and tailnet viewers
-can read that journal through labd. Revoke such a key and make a new one.
+it, the process list and sudo's journal entry show it, and whoever sees the
+Mac in labd can read that journal through it. Revoke such a key and make a new one.
 
 Before anything else, setup runs `tailscale up --auth-key=file:... --advertise-tags=tag:maclab
 --ssh --hostname=maclab-<name>` (`--tailscale-hostname` to choose; a first setup
@@ -986,7 +1156,8 @@ Re-joining can cut a Tailscale SSH session, and tailscale may refuse to do
 it from one; run setup from the console or over plain SSH then.
 
 A minimal policy: Macs reach only labd, admins reach labd and SSH into the
-Macs as root, and the rest of the tailnet may view labd.
+Macs as root, and the rest of the tailnet reaches labd to volunteer a Mac
+and see their own.
 
 ```hujson
 {

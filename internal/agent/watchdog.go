@@ -57,7 +57,10 @@ const (
 	// watchdogTimeout is the hardware timeout once the agent holds it.
 	watchdogTimeout = 60 * time.Second
 	// watchdogIdle is how long the agent keeps feeding, outside a test, after
-	// a check-in reached labd or a command started or finished.
+	// it last heard from labd: a check-in that reached it, or a command it sent
+	// starting. Nothing the agent does by itself counts (a test or command
+	// ending, an upload retrying while labd is out of reach), so a test boot
+	// that lost labd is reset 10 minutes after it last heard from it.
 	watchdogIdle = 10 * time.Minute
 	// watchdogMargin is added to a test's budget, to kill it and report. A
 	// test that overruns its budget has about a minute more before the
@@ -83,9 +86,9 @@ const (
 // labWatchdog feeds the hardware watchdog until a deadline, while PID 1
 // answers. While a test runs the deadline is the test's budget and nothing
 // else moves it, so a test hung in the kernel ends in a reset although the
-// agent keeps checking in. Outside tests every sign of labd moves it to
-// watchdogIdle from then, if PID 1 answers: the Mac stays up for as long as
-// labd is in touch, however long a command takes. It never stops the
+// agent keeps checking in. Outside tests the deadline is watchdogIdle from the
+// last sign of labd, if PID 1 answers: the Mac stays up for as long as labd is
+// in touch, however long a command takes, and no longer. It never stops the
 // watchdog: if the agent exits, the Mac resets watchdogTimeout later unless
 // something reopens it.
 type labWatchdog struct {
@@ -94,6 +97,7 @@ type labWatchdog struct {
 
 	mu     sync.Mutex
 	until  time.Time
+	heard  time.Time // the last sign of labd
 	tests  int       // tests running
 	pid1At time.Time // when PID 1 last answered
 	silent bool      // feeding stopped because PID 1 went quiet
@@ -189,21 +193,25 @@ func (l *Linux) PingInit(ctx context.Context) error {
 	return nil
 }
 
-// idle feeds the watchdog for watchdogIdle from now, unless a test is running
-// or PID 1 hasn't answered lately. A nil watchdog ignores idle and test, so
-// callers need no check on boots where the agent doesn't hold one.
+// idle is a sign of labd: it feeds the watchdog for watchdogIdle from now,
+// unless a test is running or PID 1 hasn't answered lately. A nil watchdog
+// ignores idle and test, so callers need no check on boots where the agent
+// doesn't hold one.
 func (d *labWatchdog) idle() {
 	if d == nil {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.heard = d.now()
 	d.idleLocked()
 }
 
+// idleLocked feeds the watchdog for watchdogIdle from the last sign of labd,
+// outside tests, while PID 1 answers. d.mu is held.
 func (d *labWatchdog) idleLocked() {
 	if d.tests == 0 && d.pid1Locked() {
-		d.until = d.now().Add(watchdogIdle)
+		d.until = d.heard.Add(watchdogIdle)
 	}
 }
 
@@ -211,7 +219,9 @@ func (d *labWatchdog) idleLocked() {
 func (d *labWatchdog) pid1Locked() bool { return d.now().Sub(d.pid1At) < pid1Silence }
 
 // test feeds the watchdog for a test's budget, counted from start, and
-// returns the func that ends the test. labd runs one test at a time, so a
+// returns the func that ends the test, which leaves what is left of the idle
+// budget from the last sign of labd: none, after a test that lost labd for
+// that long. labd runs one test at a time, so a
 // test that starts while another still runs (one labd gave up waiting for)
 // gets no time of its own: the stuck one still ends in a reset.
 func (d *labWatchdog) test(start time.Time, budget time.Duration) (done func()) {

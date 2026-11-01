@@ -8,3 +8,4 @@ __pycache__/
 # Local distribution output and generated Python caches
 dist/
 *.pyc
+/loop/
