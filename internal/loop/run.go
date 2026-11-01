@@ -75,7 +75,10 @@ func (n *Night) Run(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		e := n.boot(ctx, b, d)
+		e, done, err := n.boot(ctx, b, d)
+		if err != nil {
+			return err // canceled mid-boot: nothing worth a ledger entry
+		}
 		if err := n.Ledger.Append(e); err != nil {
 			return fmt.Errorf("ledger: %w", err)
 		}
@@ -83,6 +86,8 @@ func (n *Night) Run(ctx context.Context) error {
 		switch {
 		case e.NeedsHands:
 			return &Stop{fmt.Sprintf("%s needs hands after boot %d (%s): the lab says not to retry, so a person goes to it", n.Device, b.Iter, b.Mode)}
+		case !done:
+			return &Stop{fmt.Sprintf("boot %d (%s) job %s never finished: %s may still be running it", b.Iter, b.Mode, e.Job, n.Device)}
 		case e.Outcome == api.OutcomeInfra:
 			if infra++; infra == 2 {
 				return &Stop{"two infra errors in a row: the lab is broken, not the kernel"}
@@ -126,9 +131,12 @@ func (n *Night) waitReady(ctx context.Context) (*client.Device, error) {
 	}
 }
 
-func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) Entry {
+// boot runs one job and judges it. done is false when the job never
+// finished, so the Mac may still be running it; err is set only when ctx
+// ended, and then the entry is not worth keeping.
+func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) (e Entry, done bool, err error) {
 	serial := d.OOB != nil
-	e := Entry{Boot: b, Seed: n.Seed, Started: time.Now().UTC(), Device: n.Device, Tier: d.Tier, Serial: serial,
+	e = Entry{Boot: b, Seed: n.Seed, Started: time.Now().UTC(), Device: n.Device, Tier: d.Tier, Serial: serial,
 		Kernel: n.Kernel, Predicted: Predicted(b.Mode, serial)}
 	defer func() { e.Seconds = time.Since(e.Started).Seconds() }()
 
@@ -140,17 +148,34 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) Entry {
 	if err != nil {
 		e.Error = "submit: " + err.Error()
 		e.Outcome = api.OutcomeInfra
-		return e
+		return e, true, nil // no job was started, so none is left running
 	}
 	e.Job = j.ID
+	// Wait doesn't retry and returns no job on error, so retry it here and
+	// keep the last job it did return.
 	deadline := time.Now().Add(n.JobTimeout)
-	for j.State != api.JobDone && time.Now().Before(deadline) && ctx.Err() == nil {
-		if j, err = n.Lab.Wait(ctx, e.Job, min(time.Until(deadline), 10*time.Minute)); err != nil {
-			e.Error = "wait: " + err.Error()
-			break
+	var werr error
+	for j.State != api.JobDone && time.Now().Before(deadline) {
+		w, err := n.Lab.Wait(ctx, e.Job, min(time.Until(deadline), 10*time.Minute))
+		if ctx.Err() != nil {
+			return e, false, ctx.Err()
 		}
+		if err == nil && w == nil {
+			err = errors.New("no job")
+		}
+		if err != nil {
+			werr = err
+			select {
+			case <-ctx.Done():
+				return e, false, ctx.Err()
+			case <-time.After(min(n.Poll, time.Until(deadline))):
+			}
+			continue
+		}
+		j, werr = w, nil
 	}
-	if j != nil {
+	done = j.State == api.JobDone
+	if done {
 		e.Outcome, e.Summary = j.Outcome, j.Summary
 		e.FellBack, e.Recovery = j.Result.FellBack, j.Result.Recovery
 		if t := slices.IndexFunc(j.Result.Tests, func(t api.TestResult) bool { return t.Name == "chaos-check" }); t >= 0 {
@@ -159,8 +184,11 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) Entry {
 				e.ChaosCheck = "pass"
 			}
 		}
-		if j.State != api.JobDone && e.Error == "" {
-			e.Error = fmt.Sprintf("job still %s after %s", j.State, n.JobTimeout)
+	} else {
+		e.Outcome = api.OutcomeInfra
+		e.Error = fmt.Sprintf("job still %s after %s", j.State, n.JobTimeout)
+		if werr != nil {
+			e.Error = "wait: " + werr.Error()
 		}
 	}
 	e.AsPredicted = slices.Contains(e.Predicted, e.Outcome)
@@ -168,7 +196,7 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) Entry {
 		e.DeviceState = string(d.State)
 		e.NeedsHands = d.State == api.StateNeedsHands
 	}
-	if n.Judge != nil && e.Job != "" {
+	if n.Judge != nil && e.Job != "" && done { // an unfinished job has nothing to judge yet
 		v, err := n.Judge.Judge(ctx, e.Job, n.Device)
 		if err != nil {
 			e.AgentError = err.Error()
@@ -182,7 +210,7 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) Entry {
 			}
 		}
 	}
-	return e
+	return e, done, nil
 }
 
 func predictedNote(e Entry) string {

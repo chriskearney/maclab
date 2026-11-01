@@ -28,7 +28,7 @@ job ID and read-only lab tools and nothing else. It doesn't tell the agent what
 was injected.
 
 This gives a judge with a known answer key for free. The harness knows it
-booted `maclab_chaos.mode=hang_late`, the agent has to work that out from
+booted the code for `hang_late`, the agent has to work that out from
 `lab_job`, `lab_log` and `lab_serial`, and the harness scores the answer. A
 judge that can't tell a hang from lost Wi-Fi on a known fault won't be able
 to tell a bad driver patch from a good one later.
@@ -51,60 +51,22 @@ Rebuilding for every boot would make the night about the builder. Instead,
 build one kernel once, from the Mac's known-good source plus one small
 built-in file, and choose the fault on the command line. Built-in module
 parameters take the file's name as a prefix, so the switch is
-`maclab_chaos.mode=<mode>`.
+`maclab_chaos.code=<code>`.
 
-```c
-// drivers/misc/maclab_chaos.c: lab-only fault injection. Never ship this.
-#include <linux/delay.h>
-#include <linux/init.h>
-#include <linux/irqflags.h>
-#include <linux/module.h>
-#include <linux/string.h>
-#include <linux/workqueue.h>
+The judge reads the job, its cmdline and the kernel log, so none of them may
+name the fault. An earlier draft passed `maclab_chaos.mode=hang_late` and
+printed it back, which handed the judge the answer. Now `tools/chaos/apply.sh`
+draws a random 16-hex code per fault when it adds the file to a kernel tree.
+The codes are compiled in (`drivers/misc/maclab_chaos_codes.h`) and written to
+`codes.json`, the answer key `lab-loop --codes` reads. The kernel prints only
+`maclab-chaos: code=<code> marker=<hex>`. Every boot carries a marker, and
+`netdown` is a fault in the kernel too (brcmfmac's load fails), so the
+cmdline's shape gives nothing away either. The judge runs in an empty
+directory with no built-in tools and no settings, so it can't read the ledger
+or `codes.json`. The kernel's source is on a public branch, but the judge has
+no web access.
 
-static char *mode = "none";
-module_param(mode, charp, 0444);
-static char *marker = "";
-module_param(marker, charp, 0444);
-static int delay_sec = 90;
-module_param(delay_sec, int, 0444);
-
-static bool is(const char *m) { return !strcmp(mode, m); }
-
-static void chaos_late(struct work_struct *w)
-{
-	if (is("oops_late"))
-		BUG();                       /* kills this kworker, the system lives on */
-	if (is("panic_late"))
-		panic("maclab-chaos: panic_late");
-}
-static DECLARE_DELAYED_WORK(chaos_work, chaos_late);
-
-static int __init chaos_early(void)
-{
-	if (is("hang_early")) {              /* before SMP and apple_wdt: only U-Boot's watchdog can save it */
-		local_irq_disable();
-		for (;;)
-			cpu_relax();
-	}
-	return 0;
-}
-early_initcall(chaos_early);
-
-static int __init chaos_init(void)
-{
-	pr_info("maclab-chaos: mode=%s marker=%s\n", mode, marker);
-	if (is("panic_early"))
-		panic("maclab-chaos: panic_early");
-	if (is("hang_late"))                 /* kernel alive, userspace never starts */
-		for (;;)
-			msleep(1000);
-	if (is("oops_late") || is("panic_late"))
-		schedule_delayed_work(&chaos_work, delay_sec * HZ);
-	return 0;
-}
-late_initcall(chaos_init);
-```
+The file is `tools/chaos/maclab_chaos.c`.
 
 It needs one line in `drivers/misc/Makefile` (`obj-y += maclab_chaos.o`) on a
 branch of the kernel fork that the lab builds with `lab build`. Whether the
@@ -114,17 +76,23 @@ set`), so it stays an oops there.
 
 `tools/chaos/maclab_chaos.c` compiles cleanly with `W=1` against that kernel's
 headers (clang, `LLVM=1`), as a built-in object, with its parameters named
-`maclab_chaos.mode`, `.marker` and `.delay_sec`. It refuses to build as a
+`maclab_chaos.code`, `.marker` and `.delay_sec`. It refuses to build as a
 module: a module can't hang before SMP and has only one init function.
 
-`netdown` needs no code: `modprobe.blacklist=brcmfmac` boots a healthy kernel
-with no Wi-Fi.
+`netdown` registers a module notifier that fails brcmfmac's load with `-EIO`
+(`prepare_coming_module` in `kernel/module/main.c` returns the notifier's
+error), so the kernel is healthy but has no Wi-Fi.
+
+The late faults fire `delay_sec` (90) after boot. chaos-check waits until 20 s
+after that on every boot, so they land during the job, not after it; waiting on
+healthy boots too keeps the timing from giving the fault away.
 
 ## The night's schedule
 
 20 boots in a fixed order, shuffled with a recorded seed. Each fault appears
-twice. `marker` boots carry a fresh random string that a script test must find
-in `dmesg`, which proves the result belongs to this boot and not a stale one.
+twice. Every boot carries a fresh random marker that a script test must find
+in the kernel log, which proves the result belongs to this boot and not a stale
+one.
 
 | Mode | Boots | What breaks | Predicted outcome | What it proves |
 | --- | --- | --- | --- | --- |
@@ -181,7 +149,7 @@ the agent:
 {
   "iter": 7, "seed": 41, "started": "2026-11-03T01:12:09Z", "seconds": 412,
   "device": "m1", "job": "j1103-011209-ab12", "build": "b…", "kernel_sha256": "…",
-  "injected": {"mode": "hang_late", "cmdline": "maclab_chaos.mode=hang_late"},
+  "injected": {"mode": "hang_late", "cmdline": "maclab_chaos.code=4f1c… maclab_chaos.marker=9a2e…"},
   "outcome": "boot_failed", "predicted": "boot_failed", "recovery": ["watchdog"],
   "needs_hands": false, "human_minutes": 0,
   "agent": {"fault": "hang_late", "human_needed": false, "tool_calls": 6, "tokens": 18400},
@@ -249,10 +217,10 @@ boot, read-only lab tools) and `tools/chaos` (the kernel file and a script that
 adds it to a kernel tree).
 
 ```sh
-tools/chaos/apply.sh ~/src/linux      # on a lab-only branch of the kernel fork; push it
+tools/chaos/apply.sh ~/src/linux loop/chaos-codes.json   # lab-only branch of the kernel fork; push it
 lab build https://github.com/<you>/linux/tree/maclab-chaos --device m1
 lab-loop --dry-run --seed 42          # the night's order, nothing booted
-lab-loop --device m1 --kernel build:<id> --judge scripts/loop-judge.sh
+lab-loop --device m1 --kernel build:<id> --codes loop/chaos-codes.json --judge scripts/loop-judge.sh
 ```
 
 The ledger is `loop/ledger.jsonl`; the seed is in every line, so `--seed`

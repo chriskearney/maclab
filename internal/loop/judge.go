@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 )
@@ -55,20 +56,34 @@ func (j CommandJudge) Judge(ctx context.Context, job, device string) (*Verdict, 
 	return parseVerdict(out.Bytes())
 }
 
+// parseVerdict reads a Verdict from the judge's output: the whole output as
+// JSON, or else the last complete JSON object in it with a "fault" key, so
+// prose (even prose with braces) may come before or after. The fault must be
+// one of Modes or "unsure", exactly: no case folding or trimming, since a
+// judge that writes "Hang_Late" has not followed its instructions.
 func parseVerdict(out []byte) (*Verdict, error) {
-	var v Verdict
 	s := strings.TrimSpace(string(out))
+	var v Verdict
 	if err := json.Unmarshal([]byte(s), &v); err == nil && v.Fault != "" {
-		return &v, nil
+		return checkVerdict(&v)
 	}
-	end := strings.LastIndexByte(s, '}')
-	for start := strings.LastIndexByte(s[:max(end, 0)], '{'); start >= 0 && end > start; start = strings.LastIndexByte(s[:start], '{') {
+	for start := strings.LastIndexByte(s, '{'); start >= 0; start = strings.LastIndexByte(s[:start], '{') {
 		v = Verdict{}
-		if err := json.Unmarshal([]byte(s[start:end+1]), &v); err == nil && v.Fault != "" {
-			return &v, nil
+		if err := json.NewDecoder(strings.NewReader(s[start:])).Decode(&v); err == nil && v.Fault != "" {
+			return checkVerdict(&v)
 		}
 	}
 	return nil, fmt.Errorf("judge: no verdict JSON in its output: %q", lastLine(s))
+}
+
+// Unsure is the fault a judge gives when it cannot tell.
+const Unsure Mode = "unsure"
+
+func checkVerdict(v *Verdict) (*Verdict, error) {
+	if v.Fault != Unsure && !slices.Contains(Modes, v.Fault) {
+		return nil, fmt.Errorf("judge: unknown fault %q: want one of %v or %q", v.Fault, Modes, Unsure)
+	}
+	return v, nil
 }
 
 func lastLine(s string) string {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,8 +17,13 @@ import (
 	"github.com/iconidentify/maclab/internal/client"
 )
 
+// testCodes is a codes.json as apply.sh writes it.
+var testCodes = Codes{None: "0000000000000001", Marker: "0000000000000002", OopsLate: "0000000000000003",
+	PanicLate: "0000000000000004", PanicEarly: "0000000000000005", HangEarly: "0000000000000006",
+	HangLate: "0000000000000007", Netdown: "0000000000000008"}
+
 func TestScheduleKeepsThePlanAndReplaysFromTheSeed(t *testing.T) {
-	a, b := Schedule(Week1, 7), Schedule(Week1, 7)
+	a, b := Schedule(Week1, testCodes, 7), Schedule(Week1, testCodes, 7)
 	if len(a) != 20 {
 		t.Fatalf("week 1 is 20 boots, got %d", len(a))
 	}
@@ -28,11 +34,19 @@ func TestScheduleKeepsThePlanAndReplaysFromTheSeed(t *testing.T) {
 		if boot.Mode != b[i].Mode {
 			t.Fatalf("boot %d: %s, then %s from the same seed", i+1, boot.Mode, b[i].Mode)
 		}
-		if boot.Mode == Marker {
-			if markers[boot.Marker] || !strings.Contains(boot.Cmdline, "maclab_chaos.marker="+boot.Marker) {
-				t.Errorf("marker boot %d: marker %q, cmdline %q", boot.Iter, boot.Marker, boot.Cmdline)
+		want := "maclab_chaos.code=" + testCodes[boot.Mode] + " maclab_chaos.marker=" + boot.Marker
+		if markers[boot.Marker] || boot.Cmdline != want {
+			t.Errorf("boot %d: marker %q, cmdline %q", boot.Iter, boot.Marker, boot.Cmdline)
+		}
+		markers[boot.Marker] = true
+		// The judge reads the cmdline: no value in it may name a fault.
+		for _, f := range strings.Fields(boot.Cmdline) {
+			_, v, _ := strings.Cut(f, "=")
+			for _, m := range Modes {
+				if strings.Contains(v, string(m)) || strings.Contains(v, "brcmfmac") {
+					t.Errorf("boot %d cmdline %q gives away a fault", boot.Iter, boot.Cmdline)
+				}
 			}
-			markers[boot.Marker] = true
 		}
 	}
 	for m, n := range Week1 {
@@ -42,6 +56,46 @@ func TestScheduleKeepsThePlanAndReplaysFromTheSeed(t *testing.T) {
 	}
 	if !a[0].Mode.Healthy() {
 		t.Errorf("first boot is %s; a healthy boot goes first", a[0].Mode)
+	}
+}
+
+func TestParseCodes(t *testing.T) {
+	data, _ := json.Marshal(testCodes)
+	if c, err := ParseCodes(data); err != nil || c[HangLate] != testCodes[HangLate] {
+		t.Fatalf("got %v, %v", c, err)
+	}
+	missing := Codes{}
+	maps.Copy(missing, testCodes)
+	delete(missing, Netdown)
+	dup := Codes{}
+	maps.Copy(dup, testCodes)
+	dup[Netdown] = dup[None]
+	for _, bad := range []Codes{missing, dup} {
+		data, _ := json.Marshal(bad)
+		if _, err := ParseCodes(data); err == nil {
+			t.Errorf("%v: no error", bad)
+		}
+	}
+}
+
+func TestApplyWritesCodesTheHarnessReads(t *testing.T) {
+	tree := t.TempDir()
+	os.MkdirAll(filepath.Join(tree, "drivers/misc"), 0o755)
+	os.WriteFile(filepath.Join(tree, "drivers/misc/Makefile"), []byte("obj-y += other.o\n"), 0o644)
+	out := filepath.Join(t.TempDir(), "codes.json")
+	if b, err := exec.Command("sh", "../../tools/chaos/apply.sh", tree, out).CombinedOutput(); err != nil {
+		t.Fatalf("%v: %s", err, b)
+	}
+	data, _ := os.ReadFile(out)
+	codes, err := ParseCodes(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, _ := os.ReadFile(filepath.Join(tree, "drivers/misc/maclab_chaos_codes.h"))
+	for m, c := range codes {
+		if !strings.Contains(string(h), fmt.Sprintf(`{ "%s", "%s" }`, c, m)) {
+			t.Errorf("header lacks %s=%s:\n%s", m, c, h)
+		}
 	}
 }
 
@@ -102,12 +156,13 @@ func (f *fakeLab) Wait(_ context.Context, id string, _ time.Duration) (*api.Job,
 }
 
 func modeOf(cmdline string) Mode {
-	if strings.Contains(cmdline, "modprobe.blacklist=brcmfmac") {
-		return Netdown
-	}
 	for _, f := range strings.Fields(cmdline) {
-		if v, ok := strings.CutPrefix(f, "maclab_chaos.mode="); ok {
-			return Mode(v)
+		if v, ok := strings.CutPrefix(f, "maclab_chaos.code="); ok {
+			for m, c := range testCodes {
+				if c == v {
+					return m
+				}
+			}
 		}
 	}
 	return None
@@ -125,7 +180,7 @@ func night(t *testing.T, lab *fakeLab, plan map[Mode]int) (*Night, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ledger.jsonl")
 	return &Night{Lab: lab, Ledger: Ledger{Path: path}, Device: "m1", Holder: "lab-loop:test", Kernel: strings.Repeat("a", 64),
-		ChaosCheck: strings.Repeat("b", 64), Boots: Schedule(plan, 1), Seed: 1,
+		ChaosCheck: strings.Repeat("b", 64), Boots: Schedule(plan, testCodes, 1), Seed: 1,
 		JobTimeout: time.Minute, ReadyTimeout: time.Second, Poll: time.Millisecond, Logf: t.Logf}, path
 }
 
@@ -270,21 +325,22 @@ func TestChaosCheckScript(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "chaos-check.sh")
 	os.WriteFile(script, ChaosCheckScript, 0o755)
+	os.WriteFile(filepath.Join(dir, "uptime"), []byte("500.12 900.00\n"), 0o644)
 	run := func(cmdline, dmesg string) error {
 		os.WriteFile(filepath.Join(dir, "cmdline"), []byte(cmdline+"\n"), 0o644)
 		os.WriteFile(filepath.Join(dir, "dmesg"), []byte(dmesg), 0o644)
 		cmd := exec.Command("sh", script)
-		cmd.Env = append(os.Environ(), "CMDLINE="+filepath.Join(dir, "cmdline"), "DMESG=cat "+filepath.Join(dir, "dmesg"))
+		cmd.Env = append(os.Environ(), "CMDLINE="+filepath.Join(dir, "cmdline"), "DMESG=cat "+filepath.Join(dir, "dmesg"), "JOURNAL=true", "UPTIME="+filepath.Join(dir, "uptime"))
 		return cmd.Run()
 	}
 	for _, c := range []struct {
 		cmdline, dmesg string
 		ok             bool
 	}{
-		{"root=x maclab_chaos.mode=marker maclab_chaos.marker=abc123", "[ 1.2] maclab-chaos: mode=marker marker=abc123\n", true},
-		{"root=x maclab_chaos.mode=marker maclab_chaos.marker=abc123", "[ 1.2] maclab-chaos: mode=marker marker=old999\n", false},
-		{"root=x maclab_chaos.mode=hang_late", "[ 1.2] maclab-chaos: mode=hang_late marker=\n", true},
-		{"root=x maclab_chaos.mode=none", "[ 1.2] nothing from the chaos kernel\n", false},
+		{"root=x maclab_chaos.code=00ab maclab_chaos.marker=abc123", "[ 1.2] maclab-chaos: code=00ab marker=abc123\n", true},
+		{"root=x maclab_chaos.code=00ab maclab_chaos.marker=abc123", "[ 1.2] maclab-chaos: code=00ab marker=old999\n", false},
+		{"root=x maclab_chaos.code=00ab maclab_chaos.marker=abc123", "[ 1.2] maclab-chaos: code=00cd marker=abc123\n", false},
+		{"root=x maclab_chaos.code=00ab maclab_chaos.marker=abc123", "[ 1.2] nothing from the chaos kernel\n", false},
 		{"root=x quiet", "", true},
 	} {
 		if err := run(c.cmdline, c.dmesg); (err == nil) != c.ok {

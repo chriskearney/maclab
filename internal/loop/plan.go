@@ -6,17 +6,19 @@ package loop
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	mrand "math/rand/v2"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
 
-// A Mode is one fault the night can inject. All but Netdown are chosen with
-// maclab_chaos.mode= on the command line of a kernel built with
-// tools/chaos/maclab_chaos.c.
+// A Mode is one fault the night can inject, chosen with an opaque
+// maclab_chaos.code= on the command line of a kernel built with
+// tools/chaos/maclab_chaos.c. Codes says which code is which mode.
 type Mode string
 
 const (
@@ -57,17 +59,41 @@ func ParsePlan(s string) (map[Mode]int, error) {
 	return plan, nil
 }
 
+// Codes maps each mode to the code one chaos kernel build knows it by:
+// tools/chaos/apply.sh draws them and writes this as JSON. It is the answer
+// key, so it goes on no cmdline and never reaches the judge.
+type Codes map[Mode]string
+
+// ParseCodes reads apply.sh's codes.json and checks it has every mode.
+func ParseCodes(data []byte) (Codes, error) {
+	var c Codes
+	if err := json.Unmarshal(data, &c); err != nil {
+		return nil, fmt.Errorf("codes: %w", err)
+	}
+	seen := map[string]bool{}
+	for _, m := range Modes {
+		if !reCode.MatchString(c[m]) || seen[c[m]] {
+			return nil, fmt.Errorf("codes: %s has no code of its own (%q)", m, c[m])
+		}
+		seen[c[m]] = true
+	}
+	return c, nil
+}
+
+var reCode = regexp.MustCompile(`^[0-9a-f]{16}$`)
+
 // Boot is one planned Lab boot.
 type Boot struct {
 	Iter    int    `json:"iter"`
 	Mode    Mode   `json:"mode"`
-	Marker  string `json:"marker,omitempty"`
+	Marker  string `json:"marker"`
 	Cmdline string `json:"cmdline"`
 }
 
 // Schedule shuffles the plan with seed, so a night can be replayed, and puts
 // a healthy boot first: until one passes, nothing else is worth reading.
-func Schedule(plan map[Mode]int, seed uint64) []Boot {
+// Every boot gets a fresh marker, so the cmdline's shape gives no fault away.
+func Schedule(plan map[Mode]int, codes Codes, seed uint64) []Boot {
 	var modes []Mode
 	for _, m := range Modes {
 		for range plan[m] {
@@ -81,25 +107,11 @@ func Schedule(plan map[Mode]int, seed uint64) []Boot {
 	}
 	boots := make([]Boot, len(modes))
 	for i, m := range modes {
-		b := Boot{Iter: i + 1, Mode: m}
-		if m == Marker {
-			b.Marker = randomMarker()
-		}
-		b.Cmdline = cmdline(b)
+		b := Boot{Iter: i + 1, Mode: m, Marker: randomMarker()}
+		b.Cmdline = "maclab_chaos.code=" + codes[m] + " maclab_chaos.marker=" + b.Marker
 		boots[i] = b
 	}
 	return boots
-}
-
-func cmdline(b Boot) string {
-	switch b.Mode {
-	case Netdown:
-		// A healthy kernel with no Wi-Fi: no chaos needed.
-		return "maclab_chaos.mode=none modprobe.blacklist=brcmfmac"
-	case Marker:
-		return "maclab_chaos.mode=marker maclab_chaos.marker=" + b.Marker
-	}
-	return "maclab_chaos.mode=" + string(b.Mode)
 }
 
 func randomMarker() string {
