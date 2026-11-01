@@ -23,6 +23,11 @@
 #include <linux/string.h>
 #include <linux/workqueue.h>
 
+#ifdef MODULE
+/* A module can't hang before SMP, and has only one init function. */
+#error "maclab_chaos must be built in (obj-y), not as a module"
+#endif
+
 static char *mode = "none";
 module_param(mode, charp, 0444);
 static char *marker = "";

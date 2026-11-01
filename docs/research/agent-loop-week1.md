@@ -108,8 +108,14 @@ late_initcall(chaos_init);
 
 It needs one line in `drivers/misc/Makefile` (`obj-y += maclab_chaos.o`) on a
 branch of the kernel fork that the lab builds with `lab build`. Whether the
-Mac's kernel has `panic_on_oops` set decides whether `oops_late` stays an oops,
-so check `/proc/sys/kernel/panic_on_oops` before the first night.
+Mac's kernel has `panic_on_oops` set decides whether `oops_late` stays an oops.
+On the M1's linux-aurora 7.2.11 it is not set (`# CONFIG_PANIC_ON_OOPS is not
+set`), so it stays an oops there.
+
+`tools/chaos/maclab_chaos.c` compiles cleanly with `W=1` against that kernel's
+headers (clang, `LLVM=1`), as a built-in object, with its parameters named
+`maclab_chaos.mode`, `.marker` and `.delay_sec`. It refuses to build as a
+module: a module can't hang before SMP and has only one init function.
 
 `netdown` needs no code: `modprobe.blacklist=brcmfmac` boots a healthy kernel
 with no Wi-Fi.
