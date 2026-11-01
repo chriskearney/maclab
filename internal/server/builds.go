@@ -29,7 +29,7 @@ import (
 // recipe changes whenever kbuild changes what it produces, so old artifacts
 // stop matching; pkgRecipe does the same for the package builder.
 const (
-	recipe    = "kbuild-1"
+	recipe    = "kbuild-2"
 	pkgRecipe = "pkgbuild-1"
 )
 
