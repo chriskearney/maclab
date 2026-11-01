@@ -72,8 +72,9 @@ They follow the cluster's existing conventions (the chonkbase and slopblender na
   - a read-only root filesystem, all capabilities dropped, the RuntimeDefault seccomp profile;
   - no service-account token;
   - no hostPath, and nothing from i9beef.
-- **labd's args:** `--listen=0.0.0.0:7770 --allow-plain-http --data=/data --public-url=https://maclab.chonkbase.net --trusted-proxy=<CIDR> --maintainer=chris`
-  (`path-prefix/` changes `--public-url` to `https://chonkbase.net/maclab`).
+- **labd's args:** `--listen=0.0.0.0:7770 --allow-plain-http --data=/data --public-url=https://maclab.chonkbase.net --trusted-proxy=<CIDR> --maintainer=chris --omt-publish`
+  (`path-prefix/` changes `--public-url` to `https://chonkbase.net/maclab`; that patch replaces argument index 3, so `--omt-publish` stays after `--maintainer`).
+  Once these manifests are deployed, eligible baseline jobs upload automatically. An ordinary known-good `lab run` remains manual. Volunteer consent, package identity, and the candidate refusal are unchanged. `--omt-every` is absent, so there is no scheduled reboot and no backfill of stored reports. `deploy/labd.service` does not pass the flag.
   Plain HTTP stays inside the cluster, from the ingress controller only; TLS ends at the Ingress.
 - **Ingress:**
   - host `maclab.chonkbase.net`, path `/` (`path-prefix/`: host `chonkbase.net`, path `/maclab`), passed through **unchanged**: no

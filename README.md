@@ -683,6 +683,8 @@ labd --omt-publish --omt-every 24h   # refresh each idle Mac's known-good report
 labd --omt=false                     # don't add it to jobs
 ```
 
+The Kubernetes cloud manifests enable `--omt-publish`. Once deployed, eligible baseline jobs upload automatically. An ordinary known-good `lab run` remains manual. Volunteer consent, package identity, and the candidate refusal are unchanged. `--omt-every` is not set, so there is no scheduled reboot and no backfill of stored reports. `deploy/labd.service` does not pass the flag.
+
 ## Release packages from a PKGBUILD
 
 ```sh
