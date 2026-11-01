@@ -261,6 +261,11 @@ lab login http://127.0.0.1:7770 "$(cat ~/.local/share/maclab/admin.token)"
 lab enroll m1air --label "MacBook Air M1, left desk"   # prints the one-liner that joins the Mac
 ```
 
+On a Linux controller (an Omarchy Mac, as in `docs/adr/0003-develop-on-the-fork-with-a-lab-of-its-own.md`),
+`scripts/setup-linux-controller.sh` walks through all of it step by step: it builds the binaries,
+starts labd as a user service on the tailnet address, runs lab-builder under Docker as a root
+service, keeps the laptop awake with the lid closed on power, then enrolls a Mac and baselines it.
+
 To serve the lab over the internet, with no Tailscale, see
 [HTTPS without Tailscale](#https-without-tailscale).
 
