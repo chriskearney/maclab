@@ -611,6 +611,23 @@ depth-1 git store, one reused worktree, at most two build dirs, and an 8 GB ccac
 dir is emptied after every build. labd's artifact store is garbage-collected to a budget
 (`--artifact-budget-gb`, default 20).
 
+A controller without Apple `container` can build with Docker instead (Colima, Docker Desktop):
+`lab-builder --runtime docker [--context colima]`, with the same `kbuild` image and `/cache`
+volume layout. labd sees no difference: progress, logs and reuse of earlier builds work the same.
+Colima shares only paths under `$HOME` into its VM and a bind mount of anything else is silently
+empty, so `/io` is copied into each build's container and back out with `docker cp`, never mounted.
+
+```sh
+docker build -f builder/Containerfile -t maclab-kbuild:1 builder/   # -f: the file is not named Dockerfile
+docker volume create maclab-cache
+lab-builder --runtime docker --context colima --cpus 12 --memory 24G --pkg-image '' ...
+```
+
+`--pkg-image ''` takes kernel builds only: the package builder (`builder/pkg`) has not been tried
+under Docker.
+
+Docker volumes have no size cap of their own: the cache is bounded only by what kbuild keeps on it.
+
 Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first build 9 minutes;
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
 live on `/api/stream` (`build`, `buildlog`) and `/api/builds/{id}/log?follow=1`.
