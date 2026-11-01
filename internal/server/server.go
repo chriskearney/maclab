@@ -1625,11 +1625,15 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 		if code, err := s.validateInstalled(spec, d.Device); err != nil {
 			return nil, code, err
 		}
-		if p := installedPreflight(d.Facts.Problems); !d.Facts.PreflightOK && len(p) > 0 {
+	}
+	if spec.InstalledManifest != "" || spec.Baseline {
+		// An install removes the known-good kernel by design, and a baseline is
+		// how the running kernel takes its place after a distro kernel update.
+		if p := withoutStaleKnownGood(d.Facts.Problems); !d.Facts.PreflightOK && len(p) > 0 {
 			return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, strings.Join(p, "; "))
 		}
 	} else if !d.Facts.PreflightOK {
-		return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, strings.Join(d.Facts.Problems, "; "))
+		return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, preflightProblems(d.Device))
 	}
 	if spec.Mesa != nil {
 		if code, err := s.validateMesa(spec, d.Device); err != nil {

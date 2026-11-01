@@ -36,6 +36,10 @@ type jobRun struct {
 
 	omtRef []byte // a known-good run's omarchy-m-test reference, written only if the job passes
 
+	// rerecorded is the running kernel a baseline recorded as the agent's
+	// known-good, because the one before was no longer installed
+	rerecorded string
+
 	failedOwn  int  // tests that failed by themselves, not cut short by a cancel
 	noAppleWDT bool // the test kernel was built without apple_wdt
 }
@@ -261,6 +265,12 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		}
 		summary += ". " + d.Name + " " + who + "; the lab cleans up the staged kernel when it is back"
 	}
+	if k := v.snapshot().Kernel; j.Spec.Baseline && outcome == api.OutcomePass && r.rerecorded != "" && k != r.rerecorded {
+		// restore's plain reboot boots the default entry: a kernel picked by
+		// hand from the menu can't be the one the Mac returns to
+		outcome = api.OutcomeInfra
+		summary += fmt.Sprintf("; but a plain reboot came back on %s, not %s, so %s is not the Mac's default entry. Make it the default and run lab baseline again", k, r.rerecorded, r.rerecorded)
+	}
 	if j.Spec.Baseline && outcome == api.OutcomePass {
 		v.mu.Lock()
 		v.d.KnownGood = v.d.Kernel
@@ -389,6 +399,12 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		r.s.updateJob(j, func(j *api.Job) { j.Result.Installed = &ir.res })
 		if reason != "" {
 			return api.OutcomeTestsFailed, "installed state does not match the frozen expectation before boot: " + reason
+		}
+	}
+
+	if j.Spec.Baseline {
+		if o, why := r.rerecordKnownGood(ctx); o != "" {
+			return o, why
 		}
 	}
 
@@ -1054,6 +1070,38 @@ func (r *jobRun) collectInto(ctx context.Context, boot, dir string) ([]string, e
 	}
 	r.s.updateJob(r.j, func(j *api.Job) { j.Result.Logs = append(j.Result.Logs, files...) })
 	return files, nil
+}
+
+// rerecordKnownGood is a baseline on a Mac whose known-good kernel is no longer
+// installed, as after a distro kernel update: it records the running kernel as
+// the agent's known-good first, since that is the kernel the baseline stages.
+// labd's known-good is cleared until the baseline passes, so a failed baseline
+// leaves the Mac out of the pool rather than on a kernel nothing vouched for.
+// It returns an outcome only on failure.
+func (r *jobRun) rerecordKnownGood(ctx context.Context) (string, string) {
+	d := r.v.snapshot()
+	stale := ""
+	for _, p := range d.Facts.Problems {
+		if api.StaleKnownGood(p) {
+			stale = p
+		}
+	}
+	if stale == "" {
+		return "", ""
+	}
+	r.ev("%s: recording the running kernel %s as %s's known-good", stale, d.Kernel, d.Name)
+	if err := r.v.call(ctx, api.CmdRecordKnownGood, r.j.ID, api.RecordKnownGoodArgs{Kernel: d.Kernel}, recordKnownGoodTimeout, nil); err != nil {
+		if ctx.Err() != nil {
+			return api.OutcomeCanceled, "canceled while recording the known-good kernel"
+		}
+		return api.OutcomeInfra, fmt.Sprintf("%s, and recording the running kernel %s in its place failed: %v. A kernel update the Mac has not booted yet needs a reboot first", stale, d.Kernel, err)
+	}
+	r.rerecorded = d.Kernel
+	r.v.mu.Lock()
+	r.v.d.KnownGood = ""
+	r.v.saveLocked()
+	r.v.mu.Unlock()
+	return "", ""
 }
 
 // restore gets the Mac back onto its known-good kernel and removes the staged one.
