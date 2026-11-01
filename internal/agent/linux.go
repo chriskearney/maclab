@@ -108,9 +108,9 @@ func onBattery(dir string) bool {
 func (l *Linux) Facts() api.Facts {
 	f := api.Facts{GUIUser: l.GUIUser}
 	f.Hostname, _ = os.Hostname()
-	var u syscall.Utsname
-	if syscall.Uname(&u) == nil {
-		f.Machine = charsToString(u.Machine[:])
+	var u unix.Utsname // x/sys/unix: labd builds this package on the controller Mac too
+	if unix.Uname(&u) == nil {
+		f.Machine = unix.ByteSliceToString(u.Machine[:])
 	}
 	f.DTModel = readTrim("/proc/device-tree/model")
 	if c := readTrim("/proc/device-tree/compatible"); c != "" {
@@ -133,17 +133,6 @@ func (l *Linux) Facts() api.Facts {
 		f.Bootloader = b.name()
 	}
 	return f
-}
-
-func charsToString(ca []int8) string {
-	b := make([]byte, 0, len(ca))
-	for _, c := range ca {
-		if c == 0 {
-			break
-		}
-		b = append(b, byte(c))
-	}
-	return string(b)
 }
 
 // Preflight lists everything that makes this Mac unsafe to hand to the lab,
