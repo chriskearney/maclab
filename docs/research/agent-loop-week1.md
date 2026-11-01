@@ -234,3 +234,20 @@ weeks:
 Week 3 replaces the chaos module with real hypotheses: the agent gets
 `lab_run`, the target is `display.backlight` on the M3 Max, and the judge is
 `omarchy-m-test`'s own check.
+
+## Running it
+
+Built: `cmd/lab-loop` (the harness), `internal/loop` (schedule, ledger, stop
+rules, scoring), `scripts/loop-judge.sh` (a fresh headless Claude Code run per
+boot, read-only lab tools) and `tools/chaos` (the kernel file and a script that
+adds it to a kernel tree).
+
+```sh
+tools/chaos/apply.sh ~/src/linux      # on a lab-only branch of the kernel fork; push it
+lab build https://github.com/<you>/linux/tree/maclab-chaos --device m1
+lab-loop --dry-run --seed 42          # the night's order, nothing booted
+lab-loop --device m1 --kernel build:<id> --judge scripts/loop-judge.sh
+```
+
+The ledger is `loop/ledger.jsonl`; the seed is in every line, so `--seed`
+replays the night's order. `lab-loop` exits 2 when a stop rule ends the night.
