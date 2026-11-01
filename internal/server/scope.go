@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"github.com/iconidentify/maclab/internal/api"
@@ -12,7 +13,8 @@ import (
 
 // Scope is what a request's caller may see and do. A Maintainer sees the
 // whole fleet. A person on the tailnet without a Maintainer's token sees
-// only the Macs they volunteered, while those stay enrolled. A Mac sees only
+// only the Macs they volunteered, or a Maintainer linked to their login,
+// while those stay enrolled. A Mac sees only
 // itself, through its own routes (see agent). A Volunteer's Mac must never
 // reach another Mac, a Volunteer's or Lab-owned, and this is where that
 // holds. What a caller may do to a Mac (mayDo) keeps a Volunteer's Mac's
@@ -63,9 +65,35 @@ func (s *Server) sees(c caller, name string) bool {
 	return s.seesLocked(c, v)
 }
 
-// seesLocked is sees for a person and a Mac whose v.mu the caller holds.
+// seesLocked is sees for a person and a Mac whose v.mu the caller holds:
+// the Mac they volunteered, or one a Maintainer linked to their login.
 func (s *Server) seesLocked(c caller, v *dev) bool {
-	return c.login != "" && !v.forgotten && v.d.State != api.StateLeft && v.volunteeredBy != "" && strings.EqualFold(v.volunteeredBy, c.login)
+	if c.login == "" || v.forgotten || v.d.State == api.StateLeft {
+		return false
+	}
+	return v.volunteeredBy != "" && strings.EqualFold(v.volunteeredBy, c.login) ||
+		v.d.LinkedLogin != "" && strings.EqualFold(v.d.LinkedLogin, c.login)
+}
+
+// reLogin is a tailnet login: user@github, user@passkey, or an email.
+var reLogin = regexp.MustCompile(`^[a-z0-9][a-z0-9._%+-]{0,63}@[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$`)
+
+// reSecretLike is what labd's and Tailscale's secrets look like: a typed
+// prefix (enr_, adm_, dev_, ...) or a long run of hex.
+var reSecretLike = regexp.MustCompile(`^(enr|adm|dev|bld|mnt)_|^tskey-|[0-9a-f]{24}`)
+
+// volunteerLogin is raw as a login a Maintainer may link to a Mac,
+// lowercased, or why it isn't one. Linking shows the Mac's screens and jobs
+// to whoever holds that login, so a typo or a pasted secret must not pass.
+func volunteerLogin(raw string) (string, error) {
+	l := strings.ToLower(strings.TrimSpace(raw))
+	switch {
+	case reSecretLike.MatchString(l):
+		return "", fmt.Errorf("%q looks like a secret, not a tailnet login: give the Volunteer's login, like ada@github or ada@example.org", raw)
+	case len(l) > 254 || !reLogin.MatchString(l):
+		return "", fmt.Errorf("%q isn't a tailnet login: want one like ada@github or ada@example.org (tailscale whois shows it)", raw)
+	}
+	return l, nil
 }
 
 // seesJob reports whether c may read job j: a Maintainer may read any; a

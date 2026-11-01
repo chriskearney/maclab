@@ -4,6 +4,7 @@
 // (docs/research/agent-loop-week1.md). It uses lab's own login.
 //
 //	lab-loop --device m1 --kernel <sha256|file|build:ID> --codes loop/chaos-codes.json --judge scripts/loop-judge.sh
+//	lab-loop summary loop/ledger.jsonl
 package main
 
 import (
@@ -12,6 +13,7 @@ import (
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -30,6 +32,12 @@ import (
 var reSHA256 = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "summary" {
+		if err := summary(os.Stdout, os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	device := flag.String("device", "", "the Lab-owned Mac to run the night on")
 	kernel := flag.String("kernel", "", "the chaos kernel: an uploaded artifact's sha256, a file to upload, or build:<id> for a finished lab build")
 	codesFile := flag.String("codes", "loop/chaos-codes.json", "the codes tools/chaos/apply.sh drew for this kernel's faults; the answer key, never shown to the judge")
@@ -119,6 +127,23 @@ func main() {
 	default:
 		log.Fatal(err)
 	}
+}
+
+// summary prints a ledger's table per mode: lab-loop summary <ledger>.
+func summary(w io.Writer, args []string) error {
+	if len(args) != 1 {
+		return fmt.Errorf("usage: lab-loop summary <ledger>")
+	}
+	f, err := os.Open(args[0])
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	es, err := loop.ReadLedger(f)
+	if err != nil {
+		return err
+	}
+	return loop.WriteSummary(w, es)
 }
 
 // readCodes reads apply.sh's codes.json. A dry run without one makes up

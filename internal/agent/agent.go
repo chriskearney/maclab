@@ -121,11 +121,11 @@ type Agent struct {
 	factsRevision     uint64
 	sentFactsRevision uint64
 	lastFacts         time.Time
-	after             []func() // actions to run once pending results reach labd
-	contacted         string   // the Lab boot whose contact with labd is on record
-	kind              string   // the Mac's kind, as labd's check-ins say
-	held              bool     // a job or lease holds the Mac, as labd's latest answer says
-	auditSent         int64    // how much of the Audit log labd's copy holds, in bytes
+	after             []afterAck // actions to run once pending results reach labd
+	contacted         string     // the Lab boot whose contact with labd is on record
+	kind              string     // the Mac's kind, as labd's check-ins say
+	held              bool       // a job or lease holds the Mac, as labd's latest answer says
+	auditSent         int64      // how much of the Audit log labd's copy holds, in bytes
 	awake             awakeHold
 	wake              chan struct{}
 	life              context.Context    // commands outlive the poll that delivered them
@@ -550,6 +550,7 @@ func (a *Agent) report(ctx context.Context) error {
 	if len(rep.Results) == 0 && len(rep.Events) == 0 && len(rep.Audit) == 0 {
 		return nil
 	}
+	a.checkBeforeReport(rep.Results)
 	err := a.post(ctx, rep)
 	audited := err == nil
 	switch {
@@ -566,15 +567,54 @@ func (a *Agent) report(ctx context.Context) error {
 	if n := len(rep.Audit); n > 0 && audited && rep.Audit[n-1].End > a.auditSent {
 		a.auditSent = rep.Audit[n-1].End
 	}
-	var after []func()
+	var after []afterAck
 	if len(a.results) == 0 {
 		after, a.after = a.after, nil
 	}
 	a.mu.Unlock()
 	for _, f := range after {
-		f()
+		f.run()
 	}
 	return nil
+}
+
+// checkBeforeReport runs the checks of the afterAcks waiting on results,
+// just before those results go to labd. A check that fails turns its result
+// into a failed one and drops its afterAck, in rep (results labd is about to
+// get) and in the queue alike.
+func (a *Agent) checkBeforeReport(rep []api.CommandResult) {
+	a.mu.Lock()
+	var checks []afterAck
+	for _, f := range a.after {
+		if f.check != nil && !f.checked {
+			checks = append(checks, f)
+		}
+	}
+	a.mu.Unlock()
+	for _, f := range checks {
+		i := slices.IndexFunc(rep, func(r api.CommandResult) bool { return r.ID == f.id })
+		if i < 0 {
+			continue
+		}
+		err := f.check()
+		if err == nil {
+			a.mu.Lock()
+			if j := slices.IndexFunc(a.after, func(g afterAck) bool { return g.id == f.id }); j >= 0 {
+				a.after[j].checked = true
+			}
+			a.mu.Unlock()
+			continue
+		}
+		a.log.Printf("command %s failed: %v", f.id, err)
+		fail := func(r *api.CommandResult) { r.OK, r.Error, r.Output = false, err.Error(), nil }
+		fail(&rep[i])
+		a.mu.Lock()
+		if j := slices.IndexFunc(a.results, func(r api.CommandResult) bool { return r.ID == f.id }); j >= 0 {
+			fail(&a.results[j])
+		}
+		a.after = slices.DeleteFunc(a.after, func(g afterAck) bool { return g.id == f.id })
+		a.mu.Unlock()
+	}
 }
 
 func (a *Agent) post(ctx context.Context, rep api.Report) error {
@@ -774,7 +814,8 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 		if now == bootID {
 			a.results = append(a.results, r)
 			if after != nil && err == nil {
-				a.after = append(a.after, after)
+				after.id = c.ID
+				a.after = append(a.after, *after)
 			}
 		}
 		a.mu.Unlock()
@@ -783,9 +824,19 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 	}()
 }
 
-// exec runs one command. The returned func runs only after the result reaches labd,
-// so a reboot never swallows its own acknowledgement.
-func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
+// afterAck is what a command leaves to do once its result reaches labd.
+type afterAck struct {
+	id string // the command whose result it waits on
+	// check, if set, runs just before that result goes to labd: an error
+	// fails the command instead, and run never runs.
+	check   func() error
+	checked bool // check passed: it runs once, not on every retried report
+	run     func()
+}
+
+// exec runs one command. The returned afterAck runs only after the result
+// reaches labd, so a reboot never swallows its own acknowledgement.
+func (a *Agent) exec(ctx context.Context, c api.Command) (any, *afterAck, error) {
 	refused := a.refuseOutsideWindow(c)
 	if refused == nil {
 		refused = a.refuseByAccess(c)
@@ -832,19 +883,19 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		if err := a.sys.BootOnce(args.Entry); err != nil {
 			return nil, nil, err
 		}
-		return nil, a.rebootLater, nil
+		return nil, a.labBootAfterAck(args.Entry), nil
 	case api.CmdReboot:
-		return nil, a.rebootLater, nil
+		return nil, &afterAck{run: a.rebootLater}, nil
 	case api.CmdCrash:
 		var args api.CrashArgs
 		if err := json.Unmarshal(c.Args, &args); err != nil {
 			return nil, nil, err
 		}
-		return nil, func() {
+		return nil, &afterAck{run: func() {
 			if err := a.sys.Crash(args.Mode); err != nil {
 				a.log.Printf("crash: %v", err)
 			}
-		}, nil
+		}}, nil
 	case api.CmdRunTest:
 		var t api.TestSpec
 		if err := json.Unmarshal(c.Args, &t); err != nil {
@@ -952,7 +1003,7 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 // reCollectDir is a job directory labd may collect logs into.
 var reCollectDir = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenArgs) (any, func(), error) {
+func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenArgs) (any, *afterAck, error) {
 	dir, err := a.outDir(c)
 	if err != nil {
 		return nil, nil, err
@@ -1081,6 +1132,38 @@ func (a *Agent) collectLost(ctx context.Context, job, dir string) api.LostBoot {
 	}
 	lost.Files = a.uploadDir(ctx, job, "prevboot", dir)
 	return lost
+}
+
+// labBootAfterAck re-arms the Lab boot of entry twice before the reboot:
+// once just before the result goes to labd, and again just before the
+// reboot. In between, limine-snapper-sync (hourly, and on every snapshot) or
+// limine-update can rewrite limine.conf and drop the lab's block; the Mac
+// would then boot its default entry, and labd would blame the test kernel
+// (boot_failed) for an infra fault. arm takes the boot-partition locks,
+// writes the block back and checks the entry and the one-shot. A re-arm that
+// fails before the report fails the command, as a failed arm does, so labd
+// records infra_error. One that fails after it leaves the Mac up: a reboot
+// then could only boot the default entry.
+func (a *Agent) labBootAfterAck(entry string) *afterAck {
+	// A re-arm that fails may have left the first arm's one-shot set, and
+	// labd is then told the boot failed to arm (or not told at all): cancel
+	// it, so a later plain reboot can't boot the test kernel unwatched.
+	rearm := func() error {
+		if err := a.sys.BootOnce(entry); err != nil {
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
+			return fmt.Errorf("re-arming the Lab boot before the reboot: %w", err)
+		}
+		return nil
+	}
+	return &afterAck{check: rearm, run: func() {
+		if err := rearm(); err != nil {
+			a.log.Printf("not rebooting: %v", err)
+			return
+		}
+		a.rebootLater()
+	}}
 }
 
 func (a *Agent) rebootLater() {

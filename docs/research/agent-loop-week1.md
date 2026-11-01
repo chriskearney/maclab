@@ -1,6 +1,6 @@
 # Week 1 of an agent loop: 20 Lab boots overnight, nobody touches the Mac
 
-Design sketch. Written 2026-11-01. Nothing here is built yet.
+Design sketch, written 2026-11-01; built and run once since (see [Night 1](#night-1-2026-11-01) and [Scoring](#scoring)).
 
 **Goal:** an agent drives maclab through 20 Lab boots overnight on one
 Lab-owned Mac, including deliberately broken kernels, and no person touches the
@@ -98,14 +98,19 @@ one.
 | --- | --- | --- | --- | --- |
 | `none` | 4 | nothing | `pass` | the loop itself is stable |
 | `marker` | 4 | nothing | `pass`, marker found | evidence comes from this boot |
-| `oops_late` | 2 | a kworker dies about 90 s after boot | `panicked` | oops capture while the system lives |
-| `panic_late` | 2 | panic about 90 s after boot, mid-test | `panicked` or `crashed_or_hung` | `panic=10` and log collection after a Lost boot |
-| `panic_early` | 2 | panic before userspace | `boot_failed` without a serial console | the one-shot is spent, so the Mac falls back |
+| `oops_late` | 2 | a kworker dies about 90 s after boot | `booted_unhealthy` | oops capture while the system lives |
+| `panic_late` | 2 | panic about 90 s after boot, mid-test | `crashed_or_hung` (`panicked` too with serial) | `panic=10` and log collection after a Lost boot |
+| `panic_early` | 2 | panic before userspace | `boot_failed` without a serial console, `panicked` with one | the one-shot is spent, so the Mac falls back |
 | `hang_early` | 2 | IRQs off before SMP | `boot_failed` after U-Boot's 60 s watchdog | the watchdog left running by U-Boot ([apple-watchdog-before-kernel.md](apple-watchdog-before-kernel.md)) |
 | `hang_late` | 2 | userspace never starts | `boot_failed` after `watchdog.open_timeout` | the open-timeout gap that research doc found |
 | `netdown` | 2 | no Wi-Fi | `lost_contact` | the deadline unit reboots a boot that never reached labd |
 
-The predictions are guesses from reading `labboot.go` and `types.go`. A wrong
+The predictions were first guesses from reading `labboot.go` and `types.go`.
+After night 1 they are what `internal/server/runner.go` can produce
+(`loop.Predicted` cites the lines): `panicked` comes only from a fatal kernel
+event on a lost boot, and a dying kernel's events reach labd only over serial,
+so without serial nothing reads as `panicked`; an oops the kernel lives
+through is read from boot0's kernel log as `booted_unhealthy`. A wrong
 prediction is a finding: either the lab misreads a fault or I misread the lab.
 Both are worth an issue.
 
@@ -166,6 +171,73 @@ won't hold up.
 
 `human_minutes` is filled in by hand the next morning. Any non-zero value is a
 failed night, however good the rest looks.
+
+## Scoring
+
+The judge is scored two ways, side by side: on the exact mode, and on
+**fault classes**. The only shared class is **healthy** (`none` and
+`marker`): every boot prints a code and a marker, so the evidence can't tell
+them apart. Every other fault is a class of its own.
+
+The early faults are not a class. Without serial they leave no kernel log of
+their own, but they don't leave the same evidence: the time the Mac takes to
+come back differs. On night 1 the whole job took 77 s for both `panic_early`
+boots (`panic=10` reboots in seconds; `quickReboot` in `runner.go` is 90 s),
+about 130 s for `hang_early` (U-Boot's 60 s watchdog) and 230–250 s for
+`hang_late` (`watchdog.open_timeout`). A judge that reads the timing can tell
+them apart.
+
+`unsure` is never right. It is counted as an abstention, in its own column.
+The ledger keeps `score.class`, `score.fault` (the exact mode) and
+`score.abstained`.
+
+The summary's **label baseline** row is what a judge that only repeats
+maclab's outcome label would score: the mode the outcome is predicted for,
+when those modes are one class, and `unsure` otherwise (`boot_failed` fits
+every early fault). The judge is worth running only where it beats that.
+
+maclab is scored per boot too, in `lab_score`: the outcome was predicted, the
+Mac came back ready with no hands, and logs were collected (for a lost boot,
+`prevboot/` files in the job's `Result.Logs`; otherwise any log). Each entry
+also records lab-agent's version from the Mac's facts.
+
+`lab-loop summary loop/ledger.jsonl` prints a table per mode: boots, as
+predicted, judge right by class and by exact mode (of the boots it judged),
+abstentions and needs hands, then the total and the label baseline. It
+rescores the ledger with today's rules, so older ledgers read the same way.
+
+## Night 1 (2026-11-01)
+
+20 boots on m1 (tier 1, no serial) in about 1 h 45 min, seed
+2406158020735059843. Nobody touched the Mac.
+
+```
+mode            boots  as predicted  judge class  judge exact  abstained  needs hands
+none            4      4             4/4          1/4          0          0
+marker          4      4             3/3          3/3          0          0
+oops_late       2      2             2/2          2/2          0          0
+panic_late      2      2             1/1          1/1          0          0
+panic_early     2      2             0/2          0/2          2          0
+hang_early      2      2             0/2          0/2          2          0
+hang_late       2      2             0/1          0/1          1          0
+netdown         2      0             2/2          2/2          0          0
+total           20     18            12/17        9/17         5          0
+label baseline  17     -             10/17        7/17         7          -
+```
+
+- maclab labelled 18 of 20 boots as predicted. Both `netdown` boots ended
+  `boot_failed`, not `lost_contact`: the Mac fell back without the
+  no-contact deadline being recorded (#61 since keeps that deadline ahead of
+  lab-agent's watchdog), and the lost boot's journal wasn't collected because
+  journalctl was given a dashed boot ID (#60).
+- The judge failed to start on the first three boots (`loop-judge.sh` wasn't
+  executable). Of the 17 it judged it got 9 exactly and 12 by class, never
+  named a fault of the wrong class, and abstained on all 5 early faults. The label alone
+  gets 10 by class, so the judge added only the two `netdown` boots, which it
+  read from timing where the label said `boot_failed`. It didn't use the
+  timing on the early faults, which is where it has the most to gain.
+- `human_needed` was right on 17 of 17, but no boot needed hands, so that
+  score says little yet.
 
 ## Stop rules
 

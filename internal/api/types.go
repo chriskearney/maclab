@@ -99,6 +99,12 @@ type Device struct {
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward
 	// that login's limit of Macs (see POST /api/volunteer).
 	VolunteeredBy string `json:"volunteered_by,omitempty"`
+	// LinkedLogin is the tailnet login a Maintainer linked to a Volunteer's
+	// Mac (lab enroll --login, lab device --login), lowercased: that person
+	// sees the Mac in labd as if they had volunteered it. Unlike
+	// VolunteeredBy it can change, and it doesn't count toward the login's
+	// limit of Macs.
+	LinkedLogin string `json:"linked_login,omitempty"`
 	Enrollment
 	// SnapshotEligible is whether the Mac's @ can be snapshotted, as its
 	// latest check-in said: a Mac that can't is not eligible for Installed runs.
@@ -897,6 +903,10 @@ type EnrollTokenRequest struct {
 	// neither. Either makes Volunteer true too.
 	VolunteerName string `json:"volunteer_name,omitempty"`
 	Contact       string `json:"contact,omitempty"`
+	// VolunteerLogin is the Volunteer's tailnet login, which labd links to
+	// the Mac when it enrolls (see Device.LinkedLogin). Only a Maintainer's
+	// token for a Volunteer's Mac carries one.
+	VolunteerLogin string `json:"volunteer_login,omitempty"`
 }
 
 type EnrollTokenResponse struct {
@@ -915,6 +925,9 @@ type DevicePatch struct {
 	Model *string    `json:"model,omitempty"`
 	OOB   *OOBConfig `json:"oob,omitempty"`
 	NoOOB bool       `json:"no_oob,omitempty"`
+	// VolunteerLogin links a Volunteer's Mac to that tailnet login (see
+	// Device.LinkedLogin); "" unlinks it.
+	VolunteerLogin *string `json:"volunteer_login,omitempty"`
 }
 
 // LeaveRequest is lab-agent uninstall telling labd, before it undoes

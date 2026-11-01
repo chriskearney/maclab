@@ -242,6 +242,15 @@ func (l *Linux) Crash(mode string) error {
 	return os.WriteFile("/proc/sysrq-trigger", []byte("c"), 0)
 }
 
+func (l *Linux) CancelBootOnce() error {
+	defer syncDisks()
+	b, err := detectBootloader()
+	if err != nil {
+		return err
+	}
+	return b.disarm()
+}
+
 func (l *Linux) BootOnce(entry string) error {
 	defer syncDisks()
 	b, err := detectBootloader()

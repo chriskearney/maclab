@@ -697,6 +697,18 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "device name must be lowercase letters, digits and dashes")
 		return
 	}
+	if req.VolunteerLogin != "" {
+		if strings.TrimSpace(req.VolunteerName) == "" {
+			httpErr(w, 400, "a Volunteer's login goes on a Volunteer's token, with their name and contact")
+			return
+		}
+		l, err := volunteerLogin(req.VolunteerLogin)
+		if err != nil {
+			httpErr(w, 400, "%v", err)
+			return
+		}
+		req.VolunteerLogin = l
+	}
 	// Activation is one-time, so a Mac that enrolled but never checked in
 	// still holds its name: a new token for it would only be refused.
 	if v := s.dev(req.Name); v != nil {
@@ -805,6 +817,8 @@ func decodeBody(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 
 // volunteerMacsLocked names the Macs that login's volunteer tokens enrolled,
 // left ones included until lab forget drops them. The caller holds s.mu.
+// Macs a Maintainer linked to the login don't count: the limit keeps one
+// person from filling the lab, and a Maintainer chose to let those in.
 func (s *Server) volunteerMacsLocked(login string) []string {
 	var names []string
 	for name, v := range s.devs {
@@ -853,6 +867,9 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Label, req.Volunteer = who, true
+	// Only a Maintainer links a login (POST /api/enroll-tokens): a person's
+	// Mac is theirs alone.
+	req.VolunteerLogin = ""
 	if volunteer != "" { // a tailnet login is all labd knows of the person
 		req.VolunteerName, req.Contact = who, who
 	}
@@ -953,7 +970,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	if keyHash == "" { // an older lab-agent: no enrolling again with this token
 		keyHash = "none-" + randHex(16)
 	}
-	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy,
+	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy, LinkedLogin: t.VolunteerLogin,
 		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{}),
 		TermsSHA256: req.TermsSHA256, TermsAccepted: s.now()}
 	d.Volunteer = d.IsVolunteer()
@@ -1178,7 +1195,32 @@ func (s *Server) hPatchDevice(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
+	link := ""
+	if p.VolunteerLogin != nil && *p.VolunteerLogin != "" {
+		var err error
+		if link, err = volunteerLogin(*p.VolunteerLogin); err != nil {
+			httpErr(w, 400, "%v", err)
+			return
+		}
+	}
 	v.mu.Lock()
+	if p.VolunteerLogin != nil {
+		// Checked before anything changes: a refused link leaves the Mac as it was.
+		switch {
+		case !v.d.IsVolunteer():
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is a Lab-owned Mac: only a Volunteer's Mac is linked to a login", v.d.Name)
+			return
+		case v.volunteeredBy != "":
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is %s's, who volunteered it with ./volunteer: it can't be linked to another login", v.d.Name, v.volunteeredBy)
+			return
+		}
+		if old := v.d.LinkedLogin; old != link {
+			s.log.Printf("Maintainer %s linked %s to %q (was %q)", maintainerName(r), v.d.Name, link, old)
+		}
+		v.d.LinkedLogin = link
+	}
 	if p.Label != nil {
 		v.d.Label = *p.Label
 	}
@@ -1783,9 +1825,12 @@ func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
 		sec = 60
 	}
 	deadline := s.now().Add(time.Duration(sec) * time.Second)
+	c := callerOf(r)
 	for {
+		// jobInScope asked once, but a wait lasts up to an hour: a person a
+		// Maintainer unlinks meanwhile gets nothing more of the job.
 		j, err := s.store.job(id)
-		if err != nil {
+		if err != nil || !s.seesJob(c, j) {
 			httpErr(w, 404, "no job %s", id)
 			return
 		}
