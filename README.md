@@ -125,8 +125,9 @@ reboot lands on the Mac's own entry.
   be built with `apple_wdt`, or the watchdog resets it about 60s into every
   boot; the job flags one without it.
 - Before every Lab boot, lab-agent writes a deadline record to
-  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout,
-  unless lab-agent reaches labd first) and a **hard ceiling** (the job's end).
+  `/var/lib/maclab/lab-boot/`: **no contact** (twice the job's boot timeout, at most
+  9 minutes so it comes before lab-agent's own watchdog, unless lab-agent
+  reaches labd first) and a **hard ceiling** (the job's end).
   `maclab-lab-boot-deadlines.service`, an early unit with no network
   dependency, reboots a Lab boot when either passes, and on a Volunteer's Mac
   as soon as its Availability window closes. labd waits for that
