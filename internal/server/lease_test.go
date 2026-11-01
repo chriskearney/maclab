@@ -69,26 +69,112 @@ func TestALeaseSetsAsideJobsQueuedBeforeIt(t *testing.T) {
 	}
 }
 
-// A job set aside by a lease runs once the lease runs out, too.
+// setAside leaves a job of other's, queued before taker's lease, set aside by
+// it: taker's long job holds the Mac while other queues one, then taker
+// leases the Mac. It returns the set-aside job's id.
+func (l *lab) setAside(takerToken, takerHolder, otherToken, otherHolder string) string {
+	l.t.Helper()
+	l.sim.SetTestLength(3 * time.Second)
+	code, busy, body := l.submitAs(takerToken, api.JobSpec{Kernel: l.artifact("krel=7.2-busy behavior=ok"), Tests: []api.TestSpec{{Name: "long-work", Builtin: "x"}}, Holder: takerHolder})
+	if code != 200 {
+		l.t.Fatalf("the lease taker's job: %d %s", code, body)
+	}
+	l.waitTesting(busy, "7.2-busy")
+	code, theirs, body := l.submitAs(otherToken, api.JobSpec{Kernel: l.artifact("krel=7.2-theirs behavior=ok"), Holder: otherHolder})
+	if code != 200 {
+		l.t.Fatalf("the other Maintainer's job: %d %s", code, body)
+	}
+	if r, body := l.as(takerToken, "POST", "/api/devices/"+l.name+"/lease", api.LeaseRequest{Holder: takerHolder, TTLSec: 3600}); r.StatusCode != 200 {
+		l.t.Fatalf("lease: %s %s", r.Status, body)
+	}
+	l.expect(l.jobAPI(busy, 60*time.Second), api.OutcomePass)
+	l.waitJob(theirs, func(j *api.Job) bool { return hasEvent(j, "waiting for the lease to end") })
+	return theirs
+}
+
+// A job set aside by a lease runs once the lease runs out, too. The lease is
+// made to run out by moving its end, not by waiting for a short one, which
+// a slow run could outlast before the job is set aside.
 func TestAJobSetAsideRunsWhenTheLeaseRunsOut(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
 	joshua := l.addMaintainer(harnessToken, "joshua")
-	l.sim.SetTestLength(3 * time.Second)
-	busy := l.submitJob(api.JobSpec{Kernel: l.artifact("krel=7.2-busy behavior=ok"), Tests: []api.TestSpec{{Name: "long-work", Builtin: "x"}}, Holder: "ada@laptop"})
-	l.waitTesting(busy, "7.2-busy")
-	code, theirs, body := l.submitAs(joshua.Token, api.JobSpec{Kernel: l.artifact("krel=7.2-theirs behavior=ok"), Holder: "joshua@mini"})
-	if code != 200 {
-		t.Fatalf("joshua's job: %d %s", code, body)
-	}
-	if r, body := l.post("/api/devices/"+l.name+"/lease", api.LeaseRequest{Holder: "ada@laptop", TTLSec: 8}); r.StatusCode != 200 {
-		t.Fatalf("lease: %s %s", r.Status, body)
-	}
-	l.expect(l.jobAPI(busy, 60*time.Second), api.OutcomePass)
+	theirs := l.setAside(harnessToken, "ada@laptop", joshua.Token, "joshua@mini")
+	l.staysQueued(theirs, time.Second, "the lease still holds the Mac")
+
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	ran := *v.d.Lease
+	ran.Expires = l.s.now().Add(-time.Second)
+	v.d.Lease = &ran
+	v.mu.Unlock()
 	l.expect(l.jobAPI(theirs, 60*time.Second), api.OutcomePass)
-	j, _ := l.jobNow(theirs)
-	if !hasEvent(&j, "waiting for the lease to end") {
-		t.Fatalf("joshua's job ran without waiting for the lease: %v", j.Events)
+}
+
+// Any Maintainer can end another's lease with lab release --force, so a
+// forgotten one doesn't hold the Mac: labd records who ended whose, and the
+// jobs it set aside run. Only a Maintainer can.
+func TestAnyMaintainerCanForceALeaseToEnd(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	joshua := l.addMaintainer(harnessToken, "joshua")
+	theirs := l.setAside(harnessToken, "ada@laptop", joshua.Token, "joshua@mini")
+
+	path := "/api/devices/" + l.name + "/lease"
+	for who, token := range map[string]string{"no token": "", "the builder": "bld", "the Mac": l.secret} {
+		if r, body := l.as(token, "DELETE", path+"?force=1", nil); r.StatusCode == 200 {
+			t.Fatalf("%s forcing ada's lease to end: %s %s", who, r.Status, body)
+		}
+	}
+	if r, body := l.as(joshua.Token, "DELETE", path, nil); r.StatusCode != http.StatusConflict || !strings.Contains(body, "lab release "+l.name+" --force") {
+		t.Fatalf("joshua releasing ada's lease without --force: %s %s", r.Status, body)
+	}
+	if l.s.dev(l.name).snapshot().Lease == nil {
+		t.Fatal("a refused release ended the lease")
+	}
+	// forget --force doesn't drop set-aside jobs; it says how to end the lease.
+	if r, body := l.as(joshua.Token, "DELETE", "/api/devices/"+l.name+"?force=1", nil); r.StatusCode != http.StatusConflict || !strings.Contains(body, "set aside by") || !strings.Contains(body, "lab release "+l.name+" --force") {
+		t.Fatalf("forgetting a Mac whose lease holds jobs aside: %s %s", r.Status, body)
+	}
+	if r, body := l.as(joshua.Token, "DELETE", path+"?force=1", nil); r.StatusCode != 200 {
+		t.Fatalf("joshua forcing ada's lease to end: %s %s", r.Status, body)
+	}
+	if q := l.s.dev(l.name).snapshot().Lease; q != nil {
+		t.Fatalf("the lease outlived lab release --force: %+v", q)
+	}
+	const ended = "ended early by Maintainer joshua"
+	if logs := l.logs.String(); !strings.Contains(logs, "lease by ada@laptop (Maintainer ada)") || !strings.Contains(logs, ended) {
+		t.Fatalf("labd's log doesn't say who ended whose lease:\n%s", logs)
+	}
+	j := l.jobAPI(theirs, 60*time.Second)
+	l.expect(j, api.OutcomePass)
+	if !hasEvent(j, ended) {
+		t.Fatalf("the set-aside job doesn't say who ended the lease: %v", j.Events)
+	}
+}
+
+// Removing a Maintainer ends their leases, since nobody else would release
+// them, and the jobs those set aside run.
+func TestRemovingAMaintainerEndsTheirLeases(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	joshua := l.addMaintainer(harnessToken, "joshua")
+	mine := l.setAside(joshua.Token, "joshua@mini", harnessToken, "ada@laptop")
+
+	if r, body := l.as(harnessToken, "DELETE", "/api/maintainers/joshua", nil); r.StatusCode != 200 {
+		t.Fatalf("removing joshua: %s %s", r.Status, body)
+	}
+	if q := l.s.dev(l.name).snapshot().Lease; q != nil {
+		t.Fatalf("a removed Maintainer's lease outlived them: %+v", q)
+	}
+	const ended = "Maintainer joshua was removed by " + harnessMaintainer
+	if !strings.Contains(l.logs.String(), ended) {
+		t.Fatalf("labd's log doesn't say why the lease ended:\n%s", l.logs.String())
+	}
+	j := l.jobAPI(mine, 60*time.Second)
+	l.expect(j, api.OutcomePass)
+	if !hasEvent(j, ended) {
+		t.Fatalf("the set-aside job doesn't say why the lease ended: %v", j.Events)
 	}
 }
 

@@ -76,7 +76,7 @@ What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualifica
 _Avoid_: Permissions, trust level
 
 **Lease**:
-A Maintainer holding one Mac for a named holder (`lab lease`) until it runs out or they release it: only that holder's jobs, submitted with that Maintainer's token, run on it. A job already running finishes first; jobs others queued before it wait aside and run once it ends. Only the Maintainer who took it renews, releases or resets the Mac under it. On a Volunteer's Mac it lasts only inside the Availability window, and lowering the Access level ends it.
+A Maintainer holding one Mac for a named holder (`lab lease`) until it runs out or they release it: only that holder's jobs, submitted with that Maintainer's token, run on it. A job already running finishes first; jobs others queued before it wait aside and run once it ends. Only the Maintainer who took it renews, releases or resets the Mac under it; another Maintainer can end it early (`lab release --force`), which labd records, and removing its Maintainer ends it. On a Volunteer's Mac it lasts only inside the Availability window, and lowering the Access level ends it.
 _Avoid_: Reservation, lock
 
 **Audit log**:

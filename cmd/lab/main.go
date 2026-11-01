@@ -60,9 +60,10 @@ const usage = `lab: run kernels and tests on Omarchy Macs
                                       caused; the gate lists who set it aside, why and when. --clear counts it again
   lab retry <job> [--no-wait]         run a finished job again: same Mac, kernel (or source commit), tests and cmdline
   lab publish <job>                   upload a known-good run's omarchy-m-test report to omarchy-m-testing.org
-  lab lease <device> [--ttl 1h] | lab release <device>
+  lab lease <device> [--ttl 1h] | lab release <device> [--force]
                                       reserve a Mac: until the lease ends only your jobs run on it,
-                                      and others' queued jobs wait. Only you can release it
+                                      and others' queued jobs wait. Only you can release it;
+                                      --force ends another Maintainer's lease, and is recorded
   lab forget <device> [--force]       take a Mac out of the lab (after lab-agent uninstall); its jobs stay.
                                       Refused while someone else leases it or its agent checks in, unless --force
   lab installed freeze-manifest --release R <manifest.json> <payload.sha256> [--approved-by a,b]
@@ -683,9 +684,13 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 
 	case "release":
 		who := fs.String("holder", holder(), "")
+		force := fs.Bool("force", false, "end the lease even if another Maintainer took it; labd records that you did")
 		pos := parse(fs, args)
-		if err := need(pos, 1, "lab release <device>"); err != nil {
+		if err := need(pos, 1, "lab release <device> [--force]"); err != nil {
 			return err
+		}
+		if *force {
+			return c.ForceRelease(ctx, pos[0])
 		}
 		return c.Release(ctx, pos[0], *who)
 

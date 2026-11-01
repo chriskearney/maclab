@@ -121,6 +121,9 @@ it finishes first. A lease belongs to its holder (`MACLAB_HOLDER`, else
 `user@host`) and to the Maintainer whose token took it: naming the same holder
 doesn't let another Maintainer renew it, release it, reset the Mac or run jobs
 under it. On a Volunteer's Mac it ends with the Availability window at the latest.
+Another Maintainer can end it early with `lab release <device> --force`, for a
+lease someone forgot; labd's log and each job it set aside record who ended it.
+Removing a Maintainer ends their leases the same way.
 
 ## Lab boots come back by themselves
 
@@ -412,7 +415,8 @@ Without `--force`, it refuses while a job is in flight or the bootloader can't b
 bootloader it can't find is left alone, and so is `/var/lib/maclab`. `--dry-run` prints each action,
 or the refusal, without taking it. labd still lists the Mac afterwards:
 `lab forget <device>` on the controller drops it (its jobs stay), so it can enroll again under the
-same name. It refuses a Mac with a job running or queued, and, unless given `--force`, one that
+same name. It refuses a Mac with a job running or queued (jobs a lease set aside count: end the
+lease with `lab release <device> --force` so they run, or cancel them), and, unless given `--force`, one that
 someone else holds a lease on (forgetting it would end their lease and cut their `lab shell`) or
 whose agent still checks in and never said it was leaving. Forgetting a Mac labd doesn't know is done
 already: `lab forget` says so and exits 0.

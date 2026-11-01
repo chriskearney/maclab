@@ -67,3 +67,48 @@ func (v *dev) unpark() {
 	clear(v.parked[len(keep):])
 	v.parked = keep
 }
+
+// endLease ends v's lease and queues again the jobs it held back. When l, the
+// lease as the caller saw it, is ended by someone other than its own
+// Maintainer, why says by whom: labd's log records it, and so does each job
+// it had set aside. It says whether it ended the lease: not when l is no
+// longer v's lease, renewed or ended meanwhile. Caller doesn't hold v.mu.
+func (s *Server) endLease(v *dev, l *api.Lease, why string) bool {
+	v.mu.Lock()
+	if l != nil && v.d.Lease != l {
+		v.mu.Unlock()
+		return false
+	}
+	v.d.Lease = nil
+	v.saveLocked()
+	var aside []string
+	for _, p := range v.parked {
+		aside = append(aside, p.id)
+	}
+	name := v.d.Name
+	v.mu.Unlock()
+	if l != nil {
+		msg := fmt.Sprintf("%s's lease by %s, until %s, %s", name, l.Who(), l.Expires.Format(time.DateTime), why)
+		s.log.Printf("%s", msg)
+		for _, id := range aside {
+			s.updateJobByID(id, func(j *api.Job) { j.Events = append(j.Events, api.JobEvent{Time: s.now(), Msg: msg}) })
+		}
+	}
+	v.unpark()
+	return true
+}
+
+// endLeasesOf ends the leases the Maintainer name holds, as when they are
+// removed: nobody else could release them, and the jobs they hold back
+// would wait for them to run out.
+func (s *Server) endLeasesOf(name, why string) {
+	for _, v := range s.allDevs() {
+		v.mu.Lock()
+		l := v.d.Lease
+		mine := l != nil && l.Maintainer == name && s.now().Before(l.Expires)
+		v.mu.Unlock()
+		if mine {
+			s.endLease(v, l, why)
+		}
+	}
+}

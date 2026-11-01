@@ -238,8 +238,15 @@ func (c *Client) ForgetDevice(ctx context.Context, name, holder string, force bo
 	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name)+"?"+q.Encode(), nil, nil)
 }
 
+// Release ends holder's lease on a Mac.
 func (c *Client) Release(ctx context.Context, name, holder string) error {
 	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name)+"/lease?holder="+url.QueryEscape(holder), nil, nil)
+}
+
+// ForceRelease ends a Mac's lease whoever holds it, as a Maintainer ending
+// another's: labd records who ended it.
+func (c *Client) ForceRelease(ctx context.Context, name string) error {
+	return c.do(ctx, "DELETE", "/api/devices/"+url.PathEscape(name)+"/lease?force=1", nil, nil)
 }
 
 func (c *Client) Reset(ctx context.Context, name, by string) (string, error) {
