@@ -586,7 +586,7 @@ func (a *Agent) checkBeforeReport(rep []api.CommandResult) {
 	a.mu.Lock()
 	var checks []afterAck
 	for _, f := range a.after {
-		if f.check != nil {
+		if f.check != nil && !f.checked {
 			checks = append(checks, f)
 		}
 	}
@@ -598,6 +598,11 @@ func (a *Agent) checkBeforeReport(rep []api.CommandResult) {
 		}
 		err := f.check()
 		if err == nil {
+			a.mu.Lock()
+			if j := slices.IndexFunc(a.after, func(g afterAck) bool { return g.id == f.id }); j >= 0 {
+				a.after[j].checked = true
+			}
+			a.mu.Unlock()
 			continue
 		}
 		a.log.Printf("command %s failed: %v", f.id, err)
@@ -824,8 +829,9 @@ type afterAck struct {
 	id string // the command whose result it waits on
 	// check, if set, runs just before that result goes to labd: an error
 	// fails the command instead, and run never runs.
-	check func() error
-	run   func()
+	check   func() error
+	checked bool // check passed: it runs once, not on every retried report
+	run     func()
 }
 
 // exec runs one command. The returned afterAck runs only after the result
@@ -1139,8 +1145,14 @@ func (a *Agent) collectLost(ctx context.Context, job, dir string) api.LostBoot {
 // records infra_error. One that fails after it leaves the Mac up: a reboot
 // then could only boot the default entry.
 func (a *Agent) labBootAfterAck(entry string) *afterAck {
+	// A re-arm that fails may have left the first arm's one-shot set, and
+	// labd is then told the boot failed to arm (or not told at all): cancel
+	// it, so a later plain reboot can't boot the test kernel unwatched.
 	rearm := func() error {
 		if err := a.sys.BootOnce(entry); err != nil {
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
 			return fmt.Errorf("re-arming the Lab boot before the reboot: %w", err)
 		}
 		return nil

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -132,6 +133,17 @@ func TestLimineRearmAfterSnapperSync(t *testing.T) {
 	conf, _ := os.ReadFile(l.Conf)
 	if !strings.Contains(string(conf), "\n/"+entryPrefix+job+"\n") || l.armed() != entryPrefix+job {
 		t.Fatalf("re-arm left one-shot %q and limine.conf:\n%s", l.armed(), conf)
+	}
+
+	// armed already: arming again leaves the one-shot's NVRAM variable alone
+	v := efivarPath("LoaderEntryOneShot", bliGUID)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(v, old, old)
+	if err := l.arm(entryPrefix + job); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(v); err != nil || !st.ModTime().Equal(old) {
+		t.Errorf("arming an armed entry wrote the one-shot again: %v", err)
 	}
 
 	// no one-shot can be set: arming fails
