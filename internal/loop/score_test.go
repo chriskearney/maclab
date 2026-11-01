@@ -10,20 +10,15 @@ import (
 )
 
 func TestClassOf(t *testing.T) {
-	for _, c := range []struct {
-		m      Mode
-		serial bool
-		want   Class
-	}{
-		{None, false, ClassHealthy}, {Marker, true, ClassHealthy},
-		{PanicEarly, false, ClassEarly}, {HangEarly, false, ClassEarly}, {HangLate, false, ClassEarly},
-		// A serial console reads an early boot, so each is its own class.
-		{PanicEarly, true, Class(PanicEarly)}, {HangEarly, true, Class(HangEarly)}, {HangLate, true, Class(HangLate)},
-		{OopsLate, false, Class(OopsLate)}, {PanicLate, false, Class(PanicLate)}, {Netdown, true, Class(Netdown)},
-		{Unsure, false, ""},
+	for m, want := range map[Mode]Class{
+		None: ClassHealthy, Marker: ClassHealthy,
+		// The early faults come back after different times, so each is its own.
+		PanicEarly: Class(PanicEarly), HangEarly: Class(HangEarly), HangLate: Class(HangLate),
+		OopsLate: Class(OopsLate), PanicLate: Class(PanicLate), Netdown: Class(Netdown),
+		Unsure: "",
 	} {
-		if got := ClassOf(c.m, c.serial); got != c.want {
-			t.Errorf("ClassOf(%s, serial %v) = %q, want %q", c.m, c.serial, got, c.want)
+		if got := ClassOf(m); got != want {
+			t.Errorf("ClassOf(%s) = %q, want %q", m, got, want)
 		}
 	}
 }
@@ -31,34 +26,54 @@ func TestClassOf(t *testing.T) {
 func TestJudgeRight(t *testing.T) {
 	for _, c := range []struct {
 		fault, injected Mode
-		serial, want    bool
+		want            bool
 	}{
-		{Marker, None, false, true}, // can't be told apart: every boot prints a marker
-		{None, Marker, true, true},
-		{Unsure, PanicEarly, false, true}, // nothing to read without serial: unsure is honest
-		{Unsure, HangLate, false, true},
-		{HangEarly, PanicEarly, false, true},
-		{HangEarly, PanicEarly, true, false}, // serial tells them apart
-		{Unsure, PanicEarly, true, false},
-		{Unsure, None, false, false}, // unsure is wrong where there is evidence
-		{Unsure, PanicLate, false, false},
-		{None, HangLate, false, false},
-		{PanicLate, OopsLate, false, false},
-		{Netdown, Netdown, false, true},
+		{Marker, None, true}, // can't be told apart: every boot prints a marker
+		{None, Marker, true},
+		{Netdown, Netdown, true},
+		{HangEarly, PanicEarly, false}, // the time back tells them apart
+		{None, HangLate, false},
+		{PanicLate, OopsLate, false},
+		// unsure is an abstention, never right
+		{Unsure, PanicEarly, false}, {Unsure, HangLate, false}, {Unsure, None, false},
 	} {
-		if got := JudgeRight(c.fault, c.injected, c.serial); got != c.want {
-			t.Errorf("JudgeRight(%s, %s, serial %v) = %v, want %v", c.fault, c.injected, c.serial, got, c.want)
+		if got := JudgeRight(c.fault, c.injected); got != c.want {
+			t.Errorf("JudgeRight(%s, %s) = %v, want %v", c.fault, c.injected, got, c.want)
 		}
 	}
 }
 
 func TestScoreVerdictKeepsTheExactFault(t *testing.T) {
-	s := ScoreVerdict(&Verdict{Fault: Marker}, None, false, false)
-	if s.Fault || !s.Class || !s.HumanNeeded {
+	s := ScoreVerdict(&Verdict{Fault: Marker}, None, false)
+	if s.Fault || !s.Class || s.Abstained || !s.HumanNeeded {
 		t.Errorf("%+v", s)
 	}
-	if s := ScoreVerdict(&Verdict{Fault: None}, None, false, true); !s.Fault || !s.Class || s.HumanNeeded {
+	if s := ScoreVerdict(&Verdict{Fault: None}, None, true); !s.Fault || !s.Class || s.HumanNeeded {
 		t.Errorf("a judge that missed needs hands: %+v", s)
+	}
+	if s := ScoreVerdict(&Verdict{Fault: Unsure}, HangEarly, false); s.Fault || s.Class || !s.Abstained {
+		t.Errorf("unsure: %+v", s)
+	}
+}
+
+func TestLabelFault(t *testing.T) {
+	for _, c := range []struct {
+		outcome string
+		serial  bool
+		want    Mode
+	}{
+		{api.OutcomePass, false, None}, // none and marker: one class
+		{api.OutcomeUnhealthy, false, OopsLate},
+		{api.OutcomeCrashedOrHung, false, PanicLate},
+		{api.OutcomeLostContact, false, Netdown},
+		{api.OutcomeBootFailed, false, Unsure}, // fits every early fault
+		{api.OutcomePanicked, false, Unsure},   // predicted for nothing without serial
+		{api.OutcomePanicked, true, Unsure},    // panic_late and panic_early with serial
+		{api.OutcomeInfra, false, Unsure},
+	} {
+		if got := LabelFault(c.outcome, c.serial); got != c.want {
+			t.Errorf("LabelFault(%s, serial %v) = %s, want %s", c.outcome, c.serial, got, c.want)
+		}
 	}
 }
 
@@ -128,6 +143,8 @@ const night1 = `{"iter":1,"mode":"marker","serial":false,"outcome":"pass","as_pr
 {"iter":14,"mode":"none","serial":false,"outcome":"pass","as_predicted":true,"agent":{"fault":"marker"},"score":{"fault":false,"human_needed":true}}
 {"iter":15,"mode":"none","serial":false,"outcome":"pass","as_predicted":true,"agent":{"fault":"unsure"},"needs_hands":true}
 {"iter":20,"mode":"panic_late","serial":false,"outcome":"panicked","as_predicted":true,"agent":{"fault":"panic_late"}}
+{"iter":21,"mode":"zz_new","serial":false,"outcome":"pass"}
+{"iter":22,"mode":"aa_new","serial":false,"outcome":"pass"}
 `
 
 func TestSummarize(t *testing.T) {
@@ -135,19 +152,25 @@ func TestSummarize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := Summarize(es)
 	want := []Row{
-		{Mode: None, Boots: 2, AsPredicted: 2, Judged: 2, JudgeRight: 1, NeedsHands: 1},
+		{Mode: None, Boots: 2, AsPredicted: 2, Judged: 2, JudgeClass: 1, JudgeExact: 0, Abstained: 1, NeedsHands: 1},
 		{Mode: Marker, Boots: 1, AsPredicted: 1},
-		{Mode: OopsLate, Boots: 1, AsPredicted: 1, Judged: 1, JudgeRight: 1},
+		{Mode: OopsLate, Boots: 1, AsPredicted: 1, Judged: 1, JudgeClass: 1, JudgeExact: 1},
 		// panicked without serial is rescored against today's prediction.
-		{Mode: PanicLate, Boots: 2, AsPredicted: 1, Judged: 1, JudgeRight: 1},
-		{Mode: PanicEarly, Boots: 1, AsPredicted: 1, Judged: 1, JudgeRight: 1},
-		{Mode: Netdown, Boots: 1, AsPredicted: 0, Judged: 1, JudgeRight: 1},
-		{Mode: "total", Boots: 8, AsPredicted: 6, Judged: 6, JudgeRight: 5, NeedsHands: 1},
+		{Mode: PanicLate, Boots: 2, AsPredicted: 1, Judged: 1, JudgeClass: 1, JudgeExact: 1},
+		{Mode: PanicEarly, Boots: 1, AsPredicted: 1, Judged: 1, Abstained: 1},
+		{Mode: Netdown, Boots: 1, AsPredicted: 0, Judged: 1, JudgeClass: 1, JudgeExact: 1},
+		// modes this build doesn't know come last, sorted
+		{Mode: "aa_new", Boots: 1}, {Mode: "zz_new", Boots: 1},
+		{Mode: "total", Boots: 10, AsPredicted: 6, Judged: 6, JudgeClass: 4, JudgeExact: 3, Abstained: 2, NeedsHands: 1},
+		// the label alone: pass reads none, booted_unhealthy oops_late;
+		// boot_failed and panicked without serial fit no single class
+		{Mode: BaselineMode, Boots: 6, Judged: 6, JudgeClass: 3, JudgeExact: 3, Abstained: 3},
 	}
-	if !slices.Equal(rows, want) {
-		t.Errorf("rows:\n%+v\nwant\n%+v", rows, want)
+	for range 5 { // map order must not leak into the rows
+		if rows := Summarize(es); !slices.Equal(rows, want) {
+			t.Fatalf("rows:\n%+v\nwant\n%+v", rows, want)
+		}
 	}
 	var b bytes.Buffer
 	if err := WriteSummary(&b, es); err != nil {
@@ -155,7 +178,8 @@ func TestSummarize(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
 	if len(lines) != len(want)+1 || !strings.HasPrefix(lines[0], "mode") ||
-		strings.Join(strings.Fields(lines[len(lines)-1]), " ") != "total 8 6 5/6 1" {
+		strings.Join(strings.Fields(lines[len(lines)-2]), " ") != "total 10 6 4/6 3/6 2 1" ||
+		strings.Join(strings.Fields(lines[len(lines)-1]), " ") != "label baseline 6 - 3/6 3/6 3 -" {
 		t.Errorf("table:\n%s", b.String())
 	}
 }

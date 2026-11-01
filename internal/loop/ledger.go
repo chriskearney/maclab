@@ -65,9 +65,11 @@ type Input struct {
 type Score struct {
 	// Fault: the judge named exactly the injected mode.
 	Fault bool `json:"fault"`
-	// Class: the judge's fault is in the injected mode's class (JudgeRight).
-	// This is the judge's score; Fault is kept to see what it can't split.
-	Class       bool `json:"class"`
+	// Class: the judge's fault is in the injected mode's class (JudgeRight):
+	// none and marker count as one. "unsure" is never right.
+	Class bool `json:"class"`
+	// Abstained: the judge said "unsure".
+	Abstained   bool `json:"abstained,omitempty"`
 	HumanNeeded bool `json:"human_needed"`
 }
 

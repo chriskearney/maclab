@@ -174,20 +174,27 @@ failed night, however good the rest looks.
 
 ## Scoring
 
-The judge is scored on **fault classes**, not on the exact mode, because some
-modes leave the same evidence and splitting them scores the design, not the
-judge:
+The judge is scored two ways, side by side: on the exact mode, and on
+**fault classes**. The only shared class is **healthy** (`none` and
+`marker`): every boot prints a code and a marker, so the evidence can't tell
+them apart. Every other fault is a class of its own.
 
-| Class | Modes | Why |
-| --- | --- | --- |
-| healthy | `none`, `marker` | every boot prints a code and a marker |
-| early | `panic_early`, `hang_early`, `hang_late`, on a Mac without serial | each falls back before lab-agent reaches labd and leaves no kernel log of its own |
-| one per mode | every other fault, and the early modes on a Mac with serial | the evidence tells them apart |
+The early faults are not a class. Without serial they leave no kernel log of
+their own, but they don't leave the same evidence: the time the Mac takes to
+come back differs. On night 1 the whole job took 77 s for both `panic_early`
+boots (`panic=10` reboots in seconds; `quickReboot` in `runner.go` is 90 s),
+about 130 s for `hang_early` (U-Boot's 60 s watchdog) and 230–250 s for
+`hang_late` (`watchdog.open_timeout`). A judge that reads the timing can tell
+them apart.
 
-The judge is right when its fault is in the injected mode's class. `unsure`
-is right for the early class, where it is the honest answer, and wrong
-everywhere else. The ledger keeps both `score.class` (the score) and
-`score.fault` (the exact mode), so it still shows what the judge can't split.
+`unsure` is never right. It is counted as an abstention, in its own column.
+The ledger keeps `score.class`, `score.fault` (the exact mode) and
+`score.abstained`.
+
+The summary's **label baseline** row is what a judge that only repeats
+maclab's outcome label would score: the mode the outcome is predicted for,
+when those modes are one class, and `unsure` otherwise (`boot_failed` fits
+every early fault). The judge is worth running only where it beats that.
 
 maclab is scored per boot too, in `lab_score`: the outcome was predicted, the
 Mac came back ready with no hands, and logs were collected (for a lost boot,
@@ -195,25 +202,27 @@ Mac came back ready with no hands, and logs were collected (for a lost boot,
 also records lab-agent's version from the Mac's facts.
 
 `lab-loop summary loop/ledger.jsonl` prints a table per mode: boots, as
-predicted, judge right by class (of the boots it judged) and needs hands. It
+predicted, judge right by class and by exact mode (of the boots it judged),
+abstentions and needs hands, then the total and the label baseline. It
 rescores the ledger with today's rules, so older ledgers read the same way.
 
 ## Night 1 (2026-11-01)
 
-20 boots on m1 (tier 1, no serial) in 1 h 45 min, seed 2406158020735059843.
-Nobody touched the Mac.
+20 boots on m1 (tier 1, no serial) in about 1 h 45 min, seed
+2406158020735059843. Nobody touched the Mac.
 
 ```
-mode         boots  as predicted  judge right (class)  needs hands
-none         4      4             4/4                  0
-marker       4      4             3/3                  0
-oops_late    2      2             2/2                  0
-panic_late   2      2             1/1                  0
-panic_early  2      2             2/2                  0
-hang_early   2      2             2/2                  0
-hang_late    2      2             1/1                  0
-netdown      2      0             2/2                  0
-total        20     18            17/17                0
+mode            boots  as predicted  judge class  judge exact  abstained  needs hands
+none            4      4             4/4          1/4          0          0
+marker          4      4             3/3          3/3          0          0
+oops_late       2      2             2/2          2/2          0          0
+panic_late      2      2             1/1          1/1          0          0
+panic_early     2      2             0/2          0/2          2          0
+hang_early      2      2             0/2          0/2          2          0
+hang_late       2      2             0/1          0/1          1          0
+netdown         2      0             2/2          2/2          0          0
+total           20     18            12/17        9/17         5          0
+label baseline  17     -             10/17        7/17         7          -
 ```
 
 - maclab labelled 18 of 20 boots as predicted. Both `netdown` boots ended
@@ -222,10 +231,13 @@ total        20     18            17/17                0
   lab-agent's watchdog), and the lost boot's journal wasn't collected because
   journalctl was given a dashed boot ID (#60).
 - The judge failed to start on the first three boots (`loop-judge.sh` wasn't
-  executable). On the 17 it judged, the exact-mode score was 9 of 17, but
-  every miss was `none` read as `marker` or an honest `unsure` on an early
-  fault without serial. By class it got 17 of 17, and `human_needed` 17 of 17
-  (no boot needed hands, so that score says little yet).
+  executable). Of the 17 it judged it got 9 exactly and 12 by class, never
+  named a fault of the wrong class, and abstained on all 5 early faults. The label alone
+  gets 10 by class, so the judge added only the two `netdown` boots, which it
+  read from timing where the label said `boot_failed`. It didn't use the
+  timing on the early faults, which is where it has the most to gain.
+- `human_needed` was right on 17 of 17, but no boot needed hands, so that
+  score says little yet.
 
 ## Stop rules
 

@@ -20,11 +20,19 @@ func TestSummary(t *testing.T) {
 	if err := summary(&b, []string{path}); err != nil {
 		t.Fatal(err)
 	}
-	got := b.String()
-	for _, want := range []string{"none        1      1             1/1", "hang_early  1      1             1/1", "total       2      2             2/2"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("no %q in\n%s", want, got)
-		}
+	var got []string
+	for _, l := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+		got = append(got, strings.Join(strings.Fields(l), " "))
+	}
+	want := []string{
+		"mode boots as predicted judge class judge exact abstained needs hands",
+		"none 1 1 1/1 0/1 0 0",
+		"hang_early 1 1 0/1 0/1 1 0",
+		"total 2 2 1/2 0/2 1 0",
+		"label baseline 2 - 1/2 1/2 1 -",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	if err := summary(&b, nil); err == nil || !strings.Contains(err.Error(), "usage") {
 		t.Errorf("no ledger: %v", err)

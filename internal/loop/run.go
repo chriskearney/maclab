@@ -209,7 +209,7 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) (e Entry, do
 			e.AgentError = err.Error()
 		} else {
 			e.Agent = v
-			e.Score = ScoreVerdict(v, b.Mode, serial, e.NeedsHands)
+			e.Score = ScoreVerdict(v, b.Mode, e.NeedsHands)
 		}
 		if cj, ok := n.Judge.(CommandJudge); ok {
 			for _, t := range cj.Tools {

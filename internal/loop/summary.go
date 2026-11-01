@@ -3,6 +3,7 @@ package loop
 import (
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"text/tabwriter"
 )
@@ -12,20 +13,28 @@ type Row struct {
 	Mode        Mode
 	Boots       int
 	AsPredicted int
-	// Judged is the boots the judge gave a verdict on; JudgeRight is the
-	// ones it got right by class.
-	Judged, JudgeRight int
-	NeedsHands         int
+	// Judged is the boots the judge gave a verdict on. Of those, JudgeClass
+	// it got right by class, JudgeExact named the exact mode, and Abstained
+	// it said "unsure" (never right).
+	Judged, JudgeClass, JudgeExact, Abstained int
+	NeedsHands                                int
 }
 
-// Summarize counts a ledger per mode, in Modes order, then a total row with
-// Mode "total". It scores with today's rules rather than reading the
+// BaselineMode names the summary's last row: what a judge that only repeats
+// maclab's outcome label (LabelFault) would score on the boots the judge
+// judged.
+const BaselineMode Mode = "label baseline"
+
+// Summarize counts a ledger per mode, in Modes order (modes this build
+// doesn't know after, sorted), then a total row with Mode "total" and a
+// BaselineMode row. It scores with today's rules rather than reading the
 // ledger's own scores, so a ledger written before a rule changed reads the
 // same as a new one: as predicted is the outcome against Predicted, and the
 // judge is scored by class (JudgeRight).
 func Summarize(es []Entry) []Row {
 	by := map[Mode]*Row{}
 	total := Row{Mode: "total"}
+	base := Row{Mode: BaselineMode}
 	for _, e := range es {
 		r := by[e.Mode]
 		if r == nil {
@@ -38,14 +47,15 @@ func Summarize(es []Entry) []Row {
 				r.AsPredicted++
 			}
 			if e.Agent != nil {
-				r.Judged++
-				if JudgeRight(e.Agent.Fault, e.Mode, e.Serial) {
-					r.JudgeRight++
-				}
+				count(r, e.Agent.Fault, e.Mode)
 			}
 			if e.NeedsHands {
 				r.NeedsHands++
 			}
+		}
+		if e.Agent != nil {
+			base.Boots++
+			count(&base, LabelFault(e.Outcome, e.Serial), e.Mode)
 		}
 	}
 	var rows []Row
@@ -55,18 +65,37 @@ func Summarize(es []Entry) []Row {
 			delete(by, m)
 		}
 	}
-	for _, r := range by { // a mode this build doesn't know
-		rows = append(rows, *r)
+	for _, m := range slices.Sorted(maps.Keys(by)) { // modes this build doesn't know
+		rows = append(rows, *by[m])
 	}
-	return append(rows, total)
+	return append(rows, total, base)
 }
 
-// WriteSummary prints Summarize's table.
+func count(r *Row, fault, injected Mode) {
+	r.Judged++
+	if JudgeRight(fault, injected) {
+		r.JudgeClass++
+	}
+	if fault == injected {
+		r.JudgeExact++
+	}
+	if fault == Unsure {
+		r.Abstained++
+	}
+}
+
+// WriteSummary prints Summarize's table. The baseline row has no as
+// predicted or needs hands: it only reads labels.
 func WriteSummary(w io.Writer, es []Entry) error {
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "mode\tboots\tas predicted\tjudge right (class)\tneeds hands")
+	fmt.Fprintln(tw, "mode\tboots\tas predicted\tjudge class\tjudge exact\tabstained\tneeds hands")
 	for _, r := range Summarize(es) {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d/%d\t%d\n", r.Mode, r.Boots, r.AsPredicted, r.JudgeRight, r.Judged, r.NeedsHands)
+		pred, hands := fmt.Sprint(r.AsPredicted), fmt.Sprint(r.NeedsHands)
+		if r.Mode == BaselineMode {
+			pred, hands = "-", "-"
+		}
+		fmt.Fprintf(tw, "%s\t%d\t%s\t%d/%d\t%d/%d\t%d\t%s\n", r.Mode, r.Boots, pred,
+			r.JudgeClass, r.Judged, r.JudgeExact, r.Judged, r.Abstained, hands)
 	}
 	return tw.Flush()
 }
