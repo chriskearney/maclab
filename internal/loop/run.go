@@ -137,7 +137,7 @@ func (n *Night) waitReady(ctx context.Context) (*client.Device, error) {
 func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) (e Entry, done bool, err error) {
 	serial := d.OOB != nil
 	e = Entry{Boot: b, Seed: n.Seed, Started: time.Now().UTC(), Device: n.Device, Tier: d.Tier, Serial: serial,
-		Kernel: n.Kernel, Predicted: Predicted(b.Mode, serial)}
+		Kernel: n.Kernel, AgentVersion: d.Facts.AgentVersion, Predicted: Predicted(b.Mode, serial)}
 	defer func() { e.Seconds = time.Since(e.Started).Seconds() }()
 
 	spec := api.JobSpec{Device: n.Device, Kernel: n.Kernel, Cmdline: b.Cmdline, Holder: n.Holder}
@@ -178,6 +178,7 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) (e Entry, do
 	if done {
 		e.Outcome, e.Summary = j.Outcome, j.Summary
 		e.FellBack, e.Recovery = j.Result.FellBack, j.Result.Recovery
+		e.Lost, e.LogFiles = Lost(j), len(j.Result.Logs)
 		if t := slices.IndexFunc(j.Result.Tests, func(t api.TestResult) bool { return t.Name == "chaos-check" }); t >= 0 {
 			e.ChaosCheck = "fail"
 			if j.Result.Tests[t].Passed {
@@ -195,6 +196,12 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) (e Entry, do
 	if d, err := n.Lab.Device(ctx, n.Device); err == nil {
 		e.DeviceState = string(d.State)
 		e.NeedsHands = d.State == api.StateNeedsHands
+		if v := d.Facts.AgentVersion; v != "" {
+			e.AgentVersion = v // the job may have updated it
+		}
+	}
+	if done {
+		e.Lab = &LabScore{AsPredicted: e.AsPredicted, NoHands: e.DeviceState == string(api.StateReady), Logs: LogsCollected(j)}
 	}
 	if n.Judge != nil && e.Job != "" && done { // an unfinished job has nothing to judge yet
 		v, err := n.Judge.Judge(ctx, e.Job, n.Device)
@@ -202,7 +209,7 @@ func (n *Night) boot(ctx context.Context, b Boot, d *client.Device) (e Entry, do
 			e.AgentError = err.Error()
 		} else {
 			e.Agent = v
-			e.Score = &Score{Fault: v.Fault == b.Mode, HumanNeeded: v.HumanNeeded == e.NeedsHands}
+			e.Score = ScoreVerdict(v, b.Mode, serial, e.NeedsHands)
 		}
 		if cj, ok := n.Judge.(CommandJudge); ok {
 			for _, t := range cj.Tools {
@@ -218,8 +225,11 @@ func predictedNote(e Entry) string {
 	if !e.AsPredicted {
 		note = fmt.Sprintf("NOT PREDICTED (expected %v)", e.Predicted)
 	}
+	if e.Lab != nil && !e.Lab.Logs {
+		note += "; NO LOGS"
+	}
 	if e.Score != nil {
-		note += fmt.Sprintf("; judge fault %s, human %s", okWord(e.Score.Fault), okWord(e.Score.HumanNeeded))
+		note += fmt.Sprintf("; judge class %s (fault %s), human %s", okWord(e.Score.Class), okWord(e.Score.Fault), okWord(e.Score.HumanNeeded))
 	} else if e.AgentError != "" {
 		note += "; judge failed"
 	}
