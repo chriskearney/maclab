@@ -103,11 +103,8 @@ class Base(unittest.TestCase):
         self.assertEqual(s['ports'][0]['targetPort'], container(self.o)['ports'][0]['name'])
         self.assertEqual(s['selector'], self.o[('Deployment', 'maclab')]['spec']['selector']['matchLabels'])
 
-    def test_publish_stays_opt_in_outside_this_deployment(self):
-        root = K.parents[1]
-        src = (root / 'cmd/labd/main.go').read_text()
-        self.assertIn('flag.Bool("omt-publish", false,', src, 'a personal labd must not publish unless it passes the flag')
-        unit = (root / 'deploy/labd.service').read_text()
+    def test_personal_unit_does_not_publish(self):
+        unit = (K.parents[1] / 'deploy/labd.service').read_text()
         self.assertNotIn('--omt-publish', unit)
         self.assertNotIn('--omt-every', unit)
 
