@@ -1794,9 +1794,12 @@ func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
 		sec = 60
 	}
 	deadline := s.now().Add(time.Duration(sec) * time.Second)
+	c := callerOf(r)
 	for {
+		// jobInScope asked once, but a wait lasts up to an hour: a person a
+		// Maintainer unlinks meanwhile gets nothing more of the job.
 		j, err := s.store.job(id)
-		if err != nil {
+		if err != nil || !s.seesJob(c, j) {
 			httpErr(w, 404, "no job %s", id)
 			return
 		}

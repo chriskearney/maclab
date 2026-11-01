@@ -1,15 +1,19 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -47,60 +51,9 @@ func TestVolunteerLogin(t *testing.T) {
 // it is linked. A person can't link, a bad login is refused, and linked Macs
 // don't count toward the person's own ./volunteer limit.
 func TestMaintainerLinksVolunteerLogin(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	peers := map[string]*TailnetPeer{
-		"100.64.0.2": {Login: "Visitor@github", Node: "laptop"},
-		"100.64.0.4": {Login: "other@github", Node: "phone"},
-	}
-	whois := func(_ context.Context, ip string) (*TailnetPeer, error) {
-		if p := peers[ip]; p != nil {
-			return p, nil
-		}
-		return nil, fmt.Errorf("no match for IP")
-	}
-	s, err := New(ctx, Config{DataDir: t.TempDir(), FirstMaintainer: "ada", FirstMaintainerToken: "adm_secret", Tailscale: true, WhoIs: whois},
-		log.New(io.Discard, "", 0))
-	if err != nil {
-		t.Fatal(err)
-	}
-	h := s.Handler()
-	const (
-		visitor = "100.64.0.2:40000"
-		other   = "100.64.0.4:40000"
-		admin   = "adm_secret"
-	)
-	do := func(method, path, remote, token, body string) *httptest.ResponseRecorder {
-		t.Helper()
-		r := httptest.NewRequest(method, labdAt+path, strings.NewReader(body))
-		r.RemoteAddr = remote
-		if token != "" {
-			r.Header.Set("Authorization", "Bearer "+token)
-		}
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, r)
-		return w
-	}
-	enroll := func(token string) {
-		t.Helper()
-		if w := do("POST", "/api/agent/enroll", other, "", enrollJSON(token)); w.Code != 200 {
-			t.Fatalf("enroll: %d %s", w.Code, w.Body)
-		}
-	}
-	tokenFor := func(body string) *httptest.ResponseRecorder {
-		t.Helper()
-		return do("POST", "/api/enroll-tokens", visitor, admin, body)
-	}
-	maintainerMac := func(name, login string) {
-		t.Helper()
-		var resp api.EnrollTokenResponse
-		w := tokenFor(`{"name":"` + name + `","volunteer_name":"Visitor","contact":"v@example.org","volunteer_login":"` + login + `"}`)
-		if json.Unmarshal(w.Body.Bytes(), &resp); w.Code != 200 {
-			t.Fatalf("token for %s: %d %s", name, w.Code, w.Body)
-		}
-		enroll(resp.Token)
-		s.store.saveJob(&api.Job{ID: "j-" + name, Spec: api.JobSpec{Device: name}, DeviceID: s.dev(name).d.ID, State: api.JobDone, Created: s.now()})
-	}
+	l := newLinkLab(t, t.TempDir())
+	s, do, enroll, tokenFor, maintainerMac, patch, names := l.s, l.do, l.enroll, l.tokenFor, l.maintainerMac, l.patch, l.names
+	const visitor, other, admin = visitorAt, otherAt, adminTok
 	volunteer := func(remote, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		var resp api.EnrollTokenResponse
@@ -110,27 +63,7 @@ func TestMaintainerLinksVolunteerLogin(t *testing.T) {
 		}
 		return w
 	}
-	names := func(remote string) (out []string) {
-		var ds []api.Device
-		json.Unmarshal(do("GET", "/api/devices", remote, "", "").Body.Bytes(), &ds)
-		for _, d := range ds {
-			out = append(out, d.Name)
-		}
-		slices.Sort(out)
-		return out
-	}
-	patch := func(remote, token, name, body string) *httptest.ResponseRecorder {
-		t.Helper()
-		return do("PATCH", "/api/devices/"+name, remote, token, body)
-	}
-	seesMac := func(remote, name string) bool {
-		t.Helper()
-		dev, job := do("GET", "/api/devices/"+name, remote, "", ""), do("GET", "/api/jobs/j-"+name, remote, "", "")
-		if (dev.Code == 200) != (job.Code == 200) {
-			t.Errorf("%s: the Mac answers %d, its job %d", name, dev.Code, job.Code)
-		}
-		return dev.Code == 200 && slices.Contains(names(remote), name)
-	}
+	seesMac := l.seesMac
 
 	// Linked at enrollment: the login, in any case, sees the Mac; nobody else.
 	maintainerMac("linked", "Visitor@GitHub")
@@ -268,5 +201,251 @@ func TestMaintainerLinksVolunteerLogin(t *testing.T) {
 	}
 	if w := do("GET", "/api/jobs/j-linked", visitor, admin, ""); w.Code != 200 {
 		t.Errorf("a Maintainer reads the forgotten Mac's job: %d, want 200", w.Code)
+	}
+}
+
+// linkLab is a labd under --tailscale with one Maintainer, ada, and two
+// people on the tailnet: visitor@github and other@github.
+type linkLab struct {
+	t      *testing.T
+	s      *Server
+	h      http.Handler
+	cancel context.CancelFunc
+}
+
+const (
+	visitorAt = "100.64.0.2:40000"
+	otherAt   = "100.64.0.4:40000"
+	adminTok  = "adm_secret"
+)
+
+func newLinkLab(t *testing.T, dir string) *linkLab {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	peers := map[string]*TailnetPeer{
+		"100.64.0.2": {Login: "Visitor@github", Node: "laptop"},
+		"100.64.0.4": {Login: "other@github", Node: "phone"},
+	}
+	whois := func(_ context.Context, ip string) (*TailnetPeer, error) {
+		if p := peers[ip]; p != nil {
+			return p, nil
+		}
+		return nil, fmt.Errorf("no match for IP")
+	}
+	s, err := New(ctx, Config{DataDir: dir, FirstMaintainer: "ada", FirstMaintainerToken: adminTok, Tailscale: true, WhoIs: whois},
+		log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &linkLab{t: t, s: s, h: s.Handler(), cancel: cancel}
+}
+
+// stop ends this labd, as a restart would.
+func (l *linkLab) stop() {
+	l.cancel()
+	if err := l.s.store.db.Close(); err != nil {
+		l.t.Fatal(err)
+	}
+}
+
+func (l *linkLab) do(method, path, remote, token, body string) *httptest.ResponseRecorder {
+	r := httptest.NewRequest(method, labdAt+path, strings.NewReader(body))
+	r.RemoteAddr = remote
+	if token != "" {
+		r.Header.Set("Authorization", "Bearer "+token)
+	}
+	w := httptest.NewRecorder()
+	l.h.ServeHTTP(w, r)
+	return w
+}
+
+func (l *linkLab) enroll(token string) {
+	l.t.Helper()
+	if w := l.do("POST", "/api/agent/enroll", otherAt, "", enrollJSON(token)); w.Code != 200 {
+		l.t.Fatalf("enroll: %d %s", w.Code, w.Body)
+	}
+}
+
+// tokenFor asks for an enrollment token as the Maintainer.
+func (l *linkLab) tokenFor(body string) *httptest.ResponseRecorder {
+	return l.do("POST", "/api/enroll-tokens", visitorAt, adminTok, body)
+}
+
+// linkedToken is a Maintainer's token for a Volunteer's Mac called name,
+// linked to login ("" for none).
+func (l *linkLab) linkedToken(name, login string) string {
+	l.t.Helper()
+	var resp api.EnrollTokenResponse
+	w := l.tokenFor(`{"name":"` + name + `","volunteer_name":"Visitor","contact":"v@example.org","volunteer_login":"` + login + `"}`)
+	if json.Unmarshal(w.Body.Bytes(), &resp); w.Code != 200 {
+		l.t.Fatalf("token for %s: %d %s", name, w.Code, w.Body)
+	}
+	return resp.Token
+}
+
+// maintainerMac enrolls a Volunteer's Mac with linkedToken, with one done
+// job, j-<name>.
+func (l *linkLab) maintainerMac(name, login string) {
+	l.t.Helper()
+	l.enroll(l.linkedToken(name, login))
+	l.s.store.saveJob(&api.Job{ID: "j-" + name, Spec: api.JobSpec{Device: name}, DeviceID: l.s.dev(name).d.ID, State: api.JobDone, Created: l.s.now()})
+}
+
+func (l *linkLab) patch(remote, token, name, body string) *httptest.ResponseRecorder {
+	return l.do("PATCH", "/api/devices/"+name, remote, token, body)
+}
+
+func (l *linkLab) names(remote string) (out []string) {
+	var ds []api.Device
+	json.Unmarshal(l.do("GET", "/api/devices", remote, "", "").Body.Bytes(), &ds)
+	for _, d := range ds {
+		out = append(out, d.Name)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// seesMac is whether the person at remote sees the Mac called name: in the
+// list, by name, and its job j-<name>.
+func (l *linkLab) seesMac(remote, name string) bool {
+	l.t.Helper()
+	dev, job := l.do("GET", "/api/devices/"+name, remote, "", ""), l.do("GET", "/api/jobs/j-"+name, remote, "", "")
+	if (dev.Code == 200) != (job.Code == 200) {
+		l.t.Errorf("%s: the Mac answers %d, its job %d", name, dev.Code, job.Code)
+	}
+	return dev.Code == 200 && slices.Contains(l.names(remote), name)
+}
+
+// A person a Maintainer unlinks while they wait on a job of that Mac gets
+// nothing more of it: a wait lasts up to an hour, past the scope check
+// that let it in.
+func TestUnlinkEndsAWait(t *testing.T) {
+	l := newLinkLab(t, t.TempDir())
+	l.maintainerMac("linked", "visitor@github")
+	j, _ := l.s.store.job("j-linked")
+	j.State = api.JobTesting
+	l.s.store.saveJob(j)
+
+	got := make(chan *httptest.ResponseRecorder, 1)
+	go func() { got <- l.do("GET", "/api/jobs/j-linked/wait?timeout=60", visitorAt, "", "") }()
+	time.Sleep(1200 * time.Millisecond) // past jobInScope, and a couple of polls
+	select {
+	case w := <-got:
+		t.Fatalf("the wait ended before the job did: %d %s", w.Code, w.Body)
+	default:
+	}
+	if w := l.patch(visitorAt, adminTok, "linked", `{"volunteer_login":""}`); w.Code != 200 {
+		t.Fatalf("unlink: %d %s", w.Code, w.Body)
+	}
+	j.State, j.Summary = api.JobDone, "secret result"
+	l.s.store.saveJob(j)
+	select {
+	case w := <-got:
+		if w.Code != 404 || strings.Contains(w.Body.String(), "secret result") {
+			t.Errorf("an unlinked person's wait answered %d %s, want 404", w.Code, w.Body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the wait didn't end")
+	}
+}
+
+// A linked person sees their Mac, but may not run lab exec on it or lease
+// it: those are Maintainers', as on a Mac they volunteered.
+func TestLinkedPersonRunsNothing(t *testing.T) {
+	l := newLinkLab(t, t.TempDir())
+	l.maintainerMac("linked", "visitor@github")
+	v := l.s.dev("linked")
+	v.mu.Lock()
+	v.d.AccessLevel = api.AccessFull
+	v.mu.Unlock()
+	for _, c := range []struct{ path, body string }{
+		{"/api/devices/linked/exec", `{"argv":["id"]}`},
+		{"/api/devices/linked/lease", `{"holder":"visitor","ttl_sec":60}`},
+	} {
+		if w := l.do("POST", c.path, visitorAt, "", c.body); w.Code != 403 {
+			t.Errorf("the linked person: POST %s got %d %s, want 403", c.path, w.Code, w.Body)
+		}
+	}
+	visitor := caller{login: "visitor@github"}
+	for _, a := range []action{actExec, actLease, actMesa, actRecovery} {
+		if err := l.s.mayDo(visitor, v, a); err == nil || errors.Is(err, errNotSeen) {
+			t.Errorf("the linked person asks for %s: %v, want a refusal for a Mac they see", a.what, err)
+		}
+	}
+}
+
+// The stream carries a linked Mac's events to its person while it is
+// linked, and none once a Maintainer unlinks it.
+func TestUnlinkStopsTheStream(t *testing.T) {
+	l := newLinkLab(t, t.TempDir())
+	l.maintainerMac("linked", "visitor@github")
+	l.maintainerMac("kept", "visitor@github")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.RemoteAddr = visitorAt
+		l.h.ServeHTTP(w, r)
+	}))
+	defer srv.Close()
+	res, err := http.Get(srv.URL + "/api/stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	rd := bufio.NewReader(res.Body)
+	if s, err := rd.ReadString('\n'); err != nil || !strings.HasPrefix(s, ": maclab stream") {
+		t.Fatalf("stream opened with %q, %v", s, err)
+	}
+	readUntil := func(marker string) string {
+		t.Helper()
+		var got strings.Builder
+		for !strings.Contains(got.String(), marker) {
+			s, err := rd.ReadString('\n')
+			if err != nil {
+				t.Fatalf("stream: %v after %q", err, got.String())
+			}
+			got.WriteString(s)
+		}
+		return got.String()
+	}
+	l.s.hub.publish("job", "linked", map[string]any{"device": "linked", "id": "while-linked"})
+	l.s.hub.publish("job", "kept", map[string]any{"device": "kept", "id": "mark-1"})
+	if got := readUntil("mark-1"); !strings.Contains(got, "while-linked") {
+		t.Errorf("the linked person's stream missed their Mac's event:\n%s", got)
+	}
+	if w := l.patch(visitorAt, adminTok, "linked", `{"volunteer_login":""}`); w.Code != 200 {
+		t.Fatalf("unlink: %d %s", w.Code, w.Body)
+	}
+	l.s.hub.publish("job", "linked", map[string]any{"device": "linked", "id": "after-unlink"})
+	l.s.hub.publish("job", "kept", map[string]any{"device": "kept", "id": "mark-2"})
+	if got := readUntil("mark-2"); strings.Contains(got, "after-unlink") || strings.Contains(got, `"linked"`) {
+		t.Errorf("the stream carried an unlinked Mac's events:\n%s", got)
+	}
+}
+
+// A link outlives a labd restart: on an enrolled Mac, and on a token made
+// before the restart and used after it.
+func TestLinkSurvivesARestart(t *testing.T) {
+	dir := t.TempDir()
+	l := newLinkLab(t, dir)
+	l.maintainerMac("later", "")
+	if w := l.patch(visitorAt, adminTok, "later", `{"volunteer_login":"visitor@github"}`); w.Code != 200 {
+		t.Fatalf("link: %d %s", w.Code, w.Body)
+	}
+	tok := l.linkedToken("pending", "visitor@github")
+	l.stop()
+
+	l = newLinkLab(t, dir)
+	if got := l.s.dev("later").d.LinkedLogin; got != "visitor@github" {
+		t.Errorf("after a restart later is linked to %q", got)
+	}
+	l.enroll(tok)
+	if got := l.s.dev("pending").d.LinkedLogin; got != "visitor@github" {
+		t.Errorf("a token made before the restart linked pending to %q", got)
+	}
+	if got := l.names(visitorAt); !slices.Equal(got, []string{"later", "pending"}) {
+		t.Errorf("after a restart the visitor lists %q", got)
+	}
+	if got := l.names(otherAt); len(got) != 0 {
+		t.Errorf("after a restart the other person lists %q", got)
 	}
 }

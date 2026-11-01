@@ -430,7 +430,14 @@ login sees the Mac's jobs and screens. Only a Volunteer's Mac is linked, and
 not one a person volunteered with `./volunteer`, which is theirs already.
 Linked Macs don't count toward the person's own limit of 3 volunteered Macs:
 that limit keeps one person from filling the lab, and a Maintainer chose to
-let these in. Forgetting a Mac drops its link with it. labd gives the Mac its own
+let these in. Forgetting a Mac drops its link with it. A link shows the
+person everything of the Mac's current enrollment, not only what happens
+after it: linking the Mac to a different person shows them its saved
+screens, its job history and their files, and the Volunteer's name, contact
+and ntfy topic on its record. Link only the Volunteer's own login; to hand a
+Mac to someone else, `lab forget` it and enroll it again. Unlinking, and any
+long wait (`/api/jobs/{id}/wait`) or live journal read under way, take
+effect at once. labd gives the Mac its own
 unguessable ntfy topic when it enrolls (on the server `--ntfy` posts to), and
 `setup` prints it with a QR code to subscribe from a phone. On a Volunteer's
 Mac `setup` refuses `--autologin` and `--stay-awake`. Setup and every
