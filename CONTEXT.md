@@ -75,6 +75,10 @@ A Volunteer opening their Mac's Availability window by hand, from now until a ti
 What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs: no exec and no Maintainer's script) or Full (everything a lab-owned Mac allows). Lowering it stops at once whatever it no longer allows.
 _Avoid_: Permissions, trust level
 
+**Lease**:
+A Maintainer holding one Mac for a named holder (`lab lease`) until it runs out or they release it: only that holder's jobs, submitted with that Maintainer's token, run on it. A job already running finishes first; jobs others queued before it wait aside and run once it ends. Only the Maintainer who took it renews, releases or resets the Mac under it. On a Volunteer's Mac it lasts only inside the Availability window, and lowering the Access level ends it.
+_Avoid_: Reservation, lock
+
 **Audit log**:
 The record, per Volunteer Mac, of every Maintainer action on it (who, what, when, which job), kept on the Mac itself and written before each action, which its Volunteer can read. labd keeps a copy.
 
