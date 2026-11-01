@@ -4,6 +4,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -37,9 +38,11 @@ const usage = `lab: run kernels and tests on Omarchy Macs
   lab enroll <name> [--label "MacBook Air M1, left desk"] [--model laptop|desktop]
              [--volunteer "<name>" --contact <contact>]   a Volunteer's Mac, not a Lab-owned one; prints the one-liner
                                       the Mac's owner runs to join it (--revoke: revoke its unused token)
+             [--login <tailnet login>]                links it to the Volunteer's login, so they see it in labd
   lab remove <mac>                    end a Mac's enrollment: its device secret stops working at once, and lab-agent
                                       removes the lab from the Mac at its next check-in (a Volunteer is told)
   lab device <name> [--label ..] [--model ..] [--oob-url http://m3:7780 --oob-token ..] [--no-oob]
+             [--login <tailnet login> | --unlink]   link a Volunteer's Mac to their login, or unlink it
   lab baseline <device>               prove the one-shot boot works; required once per Mac
   lab build <github-url> --device <mac> | --config <file>   build a kernel from a repo, branch, commit or PR URL (reused if built before)
   lab package <recipe-dir> [--commit <github-url>] [--pkgrel 11.14] [-o dir]
@@ -162,9 +165,10 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		model := fs.String("model", api.ModelLaptop, "laptop or desktop")
 		volunteer := fs.String("volunteer", "", "the Volunteer whose Mac this is (with --contact); none makes a Lab-owned Mac")
 		contact := fs.String("contact", "", "how to reach the Volunteer")
+		login := fs.String("login", "", "the Volunteer's tailnet login (with --volunteer), so they see their Mac in labd")
 		revoke := fs.Bool("revoke", false, "revoke the enrollment tokens for <name>, used or not, instead of making one")
 		pos := parse(fs, args)
-		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact>] | lab enroll <name> --revoke`); err != nil {
+		if err := need(pos, 1, `lab enroll <name> [--volunteer "<name>" --contact <contact> [--login <tailnet login>]] | lab enroll <name> --revoke`); err != nil {
 			return err
 		}
 		if *revoke {
@@ -178,7 +182,10 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		if (strings.TrimSpace(*volunteer) == "") != (strings.TrimSpace(*contact) == "") {
 			return fmt.Errorf("a Volunteer's Mac needs both --volunteer and --contact")
 		}
-		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model, VolunteerName: *volunteer, Contact: *contact})
+		if *login != "" && strings.TrimSpace(*volunteer) == "" {
+			return fmt.Errorf("--login is a Volunteer's: give --volunteer and --contact too")
+		}
+		t, err := c.EnrollToken(ctx, api.EnrollTokenRequest{Name: pos[0], Label: *label, Model: *model, VolunteerName: *volunteer, Contact: *contact, VolunteerLogin: *login})
 		if err != nil {
 			return err
 		}
@@ -201,6 +208,8 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		oobURL := fs.String("oob-url", "", "oobd URL for the controller host attached to this Mac")
 		oobToken := fs.String("oob-token", "", "")
 		noOOB := fs.Bool("no-oob", false, "detach the out-of-band controller")
+		login := fs.String("login", "", "link a Volunteer's Mac to their tailnet login, so they see it in labd")
+		unlink := fs.Bool("unlink", false, "unlink a Volunteer's Mac from the login linked to it")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab device <name> [flags]"); err != nil {
 			return err
@@ -212,8 +221,18 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 				p.Label = label
 			case "model":
 				p.Model = model
+			case "login":
+				p.VolunteerLogin = login
 			}
 		})
+		if *unlink {
+			if p.VolunteerLogin != nil {
+				return fmt.Errorf("give --login or --unlink, not both")
+			}
+			p.VolunteerLogin = new(string)
+		} else if p.VolunteerLogin != nil && *p.VolunteerLogin == "" {
+			return fmt.Errorf("--login needs a tailnet login; --unlink unlinks")
+		}
 		if *oobURL != "" {
 			p.OOB = &api.OOBConfig{Driver: "oobd", URL: *oobURL, Token: *oobToken}
 		}
@@ -1055,6 +1074,9 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 	fmt.Printf("  model:       %s, %s\n", d.Facts.DTModel, orDash(d.Label, "no label"))
 	if d.IsVolunteer() {
 		fmt.Printf("  kind:        Volunteer's Mac: %s, %s\n", d.VolunteerName, d.Contact)
+		if by := cmp.Or(d.VolunteeredBy, d.LinkedLogin); by != "" {
+			fmt.Printf("  seen by:     %s on the tailnet\n", by)
+		}
 	} else {
 		fmt.Printf("  kind:        Lab-owned Mac\n")
 	}
