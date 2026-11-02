@@ -345,7 +345,8 @@ every Limine update enroll one; set it to `no` there, then run
 `sudo limine enroll-config --reset <binary>` for each enrolled binary.
 `lab-agent preflight` reports the same as problems, which hold jobs back, and
 warns about a journal that isn't kept across reboots: that loses the logs of a
-lab boot that fails, but doesn't hold jobs back.
+lab boot that fails, but doesn't hold jobs back. For an Omarchy Mac whose disk is
+encrypted, see [docs/encrypted-macs.md](docs/encrypted-macs.md).
 
 Then run the baseline:
 
