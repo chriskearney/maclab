@@ -543,7 +543,8 @@ func (u *uninstaller) grub(g *grubLayout) error {
 	if err := u.unhook(g); err != nil {
 		return err
 	}
-	for _, p := range []string{filepath.Join(g.Dir, maclabCfg), filepath.Join(g.Dir, maclabCfg+".tmp"), g.EnvFile, u.path(defaultStage)} {
+	tmps, _ := filepath.Glob(filepath.Join(g.Dir, maclabCfg+".tmp*")) // writeAtomic's, if one was cut short
+	for _, p := range append([]string{filepath.Join(g.Dir, maclabCfg), g.EnvFile, u.path(defaultStage)}, tmps...) {
 		if err := u.remove(p, ""); err != nil {
 			return err
 		}

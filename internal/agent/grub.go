@@ -317,10 +317,27 @@ func (g *grubLayout) writeEntries() error {
 	return writeAtomic(filepath.Join(g.Dir, maclabCfg), []byte(b.String()))
 }
 
+// writeAtomic writes data to path by renaming a temporary file of its own
+// over it, so two writers of one file at once (lab-agent and its early unit,
+// both writing boot.json) never share a temporary file.
 func writeAtomic(path string, data []byte) error {
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+	f, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmp := f.Name()
+	_, err = f.Write(data)
+	if err == nil {
+		err = f.Chmod(0o644)
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }

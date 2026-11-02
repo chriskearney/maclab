@@ -13,8 +13,8 @@ import (
 // not just labd's default (specs/labboot: bug-1b269f5-wait-twice-boot).
 func TestNoContactWaitCoversTheAgentsDeadline(t *testing.T) {
 	for b := time.Minute; b <= 12*time.Minute; b += 30 * time.Second {
-		r := &jobRun{boot: b}
-		if got, need := r.noContactWait(), agent.NoContactDeadline(b)+labClockSkew; got < need {
+		r := &jobRun{s: &Server{cfg: Config{LabClockSkew: agent.NoContactMargin}}, boot: b}
+		if got, need := r.noContactWait(), agent.NoContactDeadline(b)+agent.NoContactMargin; got < need {
 			t.Errorf("boot timeout %s: labd waits %s past it, but the deadline and its margin take %s", b, got, need)
 		}
 	}

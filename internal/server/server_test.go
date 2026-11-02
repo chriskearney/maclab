@@ -159,9 +159,6 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		serialStall = 3 * time.Second
 		quietGrace = 3 * time.Second
 		quickReboot = 3 * time.Second
-		rebootGrace = 2 * time.Second
-		labClockSkew = time.Second
-		lostLabdReset = 0 // the harness's lost Macs are asked for hands at once, as before
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -183,6 +180,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 	logger := log.New(logw, "labd: ", log.Ltime|log.Lmicroseconds)
 	cfg := Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
 		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
+		RebootGrace: 2 * time.Second, LabClockSkew: time.Second, WatchdogIdleReset: 2 * time.Second,
 		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}
 	// labd's address is known before it starts, for its public URL.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -1706,7 +1704,9 @@ func TestNetworkBackOnTheSameBootIsLostContact(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
 	l.sim.SuspendFor = 8 * time.Second // past quietGrace (3s), unannounced
-	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "quiet-suspend-wifi", Builtin: "x"}}})
+	// labd waits for the lost test's budget too: keep it seconds long
+	l.s.cfg.TestGrace = 2 * time.Second
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "quiet-suspend-wifi", Builtin: "x", TimeoutSec: 10}}})
 	if err != nil {
 		t.Fatal(err)
 	}
