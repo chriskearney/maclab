@@ -1080,7 +1080,6 @@ NoHung        == outcome /= "hung"
 NoCrash       == outcome /= "crashed_or_hung"
 NoCancel      == outcome /= "canceled"
 NoInfra       == outcome /= "infra_error"
-NoNeedsHands  == devState /= "needs_hands"
 NoAgentFailed == armVerdict /= "agent_failed"
 NoNeverLeft   == ~(neverLeft /\ outcome = "infra_error")
 NoRepair      == ~(blockDropped /\ outcome = "pass")

@@ -5,6 +5,7 @@ TLA+ specifications of the parts of maclab where the bugs have been in how sever
 ```sh
 make spec                                           # fetches the pinned tla2tools.jar, then checks every model
 specs/labboot/check.sh models/current.cfg           # one model (set TLA2TOOLS to the jar)
+specs/labboot/check.sh bug-6b6eae6-tests-on-any-boot # one bug replay, by its name in models/bugs.txt
 ```
 
 `make spec` needs `java` (17 or later). CI runs it in the `spec` job of `.github/workflows/test.yml`.
@@ -32,7 +33,7 @@ The properties, named as in the module:
 Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, and `check.sh` fails the build otherwise:
 
 - **`current*.cfg`**: today's design, with and without an out-of-band hard reset, and with failing arms and cancels, under every fault it is meant to survive. They must pass. Their `\* witnesses:` line names outcomes TLC must show are reachable (a pass, a lost_contact, a needs_hands, a snapshot sync repaired by the re-arm...), so a change to the spec can't make the properties hold by cutting off the runs they are about.
-- **`bug-*.cfg`**: a fixed bug, replayed by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
+- **`bugs.txt`**: one line per fixed bug, which `check.sh` turns into a `bug-*` model replaying it by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
 - **`open-*.cfg`**: what today's code still gets wrong, as far as the model knows. Each must fail. When one is fixed, its fix goes into the spec, the model is expected to pass, and it moves into `current*.cfg`'s faults or properties.
 
 The models began as nine open findings (the first TLC run, each read against the code, five by reviewers trying to refute them). Fixed ones are replayed as bugs; one is accepted:

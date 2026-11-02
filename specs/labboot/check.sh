@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Model-checks LabBoot.tla with every model in models/ and fails unless each
 # ends as its "\* expect:" line says: "pass", or the name of the invariant
-# TLC must find violated. A bug-* model replays a fixed bug, so it is checked
-# a second time with Bugs = {}, which must pass: the fix is what makes it hold.
-# A model's "\* witnesses:" line names invariants TLC must find violated, one
-# run each: states the model has to reach for its passing to mean anything.
+# TLC must find violated. A bug-* model, one per line of models/bugs.txt,
+# replays a fixed bug, so it is checked a second time with Bugs = {}, which
+# must pass: the fix is what makes it hold. A model's "\* witnesses:" line
+# names invariants TLC must find violated, one run each: states the model has
+# to reach for its passing to mean anything.
 #
-#   specs/labboot/check.sh [models/<name>.cfg ...]
+#   specs/labboot/check.sh [models/<name>.cfg | bug-<name> ...]
 #
 # TLA2TOOLS names tla2tools.jar (make spec fetches the pinned one).
 set -euo pipefail
@@ -18,8 +19,23 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
 cd "$here"
-models=("$@")
-[ ${#models[@]} -gt 0 ] || models=(models/*.cfg)
+
+# bugs.txt's lines become models: name | expect | BootTimeout | OOB | Faults | Bugs | what
+trim() { sed 's/^ *//; s/ *$//' <<<"$1"; }
+while IFS='|' read -r name expect boot oob faults bugs what; do
+	name=$(trim "$name")
+	[ -n "$name" ] && [ "${name:0:1}" != "#" ] || continue
+	printf '%s\n' "\\* $(trim "$what")" "\\* expect: $(trim "$expect")" "SPECIFICATION Spec" "CONSTANTS" \
+		"    BootTimeout = $(trim "$boot")" "    BootLen = 2" "    TestLen = 2" "    MaxTime = 70" "    Skew = 1" \
+		"    OOB = $(trim "$oob")" "    Faults = {$(trim "$faults")}" "    Bugs = {$(trim "$bugs")}" \
+		"INVARIANTS" "    TypeOK" "    $(trim "$expect")" >"$tmp/$name.cfg"
+done <models/bugs.txt
+
+models=()
+for m in "$@"; do
+	if [ -e "$tmp/$m.cfg" ]; then models+=("$tmp/$m.cfg"); else models+=("$m"); fi
+done
+[ ${#models[@]} -gt 0 ] || models=(models/*.cfg "$tmp"/bug-*.cfg)
 
 # tlc <cfg> <expect> <label>
 tlc() {
