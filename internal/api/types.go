@@ -506,6 +506,9 @@ const (
 	// DeadlineAccessLowered is the Volunteer lowering the Access level below
 	// what the Lab boot's job runs.
 	DeadlineAccessLowered Deadline = "access_lowered"
+	// DeadlineLostLabd is lab-agent's watchdog resetting a Lab boot that has
+	// heard nothing from labd for watchdogIdle outside a test.
+	DeadlineLostLabd Deadline = "lost_labd"
 )
 
 func (d Deadline) String() string {

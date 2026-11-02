@@ -324,10 +324,25 @@ func (a *Agent) holdWatchdog(ctx context.Context) {
 func (a *Agent) feedWatchdog(ctx context.Context, w io.Writer) {
 	d := newLabWatchdog(w, a.now)
 	d.logf = a.log.Printf
+	d.onLostLabd = a.noteLostLabd
 	a.armWatchdog(d)
 	go d.feed(ctx)
 	go d.watchPID1(ctx, a.sys.PingInit)
 	a.log.Printf("test boot: holding the hardware watchdog, fed while PID 1 answers and each step is within its budget")
+}
+
+// noteLostLabd records, where the early unit records its deadlines, that the
+// watchdog is about to reset this Lab boot for having lost labd: collect_lost
+// then tells labd lost_contact, not a kernel that hung.
+func (a *Agent) noteLostLabd() {
+	bootID, _, _ := a.sys.Identity()
+	a.log.Printf("nothing from labd for %s: letting the watchdog reset this Lab boot", watchdogIdle)
+	seen := labBootSeen{BootID: bootID, Deadline: api.DeadlineLostLabd}
+	if err := writeJSONAtomic(filepath.Join(a.labBootDir(), labBootSeenFile), seen); err != nil {
+		a.log.Printf("Lab boot %s: %v", bootID, err)
+		return
+	}
+	syncDisks()
 }
 
 // armWatchdog has budgets fed from d from now on. A test already running,
