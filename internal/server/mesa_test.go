@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -399,7 +400,7 @@ func TestMesaBootHealthAlwaysPrecedesEveryGPUPhase(t *testing.T) {
 			if n != wantHealth {
 				t.Fatal("caller health tests omitted/duplicated", got)
 			}
-			if supplied != nil && got[0] != custom {
+			if supplied != nil && !reflect.DeepEqual(got[0], custom) {
 				t.Fatal("caller health settings lost", got)
 			}
 			want := 120

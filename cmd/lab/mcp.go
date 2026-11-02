@@ -72,6 +72,7 @@ func serveMCP(ctx context.Context) error {
 		Tests             []string      `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal, suspend-devices"`
 		GUITests          []string      `json:"gui_tests,omitempty" jsonschema:"builtin tests to run inside the GUI user's Hyprland session: gui-smoke, gui-terminal"`
 		Scripts           []string      `json:"scripts,omitempty" jsonschema:"local paths of shell scripts to run as tests (as root); write outputs to $MACLAB_OUT"`
+		Payload           []string      `json:"payload,omitempty" jsonschema:"files for the scripts to read from $MACLAB_IN, each NAME=PATH (or NAME=sha256 of an uploaded file); given to every script, not to gui_scripts"`
 		GUIScripts        []string      `json:"gui_scripts,omitempty" jsonschema:"local paths of shell scripts to run in the Wayland session"`
 		BootTimeoutSec    int           `json:"boot_timeout_sec,omitempty"`
 		ScriptTimeoutSec  int           `json:"script_timeout_sec,omitempty" jsonschema:"time each script test may run (default 300, at most 14400), e.g. 5400 for a hands-on session that waits for a person"`
@@ -117,6 +118,13 @@ func serveMCP(ctx context.Context) error {
 					}
 					spec.Tests = append(spec.Tests, api.TestSpec{Name: strings.TrimSuffix(filepath.Base(p), filepath.Ext(p)), Script: sha, GUI: i == 1, TimeoutSec: min(a.ScriptTimeoutSec, 14400)})
 				}
+			}
+			files, err := payloadFiles(ctx, c, a.Payload)
+			if err != nil {
+				return nil, nil, err
+			}
+			if spec.Tests, err = withPayload(spec.Tests, files); err != nil {
+				return nil, nil, err
 			}
 			return submitAndWait(ctx, c, spec, a.WaitSec, text)
 		})

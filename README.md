@@ -85,6 +85,11 @@ AI agents get the same operations over MCP (`lab mcp`).
    tested unattended: Apple Silicon's RTC has no wake alarm, so only a key
    press wakes the Mac (a reset ends the boot). labd warns when a test named
    `suspend-*` needs someone there.
+   A `--script` test can bring files with it: `--payload NAME=FILE` (repeatable,
+   at most 16; `NAME=SHA256` reuses an upload) puts each file in `$MACLAB_IN`
+   under NAME, executable, before the script runs. A module, a firmware blob or
+   a binary needs no download inside the script this way, and the Audit log
+   names each file with its hash. `--gui-script` takes none.
 5. **Collect.** The journal, kernel log and serial console are saved.
    Warnings and errors that aren't in the Mac's baseline are listed as
    `new_error_lines`.
