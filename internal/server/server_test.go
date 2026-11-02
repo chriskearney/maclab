@@ -161,6 +161,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		quickReboot = 3 * time.Second
 		rebootGrace = 2 * time.Second
 		labClockSkew = time.Second
+		lostLabdReset = 0 // the harness's lost Macs are asked for hands at once, as before
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())

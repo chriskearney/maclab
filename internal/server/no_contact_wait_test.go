@@ -19,3 +19,21 @@ func TestNoContactWaitCoversTheAgentsDeadline(t *testing.T) {
 		}
 	}
 }
+
+// A Lab boot labd lost during its test, on a Mac with no hard reset, gets
+// until lab-agent's watchdog has reset it and a boot timeout more before a
+// person is asked to power cycle it (specs/labboot: open-hands-before-watchdog).
+func TestLostLabBootWithNoHardResetGetsItsWatchdog(t *testing.T) {
+	boot, quiet := 6*time.Minute, 3*time.Minute // labd's defaults
+	lastSeen := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)
+	lost := lastSeen.Add(quiet) // callNote gives up on a silent Mac
+	timeout := max(boot-quiet, time.Minute)
+	self := lostSelfRecovery(false, lastSeen, lost, boot, timeout)
+	if waited, need := lost.Add(timeout+self), lastSeen.Add(agent.LostLabdReset+boot); waited.Before(need) {
+		t.Errorf("labd gives up at %s after the last check-in; the watchdog and the known-good boot take %s",
+			waited.Sub(lastSeen), need.Sub(lastSeen))
+	}
+	if self := lostSelfRecovery(true, lastSeen, lost, boot, timeout); self != 0 {
+		t.Errorf("with a hard reset labd waits %s more; want none", self)
+	}
+}

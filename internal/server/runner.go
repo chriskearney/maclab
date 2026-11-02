@@ -976,6 +976,24 @@ func (r *jobRun) addRecovery(steps []string) {
 	}
 }
 
+// lostSelfRecovery is how much longer than timeout labd lets a Lab boot it
+// lost come back by itself before the recovery ladder. With a hard reset,
+// none: that is the next rung. Without one the next rung is a person, so labd
+// waits until lab-agent's watchdog has reset the boot (lostLabdReset after
+// the last sign of labd) and a boot timeout more for the known-good boot: a
+// person is asked only for a Mac that can't come back by itself (CONTEXT.md,
+// Needs hands).
+func lostSelfRecovery(hasOOB bool, lastSeen, now time.Time, boot, timeout time.Duration) time.Duration {
+	if hasOOB {
+		return 0
+	}
+	return max(0, lastSeen.Add(lostLabdReset).Sub(now)+boot-timeout)
+}
+
+// lostLabdReset is lab-agent's watchdog reset after the last sign of labd (a
+// knob, for the harness's short boots).
+var lostLabdReset = agent.LostLabdReset
+
 // kernelFailedSince is whether labd saw a fatal kernel event since t0.
 func (r *jobRun) kernelFailedSince(t0 time.Time) bool {
 	for _, e := range r.v.eventsSince(t0) {
@@ -1035,7 +1053,12 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	r.ev("lost the Mac %s; waiting for it to come back", during)
 	lost := r.s.now()
 	// A hang has already had quietGrace of silence to show itself.
-	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, max(r.boot-r.s.quietGrace(), time.Minute), 0)
+	timeout := max(r.boot-r.s.quietGrace(), time.Minute)
+	r.v.mu.Lock()
+	hasOOB, lastSeen := r.v.effectiveOOBLocked() != nil, r.v.d.LastSeen
+	r.v.mu.Unlock()
+	self := lostSelfRecovery(hasOOB, lastSeen, r.s.now(), r.boot, timeout)
+	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, self)
 	r.addRecovery(steps)
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {

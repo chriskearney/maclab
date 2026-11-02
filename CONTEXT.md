@@ -42,7 +42,7 @@ The time a Lab boot ends whatever happens, even in contact with labd: the job's 
 _Avoid_: Job timeout
 
 **Needs hands**:
-The state of a Mac that has to be power cycled by a person because it can't come back by itself. A Lab-owned Mac reaches it after the boot timeout and its recovery ladder; a Volunteer's Mac only after the Hard ceiling plus one boot timeout with no check-in, and its Volunteer is asked on the Mac's own topic.
+The state of a Mac that has to be power cycled by a person because it can't come back by itself. A Lab-owned Mac reaches it after the boot timeout and its recovery ladder, and one with no hard reset only once lab-agent's watchdog would have rebooted it too; a Volunteer's Mac only after the Hard ceiling plus one boot timeout with no check-in, and its Volunteer is asked on the Mac's own topic.
 _Avoid_: Stuck, bricked
 
 **Lost boot**:

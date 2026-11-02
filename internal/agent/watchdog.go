@@ -62,6 +62,9 @@ const (
 	// ending, an upload retrying while labd is out of reach), so a test boot
 	// that lost labd is reset 10 minutes after it last heard from it.
 	watchdogIdle = 10 * time.Minute
+	// LostLabdReset is how long after its last sign of labd, outside a test,
+	// the watchdog resets a Lab boot: feeding stops, the hardware fires.
+	LostLabdReset = watchdogIdle + watchdogTimeout
 	// watchdogMargin is added to a test's budget, to kill it and report. A
 	// test that overruns its budget has about a minute more before the
 	// hardware resets the Mac, so a hung test is reset within 80 s of its
