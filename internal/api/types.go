@@ -254,6 +254,14 @@ type Report struct {
 	Audit []AuditEntry `json:"audit,omitempty"`
 }
 
+// ReportReply is labd's answer to a Report (an older labd answers "ok").
+type ReportReply struct {
+	// Forgotten are results of commands labd gave up waiting for (a timeout,
+	// a cancel): what was to follow their acknowledgement, a Lab boot's
+	// reboot, must not happen.
+	Forgotten []string `json:"forgotten,omitempty"`
+}
+
 // Quiet is the agent saying, while it can, that the Mac is about to go off
 // the network on boot BootID for up to Seconds from now (suspend-devices,
 // whose suspend takes Wi-Fi down). labd waits that out on that boot before

@@ -121,11 +121,12 @@ type Agent struct {
 	factsRevision     uint64
 	sentFactsRevision uint64
 	lastFacts         time.Time
-	after             []afterAck // actions to run once pending results reach labd
-	contacted         string     // the Lab boot whose contact with labd is on record
-	kind              string     // the Mac's kind, as labd's check-ins say
-	held              bool       // a job or lease holds the Mac, as labd's latest answer says
-	auditSent         int64      // how much of the Audit log labd's copy holds, in bytes
+	after             []afterAck      // actions to run once pending results reach labd
+	forgotten         map[string]bool // after's commands labd said it gave up on
+	contacted         string          // the Lab boot whose contact with labd is on record
+	kind              string          // the Mac's kind, as labd's check-ins say
+	held              bool            // a job or lease holds the Mac, as labd's latest answer says
+	auditSent         int64           // how much of the Audit log labd's copy holds, in bytes
 	awake             awakeHold
 	wake              chan struct{}
 	life              context.Context    // commands outlive the poll that delivered them
@@ -158,15 +159,16 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 		logger.Print(legacyPlainWarning(cfg.Server))
 	}
 	return &Agent{
-		cfg:     cfg,
-		sys:     sys,
-		rt:      rt,
-		http:    labhttp.Client(rt, cfg.httpTimeout()),
-		log:     logger,
-		seen:    map[string]bool{},
-		running: map[string]runningCmd{},
-		wake:    make(chan struct{}, 1),
-		now:     time.Now,
+		cfg:       cfg,
+		sys:       sys,
+		rt:        rt,
+		http:      labhttp.Client(rt, cfg.httpTimeout()),
+		log:       logger,
+		seen:      map[string]bool{},
+		running:   map[string]runningCmd{},
+		forgotten: map[string]bool{},
+		wake:      make(chan struct{}, 1),
+		now:       time.Now,
 	}
 }
 
@@ -588,6 +590,15 @@ func (a *Agent) report(ctx context.Context) error {
 	}
 	a.mu.Unlock()
 	for _, f := range after {
+		a.mu.Lock()
+		gone := a.forgotten[f.id]
+		delete(a.forgotten, f.id)
+		a.mu.Unlock()
+		if gone && f.dropped != nil {
+			a.log.Printf("command %s: labd gave up waiting for it", f.id)
+			f.dropped()
+			continue
+		}
 		f.run()
 	}
 	return nil
@@ -633,7 +644,24 @@ func (a *Agent) checkBeforeReport(rep []api.CommandResult) {
 }
 
 func (a *Agent) post(ctx context.Context, rep api.Report) error {
-	return postJSON(ctx, a.http, a.url("/api/agent/report"), a.cfg.Secret, rep, nil)
+	b, _ := json.Marshal(rep)
+	req, _ := http.NewRequestWithContext(ctx, "POST", a.url("/api/agent/report"), bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	body, err := doBody(a.http, req, a.cfg.Secret)
+	if err != nil {
+		return err
+	}
+	var reply api.ReportReply // an older labd answers "ok"
+	if json.Valid(body) && json.Unmarshal(body, &reply) == nil {
+		a.mu.Lock()
+		for _, id := range reply.Forgotten {
+			if slices.ContainsFunc(a.after, func(f afterAck) bool { return f.id == id }) {
+				a.forgotten[id] = true
+			}
+		}
+		a.mu.Unlock()
+	}
+	return nil
 }
 
 // reported takes the first n results and m events off the queue: labd has
@@ -853,6 +881,9 @@ type afterAck struct {
 	check   func() error
 	checked bool // check passed: it runs once, not on every retried report
 	run     func()
+	// dropped, if set, runs instead of run when labd answers that it gave up
+	// waiting for the command (api.ReportReply.Forgotten).
+	dropped func()
 }
 
 // exec runs one command. The returned afterAck runs only after the result
@@ -1183,7 +1214,14 @@ func (a *Agent) labBootAfterAck(entry string) *afterAck {
 		}
 		return nil
 	}
-	return &afterAck{check: rearm, run: func() {
+	// labd gave up on the arm (its arm timeout, a cancel) before it heard it
+	// worked: no reboot, and nothing left armed for a later one.
+	dropped := func() {
+		if err := a.sys.CancelBootOnce(); err != nil {
+			a.log.Printf("cancelling the Lab boot's one-shot: %v", err)
+		}
+	}
+	return &afterAck{check: rearm, dropped: dropped, run: func() {
 		// Nothing may rewrite limine.conf between the last re-arm and the
 		// firmware reading it: a snapshot sync during shutdown would drop the
 		// block, and labd would blame the test kernel.
@@ -1391,22 +1429,28 @@ func getJSON(ctx context.Context, c *http.Client, u, secret string, out any) err
 }
 
 func doJSON(c *http.Client, req *http.Request, secret string, out any) error {
+	body, err := doBody(c, req, secret)
+	if err == nil && out != nil {
+		return json.Unmarshal(body, out)
+	}
+	return err
+}
+
+// doBody sends req and returns the body of a 200 answer.
+func doBody(c *http.Client, req *http.Request, secret string) ([]byte, error) {
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return &statusError{Code: resp.StatusCode, Header: resp.Header, msg: fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
+		return nil, &statusError{Code: resp.StatusCode, Header: resp.Header, msg: fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
 	}
-	if out != nil {
-		return json.Unmarshal(body, out)
-	}
-	return nil
+	return body, nil
 }
 
 // tooLarge reports whether labd refused a request as too large (413).

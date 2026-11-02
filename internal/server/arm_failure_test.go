@@ -111,3 +111,15 @@ func TestSnapshotSyncsStopBeforeTheLastRearm(t *testing.T) {
 		t.Fatalf("boot-menu operations after a failed reboot: %s", ops)
 	}
 }
+
+// labd answers a result for a command it gave up waiting for as forgotten,
+// and only those: a report retried after its answer was lost is not.
+func TestReportAnswersCommandsLabdGaveUpOn(t *testing.T) {
+	l := newLab(t, false)
+	v := l.s.dev(l.name)
+	v.forget("c-gave-up")
+	got := v.report(api.Report{Results: []api.CommandResult{{ID: "c-gave-up", OK: true}, {ID: "c-unknown", OK: true}}})
+	if len(got) != 1 || got[0] != "c-gave-up" {
+		t.Fatalf("forgotten %v, want [c-gave-up]", got)
+	}
+}
