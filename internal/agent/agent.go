@@ -881,6 +881,11 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, *afterAck, error)
 			return nil, nil, err
 		}
 		if err := a.sys.BootOnce(args.Entry); err != nil {
+			// It may have failed after writing the one-shot: cancel it, as a
+			// failed re-arm does, since labd hears that nothing is armed.
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
 			return nil, nil, err
 		}
 		return nil, a.labBootAfterAck(args.Entry), nil

@@ -472,6 +472,11 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		r.armedBoot = ""
 		return accessCut("before the Lab boot (" + err.Error() + ")")
 	} else if err != nil {
+		if errors.As(err, new(agentError)) {
+			// lab-agent says the arm failed, and cancels the one-shot when
+			// it does: no reboot is coming for restore to wait for.
+			r.armedBoot = ""
+		}
 		return api.OutcomeInfra, "arming the one-shot boot failed: " + err.Error()
 	}
 	if arm.RebootWarningSec > 0 {
