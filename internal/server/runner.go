@@ -1069,6 +1069,11 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 		// failed: a Lab boot that lost its network looks just the same.
 		return api.OutcomeCanceled, "canceled while waiting for the Mac, lost " + during
 	}
+	if neverLeft(steps) && !r.kernelFailedSince(r.bootedAt.Add(-time.Second)) {
+		// Still up on the same boot, and checking in again: it lost its
+		// network for a while, and its kernel never went down.
+		return api.OutcomeLostContact, "labd lost the Mac " + during + ", but it came back on the same boot: its network went, not its kernel"
+	}
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {
 		// Nothing says panic: only how long it took to come back hints at what happened.

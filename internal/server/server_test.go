@@ -1700,6 +1700,23 @@ func TestCancelWhileWaitingForALostMacIsNotTheKernels(t *testing.T) {
 	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
 }
 
+// A Lab boot that is off the network past quietGrace during its test, and
+// then back on the same boot, lost its network, not its kernel.
+func TestNetworkBackOnTheSameBootIsLostContact(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.SuspendFor = 8 * time.Second // past quietGrace (3s), unannounced
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "quiet-suspend-wifi", Builtin: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j = l.wait(j.ID, 2*time.Minute) // lostDuringTest waits at least a minute for a new boot first
+	l.expect(j, api.OutcomeLostContact)
+	if !strings.Contains(j.Summary, "came back on the same boot") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+}
+
 func TestCancelKeepsKernelFailure(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
