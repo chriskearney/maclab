@@ -845,10 +845,6 @@ func (r *jobRun) expectedLength() time.Duration {
 	return d
 }
 
-// noContactWait is how long past its boot timeout a Lab boot gets to come back
-// by itself: lab-agent's early unit reboots one that never reaches labd at its
-// no-contact deadline (twice the boot timeout, at most 9 minutes), and the Mac then needs a boot
-// to check in.
 // noContactWait is how long past its boot timeout labd gives a Lab boot that
 // never reached it: until lab-agent's no-contact deadline, on a clock that
 // may run that margin behind, has rebooted it; at least twice the boot
@@ -1087,12 +1083,13 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	timeout := max(r.boot-r.s.quietGrace(), time.Minute)
 	steps, ok, neverLeft, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, r.watchdogRecovery(timeout))
 	r.addRecovery(steps)
-	if err != nil && !r.kernelFailedSince(r.bootedAt.Add(-time.Second)) {
+	kernelFailed := r.kernelFailedSince(r.bootedAt.Add(-time.Second))
+	if err != nil && !kernelFailed {
 		// Canceled before the Mac came back, with nothing to say its kernel
 		// failed: a Lab boot that lost its network looks just the same.
 		return api.OutcomeCanceled, "canceled while waiting for the Mac, lost " + during
 	}
-	if ok && neverLeft && !r.kernelFailedSince(r.bootedAt.Add(-time.Second)) {
+	if ok && neverLeft && !kernelFailed {
 		// Still up on the same boot, and checking in again: it lost its
 		// network for a while, and its kernel never went down.
 		return api.OutcomeLostContact, "labd lost the Mac " + during + ", but it came back on the same boot: its network went, not its kernel"
@@ -1125,7 +1122,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 			return accessCut(during + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
 		case api.DeadlineLostLabd:
 			// A kernel error seen before the network went is still the kernel's.
-			if !r.kernelFailedSince(r.bootedAt.Add(-time.Second)) {
+			if !kernelFailed {
 				o, cause = api.OutcomeLostContact, "labd lost the Lab boot, and lab-agent's watchdog rebooted it for that"
 			}
 		default:
@@ -1180,10 +1177,6 @@ func (r *jobRun) collectLost(ctx context.Context) api.LostBoot {
 		r.ev("collected the lost boot %s", lost.BootID)
 	}
 	return lost
-}
-
-func (r *jobRun) collectE(ctx context.Context, boot string) ([]string, error) {
-	return r.collectInto(ctx, boot, "")
 }
 
 // collectTimeout is how long labd gives a Mac to collect a boot's logs.

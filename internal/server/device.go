@@ -423,12 +423,14 @@ func (v *dev) send(kind, job string, args any) string { return v.sendFor(caller{
 // Mac's own Volunteer, or when neither whoever submitted the job. The Mac
 // records who in its Audit log.
 func (v *dev) sendFor(c caller, kind, job string, args any) string {
-	return v.sendForBoot(c, "", kind, job, args)
+	id, _ := v.sendForBoot(c, "", kind, job, args)
+	return id
 }
 
 // sendForBoot is sendFor for one boot of the Mac ("" is the one it is on
-// now): no other boot ever gets the command.
-func (v *dev) sendForBoot(c caller, boot, kind, job string, args any) string {
+// now): no other boot ever gets the command. It returns the command's ID
+// and that boot.
+func (v *dev) sendForBoot(c caller, boot, kind, job string, args any) (string, string) {
 	maintainer := c.maintainer
 	if maintainer == "" && c.login == "" && job != "" {
 		if j, err := v.s.store.job(job); err == nil {
@@ -446,7 +448,7 @@ func (v *dev) sendForBoot(c caller, boot, kind, job string, args any) string {
 	v.target[cmd.ID] = boot
 	v.bump()
 	v.mu.Unlock()
-	return cmd.ID
+	return cmd.ID, boot
 }
 
 // waitFor blocks until cond (called with mu held) returns true, the timeout
@@ -550,12 +552,9 @@ func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout 
 // that has already gone down must not run on the boot that replaced it.
 func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, timeout time.Duration, out any, note func(string)) error {
 	v.mu.Lock()
-	if boot == "" {
-		boot = v.d.BootID
-	}
 	name := v.d.Name
 	v.mu.Unlock()
-	id := v.sendForBoot(callerOfCtx(ctx), boot, kind, job, args)
+	id, boot := v.sendForBoot(callerOfCtx(ctx), boot, kind, job, args)
 	deadline := v.s.now().Add(timeout)
 	var (
 		res            api.CommandResult
