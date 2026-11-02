@@ -99,6 +99,9 @@ type Sim struct {
 
 	armFail func(arm int) (wrote bool, err error) // see FailArm
 	arms    int
+	// rebootFails and cancelFails are how many plain reboots and one-shot
+	// cancels fail before they work again; see FailReboots and FailCancels.
+	rebootFails, cancelFails int
 
 	// A Volunteer's Mac. Every knob is off by default.
 	// Encrypted holds every cold boot at the disk password prompt until TypePassword.
@@ -297,6 +300,22 @@ func (s *Sim) FailArm(f func(arm int) (wrote bool, err error)) {
 	s.armFail, s.arms = f, 0
 }
 
+// FailReboots makes the next n plain reboots fail, as an inhibited or
+// refused systemctl reboot would: the Mac stays up.
+func (s *Sim) FailReboots(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rebootFails = n
+}
+
+// FailCancels makes the next n one-shot cancels fail, as one waiting on the
+// boot-partition lock would: the one-shot stays armed.
+func (s *Sim) FailCancels(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelFails = n
+}
+
 // Armed is the one-shot boot entry, "" if none.
 func (s *Sim) Armed() string {
 	s.mu.Lock()
@@ -377,6 +396,10 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 func (s *Sim) CancelBootOnce() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.cancelFails > 0 {
+		s.cancelFails--
+		return errors.New("boot partition lock: held for a minute")
+	}
 	s.armed = ""
 	return nil
 }
@@ -445,7 +468,17 @@ func (s *Sim) SetInstalledObs(f func(phase, job, bootID, kernel, cmdline string)
 	s.InstalledObs = f
 }
 
-func (s *Sim) Reboot() error { s.boot("reboot: Restarting system"); return nil }
+func (s *Sim) Reboot() error {
+	s.mu.Lock()
+	if s.rebootFails > 0 {
+		s.rebootFails--
+		s.mu.Unlock()
+		return errors.New("systemctl reboot: inhibited")
+	}
+	s.mu.Unlock()
+	s.boot("reboot: Restarting system")
+	return nil
+}
 
 // OpenWatchdog fails: the Sim has no hardware watchdog.
 func (s *Sim) OpenWatchdog() (io.Writer, error) { return nil, errors.New("no hardware watchdog") }

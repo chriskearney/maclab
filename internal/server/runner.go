@@ -493,17 +493,20 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	}
 	// The arm was acked, but the Mac stayed up on the boot it armed:
 	// lab-agent's re-arm before the reboot, or the reboot itself, failed.
-	// The test kernel never ran, so that is the lab's failure, not its.
+	// The test kernel never ran, so that is the lab's failure, not its;
+	// unless the ladder's reboot ran it after all (a one-shot left armed)
+	// and a kernel failed since.
 	const neverRebooted = "the Mac never rebooted into the test kernel after its one-shot was armed: lab-agent's re-arm before the reboot, or the reboot itself, failed"
+	never := neverLeft(steps) && !r.kernelFailedSince(t0)
 	if !ok {
-		if neverLeft(steps) {
+		if never {
 			return api.OutcomeInfra, neverRebooted
 		}
 		o, cause := r.classify(t0, steps)
 		return o, cause
 	}
 	d = v.snapshot()
-	if d.Health.JobTag != j.ID && neverLeft(steps) {
+	if d.Health.JobTag != j.ID && never {
 		return api.OutcomeInfra, neverRebooted
 	}
 	if d.Health.JobTag != j.ID {
@@ -960,6 +963,16 @@ func (r *jobRun) addRecovery(steps []string) {
 	for _, s := range steps {
 		r.ev("recovery: %s", s)
 	}
+}
+
+// kernelFailedSince is whether labd saw a fatal kernel event since t0.
+func (r *jobRun) kernelFailedSince(t0 time.Time) bool {
+	for _, e := range r.v.eventsSince(t0) {
+		if detect.Fatal(e.Kind) {
+			return true
+		}
+	}
+	return false
 }
 
 // classify names what went wrong from the kernel events seen since t0.

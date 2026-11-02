@@ -59,3 +59,33 @@ func TestFirstArmFailingAfterItsWriteLeavesNothingArmed(t *testing.T) {
 		t.Fatalf("the job took %s: labd waited for a reboot after the arm failed", d.Round(time.Second))
 	}
 }
+
+// A reboot that fails after a good re-arm leaves the Mac up as a failed
+// re-arm does, with the one-shot cancelled: the lab's failure.
+func TestRebootFailingAfterTheAckIsAnInfraError(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.FailReboots(1)
+	boots := l.bootIDs()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-panics behavior=panic")})
+	l.expect(j, api.OutcomeInfra)
+	if !strings.Contains(j.Summary, "never rebooted") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	// The ladder's soft reboot is the only one, to the known-good kernel: a
+	// one-shot left armed would have booted the test kernel first.
+	if ids := boots(); len(ids) != 2 {
+		t.Fatalf("the Mac went through %d boots, want the one it was on and one more: %v", len(ids), ids)
+	}
+}
+
+// If the one-shot can't be cancelled either, the ladder's reboot runs the
+// test kernel after all: its panic is its own, not the lab's.
+func TestTestKernelTheLadderBootsAfterAFailedRebootIsJudged(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	l.sim.FailReboots(1)
+	l.sim.FailCancels(1)
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-panics behavior=panic")})
+	l.expect(j, api.OutcomePanicked)
+}
