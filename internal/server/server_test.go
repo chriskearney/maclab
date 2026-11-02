@@ -159,6 +159,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		serialStall = 3 * time.Second
 		quietGrace = 3 * time.Second
 		quickReboot = 3 * time.Second
+		rebootGrace = 2 * time.Second
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -501,6 +502,19 @@ func TestRebootRightAfterBootIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-fragile behavior=crash-after-boot")})
 	l.expect(j, api.OutcomeCrashedOrHung)
 	if !strings.Contains(j.Summary, "crashed or hung during test boot-health") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+// So does one that goes down after its last test, before labd collects its
+// logs: they are not collected from the known-good boot, nor judged a pass.
+func TestRebootAfterTheTestsIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-fragile behavior=crash-after-tests")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "crashed or hung after its tests") {
 		t.Fatalf("summary: %s", j.Summary)
 	}
 	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })

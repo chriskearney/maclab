@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
@@ -14,7 +15,22 @@ import (
 var (
 	panicGrace  = 60 * time.Second  // panic=10 should have rebooted it well within this
 	serialStall = 120 * time.Second // console silent mid-boot for this long = hung
+	// rebootGrace is how long after being asked to reboot a Mac may still be
+	// heard on its old boot: one going down stops talking within seconds, so
+	// one still checking in after this never went down at all.
+	rebootGrace = 15 * time.Second
 )
+
+// stillOnOldBoot starts the ladder's reason for a Mac that never left the
+// boot it was asked to leave; neverLeft finds it in the ladder's steps.
+const stillOnOldBoot = "still on the old boot"
+
+// neverLeft is whether waitBack's ladder found the Mac still up on the boot
+// it waited for it to leave: it never rebooted by itself, whatever the ladder
+// did after.
+func neverLeft(steps []string) bool {
+	return len(steps) > 0 && strings.HasPrefix(steps[0], "detected: "+stillOnOldBoot)
+}
 
 // waitBack waits for the Mac to come up on a new boot after `since`. When it
 // doesn't, it gives the Mac selfRecovery more to come back by itself (a Lab
@@ -51,7 +67,7 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 	back := v.d.BootID != oldBoot && v.d.LastSeen.After(since)
 	// A Mac that is going down stops talking within seconds. Only one still
 	// checking in well after the reboot request never went down at all.
-	stillUp := v.d.BootID == oldBoot && v.aliveLocked() && v.d.LastSeen.After(since.Add(15*time.Second))
+	stillUp := v.d.BootID == oldBoot && v.aliveLocked() && v.d.LastSeen.After(since.Add(rebootGrace))
 	v.mu.Unlock()
 	if back {
 		return nil, true, nil
@@ -59,7 +75,7 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 	if reason == "" {
 		switch {
 		case stillUp:
-			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout+selfRecovery)
+			reason = fmt.Sprintf(stillOnOldBoot+" %s after asking it to reboot", timeout+selfRecovery)
 		case selfRecovery > 0:
 			reason = fmt.Sprintf("did not check in within %s, nor come back by itself %s after that", timeout, selfRecovery)
 		default:

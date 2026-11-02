@@ -29,7 +29,8 @@ import (
 // reboot-in-test (reboots with no kernel message), hang-in-test (goes silent
 // for HangFor, then a watchdog resets it, again with no kernel message),
 // crash-after-boot (reaches labd, then reboots with no kernel message as labd
-// takes its first screenshot, which never answers) and no-network (boots to
+// takes its first screenshot, which never answers), crash-after-tests (the
+// same, at the first screenshot after a test ran) and no-network (boots to
 // the login prompt, then never reaches labd). A field
 // apple_wdt=n says the kernel was built without apple_wdt.
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
@@ -61,6 +62,7 @@ type Sim struct {
 	armed        string
 	staged       map[string]simEntry
 	behavior     string
+	tested       bool // a test has run on this boot
 	gen          int
 	kmsg         chan string
 	Boots        int
@@ -94,6 +96,12 @@ type Sim struct {
 
 	stageFail  func(attempt int) error
 	stageTries int
+
+	armFail func(arm int) (wrote bool, err error) // see FailArm
+	arms    int
+	// rebootFails and cancelFails are how many plain reboots and one-shot
+	// cancels fail before they work again; see FailReboots and FailCancels.
+	rebootFails, cancelFails int
 
 	// A Volunteer's Mac. Every knob is off by default.
 	// Encrypted holds every cold boot at the disk password prompt until TypePassword.
@@ -283,6 +291,38 @@ func (s *Sim) FailStage(f func(attempt int) error) {
 	s.stageFail, s.stageTries = f, 0
 }
 
+// FailArm makes arming the one-shot fail where f says: it is called with
+// each arm's number from 1, and an error fails that arm, after the one-shot
+// is written if wrote, as a persist or readback failing would.
+func (s *Sim) FailArm(f func(arm int) (wrote bool, err error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armFail, s.arms = f, 0
+}
+
+// FailReboots makes the next n plain reboots fail, as an inhibited or
+// refused systemctl reboot would: the Mac stays up.
+func (s *Sim) FailReboots(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rebootFails = n
+}
+
+// FailCancels makes the next n one-shot cancels fail, as one waiting on the
+// boot-partition lock would: the one-shot stays armed.
+func (s *Sim) FailCancels(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelFails = n
+}
+
+// Armed is the one-shot boot entry, "" if none.
+func (s *Sim) Armed() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
+}
+
 // Quiet makes the machine unreachable for d on the same boot, as a network
 // outage would: no check-ins, no reports, and whatever runs carries on.
 func (s *Sim) Quiet(d time.Duration) { s.suspend(d, false) }
@@ -356,6 +396,10 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 func (s *Sim) CancelBootOnce() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.cancelFails > 0 {
+		s.cancelFails--
+		return errors.New("boot partition lock: held for a minute")
+	}
 	s.armed = ""
 	return nil
 }
@@ -365,6 +409,15 @@ func (s *Sim) BootOnce(entry string) error {
 	defer s.mu.Unlock()
 	if _, ok := s.staged[strings.TrimPrefix(entry, entryPrefix)]; !ok {
 		return fmt.Errorf("entry %s is not staged", entry)
+	}
+	s.arms++
+	if s.armFail != nil {
+		if wrote, err := s.armFail(s.arms); err != nil {
+			if wrote {
+				s.armed = entry
+			}
+			return err
+		}
 	}
 	s.armed = entry
 	return nil
@@ -415,7 +468,17 @@ func (s *Sim) SetInstalledObs(f func(phase, job, bootID, kernel, cmdline string)
 	s.InstalledObs = f
 }
 
-func (s *Sim) Reboot() error { s.boot("reboot: Restarting system"); return nil }
+func (s *Sim) Reboot() error {
+	s.mu.Lock()
+	if s.rebootFails > 0 {
+		s.rebootFails--
+		s.mu.Unlock()
+		return errors.New("systemctl reboot: inhibited")
+	}
+	s.mu.Unlock()
+	s.boot("reboot: Restarting system")
+	return nil
+}
 
 // OpenWatchdog fails: the Sim has no hardware watchdog.
 func (s *Sim) OpenWatchdog() (io.Writer, error) { return nil, errors.New("no hardware watchdog") }
@@ -506,6 +569,7 @@ func (s *Sim) up(gen int, e simEntry) {
 		return
 	}
 	s.kernel, s.cmdline, s.behavior, s.noAppleWDT = e.krel, e.cmdline, e.behavior, e.noAppleWDT
+	s.tested = false
 	s.alive = e.behavior != "no-network" // up, but labd never hears from it
 	if unit := s.earlyUnit; unit != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -696,6 +760,7 @@ func (s *Sim) Inhibitors() []string {
 func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	s.mu.Lock()
 	b, length, down := s.behavior, s.testLength, s.down
+	s.tested = true
 	s.mu.Unlock()
 	if length > 0 {
 		wait := time.NewTimer(length)
@@ -792,9 +857,9 @@ func (s *Sim) Collect(ctx context.Context, boot, outDir string) error {
 
 func (s *Sim) Screenshot(ctx context.Context, path string, wait time.Duration) (int, int, error) {
 	s.mu.Lock()
-	k, b := s.kernel, s.behavior
+	k, b, tested := s.kernel, s.behavior, s.tested
 	s.mu.Unlock()
-	if b == "crash-after-boot" {
+	if b == "crash-after-boot" || b == "crash-after-tests" && tested {
 		s.boot("")
 		<-ctx.Done()
 		return 0, 0, errors.New("machine went away")

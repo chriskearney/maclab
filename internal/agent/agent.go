@@ -794,6 +794,12 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 			err = cause // whatever the command made of being stopped
 		}
 		if cause := context.Cause(ctx); errors.Is(cause, errAccessLevel) {
+			if err == nil && c.Kind == api.CmdBootOnce {
+				// It armed, but labd hears it failed: cancel, as a failed arm does.
+				if cerr := a.sys.CancelBootOnce(); cerr != nil {
+					a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+				}
+			}
 			err = cause // a test stopped this way ends the job, not the test alone
 		}
 		r := api.CommandResult{ID: c.ID, OK: err == nil,
@@ -881,6 +887,11 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, *afterAck, error)
 			return nil, nil, err
 		}
 		if err := a.sys.BootOnce(args.Entry); err != nil {
+			// It may have failed after writing the one-shot: cancel it, as a
+			// failed re-arm does, since labd hears that nothing is armed.
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
 			return nil, nil, err
 		}
 		return nil, a.labBootAfterAck(args.Entry), nil
@@ -1162,7 +1173,15 @@ func (a *Agent) labBootAfterAck(entry string) *afterAck {
 			a.log.Printf("not rebooting: %v", err)
 			return
 		}
-		a.rebootLater()
+		a.log.Printf("rebooting")
+		if err := a.sys.Reboot(); err != nil {
+			// Still up, with labd told the boot is coming: cancel the
+			// one-shot, so no later plain reboot boots it unwatched.
+			a.log.Printf("reboot: %v", err)
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
+		}
 	}}
 }
 
