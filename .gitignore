@@ -11,7 +11,7 @@ dist/
 /loop/
 
 # tla2tools.jar, fetched by make spec
-/specs/.tools/
+/specs/.tools
 
 # esprotation tests whose /tmp is tmpfs keep their archives here
 /internal/esprotation/.test-*/
