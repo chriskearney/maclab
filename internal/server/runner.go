@@ -1060,6 +1060,11 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	self := lostSelfRecovery(hasOOB, lastSeen, r.s.now(), r.boot, timeout)
 	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, self)
 	r.addRecovery(steps)
+	if err != nil && !r.kernelFailedSince(r.bootedAt.Add(-time.Second)) {
+		// Canceled before the Mac came back, with nothing to say its kernel
+		// failed: a Lab boot that lost its network looks just the same.
+		return api.OutcomeCanceled, "canceled while waiting for the Mac, lost " + during
+	}
 	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
 	if o == api.OutcomeBootFailed {
 		// Nothing says panic: only how long it took to come back hints at what happened.

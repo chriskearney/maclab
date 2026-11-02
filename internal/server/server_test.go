@@ -1684,6 +1684,22 @@ func (l *lab) cancelWhen(id, msg string) {
 // A cancel after the kernel failed keeps the failure as the outcome, so lab
 // gate counts it and a retry's pass reads as flaky, not clean. Tests the
 // cancel cut short are the cancel's, not the kernel's.
+// A cancel while labd waits for a Lab boot it lost, with no kernel error
+// seen, is the cancel's: the Mac may only have lost its network.
+func TestCancelWhileWaitingForALostMacIsNotTheKernels(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.HangFor = 20 * time.Second // silent long enough to cancel meanwhile
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-quiet behavior=hang-in-test")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j.ID, "waiting for it to come back")
+	j = l.wait(j.ID, 60*time.Second)
+	l.expect(j, api.OutcomeCanceled)
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
 func TestCancelKeepsKernelFailure(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
