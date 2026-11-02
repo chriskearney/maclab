@@ -36,6 +36,7 @@ type dev struct {
 	grants        map[string]string // artifact sha256 -> the job a command sent it for (see grantLocked)
 	fetchGrant    *fetchGrant       // a Maintainer's explicit grant (see hArtifactGrants)
 	results       map[string]api.CommandResult
+	gaveUp        map[string]time.Time // commands labd stopped waiting for, and when (see forget)
 	changed       chan struct{}
 	events        []api.KernelEvent
 	dirty         bool // a lab kernel may still be staged on the Mac
@@ -91,7 +92,7 @@ type dev struct {
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), stop: make(chan struct{}), auditHave: -1}
+		results: map[string]api.CommandResult{}, gaveUp: map[string]time.Time{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), stop: make(chan struct{}), auditHave: -1}
 	return v
 }
 
@@ -303,7 +304,9 @@ func (v *dev) deliver(bootID string) api.CheckinResponse {
 	return resp
 }
 
-func (v *dev) report(rep api.Report) {
+// report takes in what lab-agent reports, and returns the results it reports
+// for commands labd gave up waiting for.
+func (v *dev) report(rep api.Report) (forgotten []string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID {
@@ -327,12 +330,15 @@ func (v *dev) report(rep api.Report) {
 			delete(v.sent, r.ID)
 			delete(v.target, r.ID)
 			v.results[r.ID] = r
+		} else if _, ok := v.gaveUp[r.ID]; ok {
+			forgotten = append(forgotten, r.ID)
 		}
 	}
 	for _, e := range rep.Events {
 		v.addEventLocked(e)
 	}
 	v.bump()
+	return forgotten
 }
 
 func (v *dev) addEventLocked(e api.KernelEvent) {
@@ -615,6 +621,11 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 			}
 			return false
 		}()
+		if lost || timedOut {
+			// in the same hold of mu: a result reported from now on is
+			// answered forgotten, never taken and then dropped
+			v.forgetLocked(id)
+		}
 		ch := v.changed
 		v.mu.Unlock()
 		for _, n := range notes {
@@ -641,11 +652,9 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 		}
 	}
 	if timedOut {
-		v.forget(id)
 		return fmt.Errorf("%s: no result after %s", kind, timeout)
 	}
 	if lost {
-		v.forget(id)
 		return errDeviceLost
 	}
 	if !res.OK {
@@ -660,9 +669,23 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 	return nil
 }
 
+// forget stops waiting for command id. A result for it that comes later is
+// answered as forgotten, so lab-agent doesn't act on it (a Lab boot's reboot
+// for an arm labd timed out on); labd remembers that for an hour.
 func (v *dev) forget(id string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.forgetLocked(id)
+}
+
+func (v *dev) forgetLocked(id string) {
+	now := v.s.now()
+	for g, at := range v.gaveUp {
+		if now.Sub(at) > time.Hour {
+			delete(v.gaveUp, g)
+		}
+	}
+	v.gaveUp[id] = now
 	delete(v.inflight, id)
 	delete(v.sent, id)
 	delete(v.target, id)

@@ -149,3 +149,27 @@ func TestLabBootRearmsOnceWhileLabdIsDown(t *testing.T) {
 		t.Errorf("%d arms and %d reboots over 11 tries, want 2 and 1", sys.arms, sys.reboots)
 	}
 }
+
+// A boot_once labd gave up on (its arm timeout) whose result reaches it late
+// is answered forgotten: the agent cancels the one-shot instead of rebooting
+// into a Lab boot for a job labd has already ended.
+func TestLabBootForgottenByLabdIsCancelledNotBooted(t *testing.T) {
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(api.ReportReply{Forgotten: []string{"c1"}})
+	}))
+	t.Cleanup(hs.Close)
+	sys := &rearmSystem{Sim: NewSim(t.TempDir())}
+	a := New(&Config{Server: hs.URL, Secret: "test"}, sys, log.New(io.Discard, "", 0))
+	after := a.labBootAfterAck(entryPrefix + "j1")
+	after.id = "c1"
+	a.results = []api.CommandResult{{ID: "c1", OK: true}}
+	a.after = []afterAck{*after}
+	if err := a.report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sys.mu.Lock()
+	defer sys.mu.Unlock()
+	if sys.reboots != 0 || sys.cancels != 1 || len(a.after) != 0 {
+		t.Fatalf("%d reboots, %d cancels, %d left to run; want 0, 1, 0", sys.reboots, sys.cancels, len(a.after))
+	}
+}

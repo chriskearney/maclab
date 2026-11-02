@@ -62,6 +62,9 @@ const (
 	// ending, an upload retrying while labd is out of reach), so a test boot
 	// that lost labd is reset 10 minutes after it last heard from it.
 	watchdogIdle = 10 * time.Minute
+	// LostLabdReset is how long after its last sign of labd, outside a test,
+	// the watchdog resets a Lab boot: feeding stops, the hardware fires.
+	LostLabdReset = watchdogIdle + watchdogTimeout
 	// watchdogMargin is added to a test's budget, to kill it and report. A
 	// test that overruns its budget has about a minute more before the
 	// hardware resets the Mac, so a hung test is reset within 80 s of its
@@ -101,6 +104,11 @@ type labWatchdog struct {
 	tests  int       // tests running
 	pid1At time.Time // when PID 1 last answered
 	silent bool      // feeding stopped because PID 1 went quiet
+	// onLostLabd, if set, runs once when feeding stops because labd has been
+	// silent past the idle budget, outside a test: the reset that follows is
+	// a lost labd, not a hung kernel, and the boot says so first.
+	onLostLabd func()
+	lostNoted  bool
 
 	logf func(format string, args ...any) // nil: tests
 }
@@ -252,9 +260,16 @@ func (d *labWatchdog) tick() bool {
 		d.logf("PID 1 hasn't answered for %s: no longer feeding the hardware watchdog, the Mac resets within %s", pid1Silence, watchdogTimeout)
 	}
 	d.silent = !pid1
+	lost := !ok && pid1 && d.tests == 0 && !d.lostNoted && d.onLostLabd != nil
+	if lost {
+		d.lostNoted = true
+	}
 	d.mu.Unlock()
 	if ok {
 		d.w.Write([]byte{'1'})
+	}
+	if lost {
+		d.onLostLabd()
 	}
 	return ok
 }

@@ -764,3 +764,46 @@ func TestTestCmdlineWatchdog(t *testing.T) {
 		}
 	}
 }
+
+// Feeding stopping for silence from labd outside a test is a lost labd, said
+// once before the reset; a hung test, or PID 1 gone quiet, is not.
+func TestLabWatchdogNotesALostLabd(t *testing.T) {
+	clock := &wdClock{t: time.Unix(1_000_000, 0)}
+	d := newLabWatchdog(&wdDevice{}, clock.now)
+	noted := 0
+	d.onLostLabd = func() { noted++ }
+
+	done := d.test(clock.now(), 2*time.Minute)
+	clock.add(3 * time.Minute)
+	answers(d, true)
+	if d.tick() || noted != 0 {
+		t.Fatalf("a test past its budget: noted %d, want 0", noted)
+	}
+	done()
+	clock.add(11 * time.Minute)
+	answers(d, true)
+	d.tick()
+	d.tick()
+	if noted != 1 {
+		t.Fatalf("11 minutes without labd outside a test: noted %d, want 1", noted)
+	}
+}
+
+// The lost labd goes where collect_lost reads how a Lab boot ended.
+func TestNoteLostLabdRecordsItForCollectLost(t *testing.T) {
+	sim := NewSim(t.TempDir())
+	a := New(&Config{Server: "http://127.0.0.1:1", Secret: "test", WorkDir: t.TempDir()}, sim, log.New(io.Discard, "", 0))
+	os.MkdirAll(a.labBootDir(), 0o755)
+	a.noteLostLabd()
+	b, err := os.ReadFile(filepath.Join(a.labBootDir(), labBootSeenFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen labBootSeen
+	if err := json.Unmarshal(b, &seen); err != nil || seen.Deadline != api.DeadlineLostLabd {
+		t.Fatalf("boot.json: %s (%v)", b, err)
+	}
+	if id, _, _ := sim.Identity(); seen.BootID != id {
+		t.Fatalf("boot.json names boot %q, want %q", seen.BootID, id)
+	}
+}

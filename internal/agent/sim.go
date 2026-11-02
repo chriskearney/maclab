@@ -99,6 +99,7 @@ type Sim struct {
 
 	armFail func(arm int) (wrote bool, err error) // see FailArm
 	arms    int
+	bootOps []string // see BootOps
 	// rebootFails and cancelFails are how many plain reboots and one-shot
 	// cancels fail before they work again; see FailReboots and FailCancels.
 	rebootFails, cancelFails int
@@ -300,6 +301,25 @@ func (s *Sim) FailArm(f func(arm int) (wrote bool, err error)) {
 	s.armFail, s.arms = f, 0
 }
 
+// BootOps are the boot-menu operations in the order they happened: "arm",
+// "cancel", "quiesce", "resume" and "reboot".
+func (s *Sim) BootOps() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.bootOps...)
+}
+
+func (s *Sim) QuiesceBootSync() (resume func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootOps = append(s.bootOps, "quiesce")
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.bootOps = append(s.bootOps, "resume")
+	}
+}
+
 // FailReboots makes the next n plain reboots fail, as an inhibited or
 // refused systemctl reboot would: the Mac stays up.
 func (s *Sim) FailReboots(n int) {
@@ -396,6 +416,7 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 func (s *Sim) CancelBootOnce() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.bootOps = append(s.bootOps, "cancel")
 	if s.cancelFails > 0 {
 		s.cancelFails--
 		return errors.New("boot partition lock: held for a minute")
@@ -411,6 +432,7 @@ func (s *Sim) BootOnce(entry string) error {
 		return fmt.Errorf("entry %s is not staged", entry)
 	}
 	s.arms++
+	s.bootOps = append(s.bootOps, "arm")
 	if s.armFail != nil {
 		if wrote, err := s.armFail(s.arms); err != nil {
 			if wrote {
@@ -470,6 +492,7 @@ func (s *Sim) SetInstalledObs(f func(phase, job, bootID, kernel, cmdline string)
 
 func (s *Sim) Reboot() error {
 	s.mu.Lock()
+	s.bootOps = append(s.bootOps, "reboot")
 	if s.rebootFails > 0 {
 		s.rebootFails--
 		s.mu.Unlock()

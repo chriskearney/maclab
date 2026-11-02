@@ -228,6 +228,33 @@ func (l *Linux) WatchKernel(ctx context.Context, fn func(string)) {
 	}
 }
 
+// bootSyncUnits rewrite limine.conf on Omarchy, in the order they are
+// stopped: snapper's hourly cleanup (limine-snapper-sync's drop-in syncs the
+// menu when it stops), then limine-snapper-sync's watcher.
+var bootSyncUnits = []string{"snapper-cleanup.timer", "snapper-cleanup.service", "limine-snapper-sync.service"}
+
+func (l *Linux) QuiesceBootSync() (resume func()) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	var again []string
+	for _, u := range bootSyncUnits {
+		if exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", u).Run() != nil {
+			continue // not running, or not installed (a GRUB Mac)
+		}
+		if exec.CommandContext(ctx, "systemctl", "stop", u).Run() != nil {
+			continue
+		}
+		if u != "snapper-cleanup.service" {
+			again = append(again, u) // a cleanup run under way isn't started again
+		}
+	}
+	return func() {
+		if len(again) > 0 {
+			exec.Command("systemctl", append([]string{"start"}, again...)...).Run()
+		}
+	}
+}
+
 func (l *Linux) Reboot() error {
 	exec.Command("sync").Run()
 	return exec.Command("systemctl", "reboot").Run()

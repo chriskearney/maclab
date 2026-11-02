@@ -160,6 +160,8 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		quietGrace = 3 * time.Second
 		quickReboot = 3 * time.Second
 		rebootGrace = 2 * time.Second
+		labClockSkew = time.Second
+		lostLabdReset = 0 // the harness's lost Macs are asked for hands at once, as before
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1682,6 +1684,39 @@ func (l *lab) cancelWhen(id, msg string) {
 // A cancel after the kernel failed keeps the failure as the outcome, so lab
 // gate counts it and a retry's pass reads as flaky, not clean. Tests the
 // cancel cut short are the cancel's, not the kernel's.
+// A cancel while labd waits for a Lab boot it lost, with no kernel error
+// seen, is the cancel's: the Mac may only have lost its network.
+func TestCancelWhileWaitingForALostMacIsNotTheKernels(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.HangFor = 20 * time.Second // silent long enough to cancel meanwhile
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-quiet behavior=hang-in-test")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j.ID, "waiting for it to come back")
+	j = l.wait(j.ID, 60*time.Second)
+	l.expect(j, api.OutcomeCanceled)
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+// A Lab boot that is off the network past quietGrace during its test, and
+// then back on the same boot, lost its network, not its kernel.
+func TestNetworkBackOnTheSameBootIsLostContact(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.SuspendFor = 8 * time.Second // past quietGrace (3s), unannounced
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "quiet-suspend-wifi", Builtin: "x"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j = l.wait(j.ID, 2*time.Minute) // lostDuringTest waits at least a minute for a new boot first
+	l.expect(j, api.OutcomeLostContact)
+	if !strings.Contains(j.Summary, "came back on the same boot") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+}
+
 func TestCancelKeepsKernelFailure(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()

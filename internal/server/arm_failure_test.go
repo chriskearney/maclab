@@ -89,3 +89,37 @@ func TestTestKernelTheLadderBootsAfterAFailedRebootIsJudged(t *testing.T) {
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-panics behavior=panic")})
 	l.expect(j, api.OutcomePanicked)
 }
+
+// Snapshot syncs stop just before the last re-arm, so none can drop the
+// lab's block from limine.conf between it and the firmware reading it; they
+// start again only if the reboot doesn't happen (specs/labboot:
+// bug-dd4cd55-no-quiesce).
+func TestSnapshotSyncsStopBeforeTheLastRearm(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	before := len(l.sim.BootOps())
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok")}), api.OutcomePass)
+	ops := strings.Join(l.sim.BootOps()[before:], " ")
+	if !strings.HasPrefix(ops, "arm arm quiesce arm reboot") || strings.Contains(ops, "resume") {
+		t.Fatalf("boot-menu operations: %s", ops)
+	}
+
+	l.sim.FailReboots(1)
+	before = len(l.sim.BootOps())
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok2 behavior=ok")}), api.OutcomeInfra)
+	if ops := strings.Join(l.sim.BootOps()[before:], " "); !strings.HasPrefix(ops, "arm arm quiesce arm reboot cancel resume") {
+		t.Fatalf("boot-menu operations after a failed reboot: %s", ops)
+	}
+}
+
+// labd answers a result for a command it gave up waiting for as forgotten,
+// and only those: a report retried after its answer was lost is not.
+func TestReportAnswersCommandsLabdGaveUpOn(t *testing.T) {
+	l := newLab(t, false)
+	v := l.s.dev(l.name)
+	v.forget("c-gave-up")
+	got := v.report(api.Report{Results: []api.CommandResult{{ID: "c-gave-up", OK: true}, {ID: "c-unknown", OK: true}}})
+	if len(got) != 1 || got[0] != "c-gave-up" {
+		t.Fatalf("forgotten %v, want [c-gave-up]", got)
+	}
+}

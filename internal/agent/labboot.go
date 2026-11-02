@@ -107,11 +107,22 @@ type labBootDeadlines struct {
 // that never came up. noContactMargin covers a test boot whose clock runs
 // behind, as one with no network can't set it.
 func newLabBootDeadlines(now time.Time, bootTimeout time.Duration, jobEnd time.Time) labBootDeadlines {
-	return labBootDeadlines{Armed: now, NoContact: now.Add(min(2*bootTimeout, watchdogIdle-noContactMargin)), Ceiling: jobEnd}
+	return labBootDeadlines{Armed: now, NoContact: now.Add(NoContactDeadline(bootTimeout)), Ceiling: jobEnd}
 }
 
-// noContactMargin is how far the no-contact deadline stays inside watchdogIdle.
+// NoContactDeadline is how long after it is armed a Lab boot has to reach
+// labd: twice labd's boot timeout, but no more than watchdogIdle less
+// noContactMargin. labd waits for that, and the margin, before it gives up.
+func NoContactDeadline(bootTimeout time.Duration) time.Duration {
+	return min(2*bootTimeout, watchdogIdle-noContactMargin)
+}
+
+// noContactMargin is how far the no-contact deadline stays inside watchdogIdle,
+// and how far behind a Lab boot's clock may run.
 const noContactMargin = time.Minute
+
+// NoContactMargin is noContactMargin, for labd.
+const NoContactMargin = noContactMargin
 
 // rebootDue is whether the early unit reboots the Mac now.
 func rebootDue(d labBootDeadlines, now time.Time, contacted bool) bool {
