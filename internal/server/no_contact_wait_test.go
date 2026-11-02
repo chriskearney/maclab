@@ -10,7 +10,7 @@ import (
 // labd waits for a Lab boot that never reached it until lab-agent's
 // no-contact deadline has rebooted it, on a clock that may run behind, and
 // then a boot timeout more for the known-good boot: for any boot timeout,
-// not just labd's default (specs/labboot: open-short-boot-timeout).
+// not just labd's default (specs/labboot: bug-1b269f5-wait-twice-boot).
 func TestNoContactWaitCoversTheAgentsDeadline(t *testing.T) {
 	for b := time.Minute; b <= 12*time.Minute; b += 30 * time.Second {
 		r := &jobRun{boot: b}
@@ -22,7 +22,7 @@ func TestNoContactWaitCoversTheAgentsDeadline(t *testing.T) {
 
 // A Lab boot labd lost during its test, on a Mac with no hard reset, gets
 // until lab-agent's watchdog has reset it and a boot timeout more before a
-// person is asked to power cycle it (specs/labboot: open-hands-before-watchdog).
+// person is asked to power cycle it (specs/labboot: bug-10f4ab6-hands-before-watchdog).
 func TestLostLabBootWithNoHardResetGetsItsWatchdog(t *testing.T) {
 	boot, quiet := 6*time.Minute, 3*time.Minute // labd's defaults
 	lastSeen := time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC)

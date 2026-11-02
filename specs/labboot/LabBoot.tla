@@ -64,7 +64,15 @@ BugNames == {
     "NeverLeftIsHung",    \* f20641b: a Mac that never left its armed boot reads as hung
     "FirstArmNoCancel",   \* 693811d: boot_once's own failed arm leaves the one-shot set
     "ArmFailWaits",       \* 693811d: after a failed arm, restore waits for a reboot
-    "CollectOnAnyBoot"}   \* e250121: collect goes to whatever boot labd knows
+    "CollectOnAnyBoot",   \* e250121: collect goes to whatever boot labd knows
+    "WaitTwiceBoot",      \* 1b269f5: labd waits 2x the boot timeout, not the agent's deadline
+    "NoQuiesce",          \* dd4cd55: snapshot syncs keep running through the last re-arm
+    "HandsBeforeWatchdog",\* 10f4ab6: labd asks for hands before the agent's watchdog acts
+    "WatchdogNoReason",   \* 3797cce: the watchdog resets a Lab boot that lost labd silently
+    "CancelBlamesLost",
+    "RestoreHandsEarly",  \* c478594: restore's reboot wait doesn't wait out the watchdog
+    "NetBackIsHung",      \* 58a73c1: a Lab boot back on the same boot reads as hung
+    "LateAckReboots"}     \* 4a5a608: a late arm result, labd having given up, still reboots   \* 3021d9f: a cancel while waiting for a lost boot blames its kernel
 
 ASSUME /\ BootTimeout \in Nat \ {0}
        /\ BootLen \in Nat \ {0}
@@ -89,14 +97,17 @@ TestGrace       == 2   \* labd waits this long past a test's timeout
 CleanupTimeout  == 2   \* runner.go restore's cleanup call
 CollectTimeout  == 5   \* runner.go collectTimeout
 Budget          == TestLen + 1                 \* watchdog.go testBudget: timeout + 20 s
-SelfRecovery    == 2 * BootTimeout             \* runner.go selfRecovery, Lab-owned Mac
+LostLabdReset   == WatchdogIdle + WatchdogHW   \* watchdog.go LostLabdReset
 JobLen          == 3 * BootTimeout + 5 + TestLen + TestGrace  \* runner.go labBootJob
 RestoreBudget   == 3 * BootTimeout + 5         \* runner.go runJob: restore's context
-NoContactWait   ==                             \* labboot.go newLabBootDeadlines
+NoContactWait   ==                             \* labboot.go NoContactDeadline
     IF "NoContactUncapped" \in Bugs THEN 2 * BootTimeout
     ELSE Min(2 * BootTimeout, WatchdogIdle - NoContactMargin)
+SelfRecovery    ==                             \* runner.go noContactWait, Lab-owned Mac
+    IF "WaitTwiceBoot" \in Bugs THEN 2 * BootTimeout
+    ELSE Max(2 * BootTimeout, NoContactWait + NoContactMargin)
 
-Deadlines    == {"no_contact", "ceiling"}
+Deadlines    == {"no_contact", "ceiling", "lost_labd"}
 KernelBlame  == {"boot_failed", "hung", "crashed_or_hung", "tests_failed"}
 RestoreRets  == {"restore", "restore_reboot"}
 RestorePhases == {"restore_wait", "restore_check", "restore_reboot", "cleanup"}
@@ -148,6 +159,7 @@ VARIABLES
     after,       \* the result carries the re-arm-and-reboot afterAck
     runAfter,    \* labd acked it: run the afterAck
     lastTry,     \* when the last report failed
+    quiesced,    \* snapshot syncs are stopped until the next boot (QuiesceBootSync)
     \* lab-agent on the Lab boot (watchdog.go)
     wdHeld, wdUntil, heard, testing, testStart, testDone,
     \* history, for the properties
@@ -166,7 +178,7 @@ labdVars  == <<lphase, outcome, wdl, rdl, waitFrom, ladderStep, ladderRet, ladde
 macVars   == <<boot, kernel, mac, graceful, userspace, bootAt, skew, net>>
 espVars   == <<block, oneShot, staged, nvWrites>>
 recVars   == <<hasDl, dlNC, dlCeil, seen, contact>>
-agentVars == <<ares, checked, after, runAfter, lastTry>>
+agentVars == <<ares, checked, after, runAfter, lastTry, quiesced>>
 wdVars    == <<wdHeld, wdUntil, heard, testing, testStart, testDone>>
 histVars  == <<deadKernel, testBooted, netDropped, kernelCrashed, ranOnKG,
                wdBeatDeadline, blockDropped, strayBoot>>
@@ -265,9 +277,11 @@ JudgeBoot ==
                            ELSE "boot_failed")
            /\ UNCHANGED <<cmd, cmdLost, ladderUsed, neverLeft>>
 
-\* How lostDuringTest names a Lab boot lost during or after the test.
+\* How lostDuringTest names a Lab boot lost during or after the test. One
+\* the ladder found still up on the same boot only lost its network (58a73c1).
 LostOutcome ==
     IF seen \in Deadlines THEN "lost_contact"
+    ELSE IF neverLeft /\ "NetBackIsHung" \notin Bugs THEN "lost_contact"
     ELSE IF ladderUsed THEN "hung"
     ELSE "crashed_or_hung"
 
@@ -303,6 +317,7 @@ NeedsHands(ret, nl) ==
     /\ devState' = "needs_hands"
     /\ lphase' = "done"
     /\ outcome' = IF ret = "boot" /\ nl /\ "NeverLeftIsHung" \notin Bugs THEN "infra_error"
+                  ELSE IF ret = "test" /\ nl /\ "NetBackIsHung" \notin Bugs THEN "lost_contact"
                   ELSE IF ret \in {"boot", "test"} THEN "hung"
                   ELSE IF outcome = "pass" THEN "infra_error" ELSE outcome
     /\ restoreErr' = (restoreErr \/ ret \in RestoreRets)
@@ -389,11 +404,26 @@ LTestLostReboot ==
                    armVerdict, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
 
+\* How long lostDuringTest waits for a Lab boot it lost: max(boot -
+\* quietGrace, 1), and on a Mac with no hard reset until the agent's watchdog
+\* has reset it and a boot timeout more (lostSelfRecovery, 10f4ab6).
+LostWait ==
+    LET timeout == Max(BootTimeout - QuietGrace, 1)
+    IN  IF OOB \/ "HandsBeforeWatchdog" \in Bugs THEN timeout
+        ELSE Max(timeout, labdSeenAt + LostLabdReset - now + BootTimeout)
+
+\* restore's wait for its reboot to the Known-good kernel: a boot timeout,
+\* and on a Mac with no hard reset until the watchdog has reset a Lab boot
+\* that can't hear the reboot (c478594).
+RestoreRebootWait ==
+    IF OOB \/ "RestoreHandsEarly" \in Bugs THEN BootTimeout
+    ELSE Max(BootTimeout, labdSeenAt + LostLabdReset - now + BootTimeout)
+
 \* run_test fails: the Mac has been silent past quietGrace on the same boot.
 LTestSilent ==
     /\ lphase = "testing" /\ now - labdSeenAt >= QuietGrace
     /\ lphase' = "lostwait"
-    /\ wdl' = now + Max(BootTimeout - QuietGrace, 1)
+    /\ wdl' = now + LostWait
     /\ UNCHANGED <<outcome, rdl, waitFrom, ladderStep, ladderRet, ladderUsed, neverLeft, devState,
                    cmd, cmdLost, labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
@@ -487,7 +517,7 @@ LRestoreCheck ==
     /\ IF labdTag = "Test"
          THEN /\ cmd' = [kind |-> "reboot", target |-> labdBoot]
               /\ lphase' = "restore_reboot"
-              /\ wdl' = now + BootTimeout
+              /\ wdl' = now + RestoreRebootWait
               /\ waitFrom' = labdBoot
          ELSE /\ cmd' = [kind |-> "cleanup", target |-> labdBoot]
               /\ lphase' = "cleanup"
@@ -557,7 +587,7 @@ LCollectLost ==
     /\ IF "CollectOnAnyBoot" \in Bugs
          THEN AfterCollect
          ELSE /\ lphase' = "lostwait"
-              /\ wdl' = now + Max(BootTimeout - QuietGrace, 1)
+              /\ wdl' = now + LostWait
               /\ UNCHANGED <<outcome, rdl, waitFrom>>
     /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmdLost,
                    labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
@@ -589,7 +619,7 @@ DoBootOnce ==
          IN  /\ oneShot' = a.os /\ block' = a.bl /\ nvWrites' = a.nv
              /\ ares' = IF a.ok THEN "ok" ELSE "failed"
              /\ after' = a.ok
-    /\ checked' = FALSE /\ runAfter' = FALSE /\ lastTry' = -1
+    /\ checked' = FALSE /\ runAfter' = FALSE /\ lastTry' = -1 /\ UNCHANGED quiesced
     /\ UNCHANGED <<staged, lphase, outcome, wdl, rdl, waitFrom, ladderStep, ladderRet,
                    ladderUsed, neverLeft, devState, cmdLost, labdBoot, labdTag, labdSeenAt,
                    armVerdict, restoreErr, macVars, wdVars, histVars>>
@@ -668,12 +698,15 @@ CheckIn ==
          THEN cmd' = NoCmd /\ cmdLost' = TRUE
          ELSE UNCHANGED <<cmd, cmdLost>>
     /\ devState' = IF devState = "needs_hands" THEN "pool" ELSE devState
+    \* callNote's clock stops while the Mac is silent: back, the test's
+    \* deadline moves by the time it was away (device.go)
+    /\ wdl' = IF lphase = "testing" /\ ~Alive THEN wdl + (now - labdSeenAt) ELSE wdl
     /\ IF kernel = "Test"
          THEN /\ contact' = TRUE
               /\ heard' = now
               /\ wdUntil' = IF testing THEN wdUntil ELSE now + WatchdogIdle
          ELSE UNCHANGED <<contact, heard, wdUntil>>
-    /\ UNCHANGED <<lphase, outcome, wdl, rdl, waitFrom, ladderStep, ladderRet,
+    /\ UNCHANGED <<lphase, outcome, rdl, waitFrom, ladderStep, ladderRet,
                    ladderUsed, neverLeft, armVerdict, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, hasDl, dlNC, dlCeil, seen, agentVars,
                    wdHeld, testing, testStart, testDone, histVars>>
@@ -682,6 +715,7 @@ CheckIn ==
 \* POST. On a 200 the afterAck runs; on a failure the agent retries.
 AgentReport ==
     /\ ares /= "none" /\ lastTry < now /\ mac = "running" /\ userspace
+    /\ UNCHANGED quiesced
     /\ \E r \in ArmResults, c \in CancelResults,
           delivered \in (IF "ReportLost" \in Faults THEN BOOLEAN ELSE {TRUE}) :
          LET doCheck == after /\ "NoRearm" \notin Bugs
@@ -690,10 +724,16 @@ AgentReport ==
                   ELSE [ok |-> TRUE, os |-> oneShot, bl |-> block, nv |-> nvWrites]
              okNow == ares = "ok" /\ a.ok
              after2 == after /\ a.ok
-         IN  /\ oneShot' = a.os /\ block' = a.bl /\ nvWrites' = a.nv
+             \* labd gave up on the arm and answers it forgotten: the agent
+             \* cancels the one-shot instead of rebooting (4a5a608)
+             forgotten == delivered /\ net /\ lphase /= "arming" /\ after2
+                          /\ armVerdict \in {"timeout", "lost"}
+                          /\ "LateAckReboots" \notin Bugs
+         IN  /\ oneShot' = IF forgotten /\ c = "ok" THEN FALSE ELSE a.os
+             /\ block' = a.bl /\ nvWrites' = a.nv
              /\ checked' = (checked \/ (doCheck /\ a.ok))
              /\ IF delivered /\ net
-                  THEN /\ ares' = "none" /\ after' = FALSE /\ runAfter' = after2
+                  THEN /\ ares' = "none" /\ after' = FALSE /\ runAfter' = (after2 /\ ~forgotten)
                        /\ UNCHANGED lastTry
                        /\ IF lphase = "arming"
                             THEN IF okNow
@@ -726,6 +766,8 @@ AfterRun ==
                 IN  /\ oneShot' = a.os /\ block' = a.bl /\ nvWrites' = a.nv
                     /\ IF a.ok THEN mac' = "shutdown" /\ graceful' = TRUE
                        ELSE UNCHANGED <<mac, graceful>>
+    \* syncs stop before the re-arm and start again if it fails (dd4cd55)
+    /\ quiesced' = ("NoRearm" \notin Bugs /\ "NoQuiesce" \notin Bugs /\ mac' = "shutdown")
     /\ UNCHANGED <<ares, checked, after, lastTry>>
     /\ UNCHANGED <<now, staged, boot, kernel, userspace, bootAt, skew, net>>
     /\ UNCHANGED <<labdVars, recVars, wdVars, histVars>>
@@ -772,7 +814,7 @@ FirmwareBoot ==
     /\ contact' = FALSE
     /\ wdHeld' = FALSE /\ testing' = FALSE /\ testDone' = FALSE
     /\ ares' = "none" /\ checked' = FALSE /\ after' = FALSE /\ runAfter' = FALSE
-    /\ lastTry' = -1
+    /\ lastTry' = -1 /\ quiesced' = FALSE
     /\ UNCHANGED <<now, labdVars, block, staged, nvWrites, hasDl, dlNC, dlCeil, seen,
                    wdUntil, heard, testStart, deadKernel, netDropped, kernelCrashed,
                    ranOnKG, wdBeatDeadline, blockDropped>>
@@ -799,14 +841,16 @@ EarlyUnit ==
     /\ UNCHANGED <<now, labdVars, espVars, hasDl, dlNC, dlCeil, contact, agentVars,
                    wdVars, histVars>>
 
-\* lab-agent stopped feeding at wdUntil; the hardware resets a minute later,
-\* leaving no reason behind.
+\* lab-agent stopped feeding at wdUntil; the hardware resets a minute later.
+\* Outside a test that is a lost labd, which lab-agent records in boot.json
+\* first (3797cce); a test past its budget leaves no reason.
 WatchdogReset ==
     /\ wdHeld /\ mac = "running" /\ now >= wdUntil + WatchdogHW
     /\ HardReset
     /\ wdBeatDeadline' = (wdBeatDeadline \/ ~contact)
+    /\ seen' = IF ~testing /\ "WatchdogNoReason" \notin Bugs THEN "lost_labd" ELSE seen
     /\ UNCHANGED <<boot, kernel, userspace, bootAt, skew, net>>
-    /\ UNCHANGED <<now, labdVars, espVars, recVars, agentVars, wdVars,
+    /\ UNCHANGED <<now, labdVars, espVars, hasDl, dlNC, dlCeil, contact, agentVars, wdVars,
                    deadKernel, testBooted, netDropped, kernelCrashed, ranOnKG,
                    blockDropped, strayBoot>>
 
@@ -822,7 +866,7 @@ DeadReset ==
 
 SnapperSync ==
     /\ "SnapperSync" \in Faults
-    /\ block
+    /\ block /\ ~quiesced
     /\ \/ mac = "running"
        \/ "SnapperAtShutdown" \in Faults /\ mac = "shutdown" /\ graceful
     /\ block' = FALSE
@@ -872,9 +916,12 @@ Cancel ==
        \/ lphase = "lostwait"
        \/ lphase = "ladder" /\ ladderRet \in {"boot", "test"}
     /\ EnterRestore(CASE lphase = "waitback" -> "canceled"
-                      [] lphase = "lostwait" -> "crashed_or_hung"
+                      \* with no kernel error seen, the cancel's (3021d9f)
+                      [] lphase = "lostwait" ->
+                           IF "CancelBlamesLost" \in Bugs THEN "crashed_or_hung" ELSE "canceled"
                       \* infra_error, which canceledAfter makes canceled
                       [] ladderRet = "boot" /\ NeverRebooted -> "canceled"
+                      [] ladderRet = "test" /\ neverLeft /\ "NetBackIsHung" \notin Bugs -> "lost_contact"
                       [] OTHER -> "hung")
     /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmd, cmdLost,
                    labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
@@ -917,7 +964,7 @@ Init ==
     /\ block = TRUE /\ oneShot = FALSE /\ staged = TRUE /\ nvWrites = 0
     /\ hasDl = FALSE /\ dlNC = 0 /\ dlCeil = 0 /\ seen = "none" /\ contact = FALSE
     /\ ares = "none" /\ checked = FALSE /\ after = FALSE /\ runAfter = FALSE
-    /\ lastTry = -1
+    /\ lastTry = -1 /\ quiesced = FALSE
     /\ wdHeld = FALSE /\ wdUntil = 0 /\ heard = 0
     /\ testing = FALSE /\ testStart = 0 /\ testDone = FALSE
     /\ deadKernel \in IF "DeadKernel" \in Faults THEN BOOLEAN ELSE {FALSE}
@@ -951,7 +998,7 @@ TypeOK ==
     /\ mac \in {"running", "shutdown"}
     /\ seen \in {"none", ""} \cup Deadlines
     /\ ares \in {"none", "ok", "failed"}
-    /\ {ladderUsed, neverLeft, strayBoot, cmdLost, restoreErr, graceful, userspace, net, block, oneShot,
+    /\ {ladderUsed, neverLeft, strayBoot, quiesced, cmdLost, restoreErr, graceful, userspace, net, block, oneShot,
         staged, hasDl, contact, checked, after, runAfter, wdHeld, testing, testDone,
         deadKernel, testBooted, netDropped, kernelCrashed, ranOnKG, wdBeatDeadline,
         blockDropped} \subseteq BOOLEAN

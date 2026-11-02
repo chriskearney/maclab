@@ -17,16 +17,16 @@ The properties, named as in the module:
 
 | Property | What must hold | Guards |
 |---|---|---|
-| `BlameSound` | labd blames the test kernel (`boot_failed`, `hung`, `crashed_or_hung`, `tests_failed`) only for what the kernel did; an infra fault reads as `infra_error` or `lost_contact` | 18b9311, 2f2e337 |
+| `BlameSound` | labd blames the test kernel (`boot_failed`, `hung`, `crashed_or_hung`, `tests_failed`) only for what the kernel did; an infra fault reads as `infra_error` or `lost_contact` | 18b9311, 2f2e337, f20641b, dd4cd55, 1b269f5 |
 | `PassSound` | a pass is the test kernel's: it booted, its test ran on it, and it did not crash before labd's verdict | 6b6eae6, e250121 |
-| `NetLossNotBlamed` | a Lab boot that only lost its network is not the kernel's failure | open (#44, part 1) |
+| `NetLossNotBlamed` | a Lab boot that only lost its network is not the kernel's failure | 3797cce, 58a73c1, 3021d9f; open with a hard reset (#44, part 1) |
 | `LabBootOnlyDuringJob` | once labd is done, the Mac runs its Known-good kernel, or labd has taken it out of the pool | 1995466 |
 | `ArmFailedMeansDisarmed` | lab-agent never tells labd an arm failed while the one-shot is still set | b804c41, 693811d |
 | `NoUnwatchedLabBoot` | the test kernel never boots after lab-agent told labd its arm failed | 693811d |
 | `NoContactBeforeWatchdog` | the No-contact deadline, not the agent's watchdog, ends a Lab boot that never reached labd | 2f2e337 |
 | `WatchdogIdleFromLabd` | outside a test, a Lab boot that lost labd is reset `watchdogIdle` after the last sign of labd, no later | 953652a |
 | `BoundedFirmwareWrites`, `OneFirmwareWrite` | NVRAM and U-Boot's file see one one-shot write per Lab boot, however long labd is out of reach | b804c41 |
-| `HandsOnlyWhenStuck` | labd asks for hands only when the Mac can't come back by itself (CONTEXT.md, Needs hands) | open |
+| `HandsOnlyWhenStuck` | labd asks for hands only when the Mac can't come back by itself (CONTEXT.md, Needs hands) | 1b269f5, 10f4ab6, c478594, 4a5a608 |
 | `Terminates` | labd finishes the job before the model's clock runs out | |
 
 Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, and `check.sh` fails the build otherwise:
@@ -35,22 +35,20 @@ Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, 
 - **`bug-*.cfg`**: a fixed bug, replayed by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
 - **`open-*.cfg`**: what today's code still gets wrong, as far as the model knows. Each must fail. When one is fixed, its fix goes into the spec, the model is expected to pass, and it moves into `current*.cfg`'s faults or properties.
 
-The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them. Four are fixed and now replayed as bugs: a test kernel that panicked just after reaching labd passing on the Known-good kernel (6b6eae6), a Mac that never left its armed boot read as `hung` (f20641b), a failed first arm leaving the one-shot set while restore rebooted the Mac into it (693811d), and a test kernel that went down after its last test passing on the Known-good boot's logs (e250121).
+The models began as nine open findings (the first TLC run, each read against the code, five by reviewers trying to refute them). Fixed ones are replayed as bugs; one is accepted:
 
-| Model | What happens | How likely |
+- **Fixed:** a test kernel that panicked just after reaching labd passing on the Known-good kernel (6b6eae6); one that went down after its last test passing on the Known-good boot's logs (e250121); a Mac that never left its armed boot read as `hung` (f20641b); a failed first arm leaving the one-shot set while restore rebooted the Mac into it (693811d); a snapshot sync during shutdown dropping the block (dd4cd55); short boot timeouts giving up before the no-contact reboot was back (1b269f5); labd asking for hands on a Mac with no hard reset before its watchdog acted (10f4ab6, and in restore, c478594), and the Mac back in the pool on its test kernel after; a network loss mid-test blamed on the kernel (3797cce, 58a73c1, 3021d9f); a late arm result rebooting into a Lab boot labd had given up on (4a5a608).
+- **Accepted:** if cancelling a failed arm also fails (two boot-partition lock timeouts in a row), lab-agent reports the arm failed with the one-shot still set. labd's cleanup disarms it before anything reboots, which `current-cancelfails` checks (`NoUnwatchedLabBoot`); only the agent's own report is wrong.
+
+| Open model | What happens | How likely |
 |---|---|---|
-| `open-cancel-fails` | A failed arm's cancel fails on the same lock and is only logged: lab-agent tells labd the arm failed with the one-shot still set. Since 693811d labd's cleanup disarms it before anything reboots (`current-cancelfails`), so only the report is wrong. | Rare: two lock timeouts in a row. |
-| `open-snapper-at-shutdown` | A snapshot sync during shutdown, after the last re-arm, drops the block; labd says `boot_failed`. | snapper-cleanup's `ExecStopPost` runs limine-snapper-sync when shutdown stops it. |
-| `open-hands-before-watchdog` | A tier 1 Mac's Lab boot loses its network in a test: labd asks for hands about 6 minutes after it last heard from it, before the agent's watchdog (11 minutes) would bring it back. | Any network loss mid-test on the fork's M1. |
-| `open-back-in-pool-on-test-kernel` | ... and if the network comes back, the check-in returns the Mac to the pool on its test kernel, restore skipped, until the next job's pre-job restore. | Follows the one above. |
-| `open-net-loss-blamed` | A network loss mid-test is classified `hung` or `crashed_or_hung`, against the kernel. | Known: malik-na/maclab#44, part 1. |
-| `open-short-boot-timeout` | With a 3-minute boot timeout, labd stops waiting before the no-contact reboot and the Known-good boot after it are back, and on a tier 1 Mac says `hung`. | Only for short per-job boot timeouts; nothing rejects them. |
+| `open-net-loss-blamed` | On a Mac **with** a hard reset, a Lab boot that only lost its network mid-test is reset by labd's ladder before lab-agent's watchdog can say it lost labd, and is classified `hung`. Without a hard reset it reads `lost_contact`. | Any network loss mid-test on a Mac with oobd (malik-na/maclab#44, part 1). |
 
 To read a counterexample, run TLC on the model by hand. It prints the run state by state, each headed by the action taken:
 
 ```sh
 cd specs/labboot
-java -cp ../.tools/tla2tools.jar tlc2.TLC -deadlock -config models/open-snapper-at-shutdown.cfg LabBoot
+java -cp ../.tools/tla2tools.jar tlc2.TLC -deadlock -config models/open-net-loss-blamed.cfg LabBoot
 ```
 
 ### What the model leaves out

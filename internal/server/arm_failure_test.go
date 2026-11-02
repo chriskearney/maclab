@@ -93,7 +93,7 @@ func TestTestKernelTheLadderBootsAfterAFailedRebootIsJudged(t *testing.T) {
 // Snapshot syncs stop just before the last re-arm, so none can drop the
 // lab's block from limine.conf between it and the firmware reading it; they
 // start again only if the reboot doesn't happen (specs/labboot:
-// open-snapper-at-shutdown).
+// bug-dd4cd55-no-quiesce).
 func TestSnapshotSyncsStopBeforeTheLastRearm(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
