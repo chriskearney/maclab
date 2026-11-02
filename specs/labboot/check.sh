@@ -22,9 +22,10 @@ cd "$here"
 
 # bugs.txt's lines become models: name | expect | BootTimeout | OOB | Faults | Bugs | what
 trim() { sed 's/^ *//; s/ *$//' <<<"$1"; }
-while IFS='|' read -r name expect boot oob faults bugs what; do
+while IFS='|' read -r name expect boot oob faults bugs what || [ -n "$name" ]; do # a last line with no newline too
 	name=$(trim "$name")
 	[ -n "$name" ] && [ "${name:0:1}" != "#" ] || continue
+	[[ $name == bug-* ]] || { echo "models/bugs.txt: $name: a bug's name starts with bug-" >&2; exit 2; }
 	printf '%s\n' "\\* $(trim "$what")" "\\* expect: $(trim "$expect")" "SPECIFICATION Spec" "CONSTANTS" \
 		"    BootTimeout = $(trim "$boot")" "    BootLen = 2" "    TestLen = 2" "    MaxTime = 70" "    Skew = 1" \
 		"    OOB = $(trim "$oob")" "    Faults = {$(trim "$faults")}" "    Bugs = {$(trim "$bugs")}" \
