@@ -1298,12 +1298,18 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	if err != nil {
 		return 500, err
 	}
+	l := v.d.Lease
+	leased := l != nil && s.now().Before(l.Expires)
+	if leased && len(v.parked) > 0 {
+		return 409, fmt.Errorf("%s has %d queued jobs set aside by %s's lease until %s: end the lease (`lab release %s --force`) so they run, or cancel them, first",
+			name, len(v.parked), l.Who(), l.Expires.Format(time.DateTime), name)
+	}
 	if v.d.State == api.StateBusy || v.d.State == api.StateRecovering || len(v.queue) > 0 || len(open) > 0 {
 		return 409, fmt.Errorf("%s has a job running or queued; cancel it first", name)
 	}
-	if l := v.d.Lease; !force && l != nil && s.now().Before(l.Expires) && l.Holder != holder {
-		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s --holder %s`), or pass --force",
-			name, l.Holder, l.Expires.Format(time.DateTime), name, l.Holder)
+	if !force && leased && l.Holder != holder {
+		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s`, or `lab release %s --force` if it is another Maintainer's), or pass --force",
+			name, l.Who(), l.Expires.Format(time.DateTime), name, name)
 	}
 	// An agent that told labd it is leaving may still check in until
 	// uninstall has stopped it. Any other one that checks in is still set up,
@@ -1344,17 +1350,18 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	if req.TTLSec <= 0 {
 		req.TTLSec = 3600
 	}
+	me := maintainerName(r)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
-		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+	if why := v.leaseHoldsBackLocked(req.Holder, me); why != "" {
+		httpErr(w, 409, "%s", why)
 		return
 	}
 	if err := s.mayDoLocked(callerOf(r), v, actLease); err != nil {
 		httpErr(w, 409, "%v", err)
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Maintainer: me, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
 	v.capLeaseLocked()
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
@@ -1366,14 +1373,35 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	holder := r.URL.Query().Get("holder")
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	me := maintainerName(r)
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
-		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
-		return
+	l := v.d.Lease
+	live := l != nil && s.now().Before(l.Expires)
+	if live && !force {
+		// Only the Maintainer who took a lease ends it early, unless another
+		// Maintainer forces it: one forgotten would otherwise hold the Mac.
+		if l.Maintainer != "" && l.Maintainer != me {
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is leased by %s until %s; only %s can release it, or another Maintainer with `lab release %s --force`", v.d.Name, l.Who(), l.Expires.Format(time.TimeOnly), l.Maintainer, v.d.Name)
+			return
+		}
+		if holder != "" && l.Holder != holder {
+			v.mu.Unlock()
+			httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
+			return
+		}
 	}
-	v.d.Lease = nil
-	v.saveLocked()
+	forced := live && force && (l.Maintainer != me || (holder != "" && l.Holder != holder))
+	v.mu.Unlock()
+	if forced {
+		if !s.endLease(v, l, "ended early by Maintainer "+me+" (lab release --force)") {
+			httpErr(w, 409, "%s's lease changed meanwhile; look again before releasing it", v.d.Name)
+			return
+		}
+	} else {
+		s.endLease(v, nil, "")
+	}
 	w.Write([]byte("ok"))
 }
 
@@ -1397,8 +1425,8 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
-	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
-		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
+	if lease != nil && s.now().Before(lease.Expires) && !lease.HeldBy(by, maintainerName(r)) {
+		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Who(), lease.Expires.Format(time.DateTime))
 		return
 	}
 	back, err := s.rejoin(v, "reset requested by "+orStr(by, "an admin"))
@@ -1703,8 +1731,11 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 			return nil, code, err
 		}
 	}
-	if l := d.Lease; l != nil && l.Holder != spec.Holder {
-		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+	v.mu.Lock()
+	leased := v.leaseHoldsBackLocked(spec.Holder, maintainer)
+	v.mu.Unlock()
+	if leased != "" {
+		return nil, 409, errors.New(leased)
 	}
 	now := s.now()
 	msg := "queued"

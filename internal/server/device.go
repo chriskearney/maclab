@@ -41,6 +41,7 @@ type dev struct {
 	dirty         bool // a lab kernel may still be staged on the Mac
 	restore       api.DeviceState
 	queue         chan string
+	parked        []parkedJob   // queued jobs someone else's lease holds back (see park)
 	gone          chan struct{} // closed when the device is forgotten: ends deviceLoop
 	stop          chan struct{} // closed when the Mac's enrollment ends
 	goneWhy       string        // why it ended, once it has

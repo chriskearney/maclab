@@ -209,7 +209,7 @@ func (s *Server) hRecoveryMode(w http.ResponseWriter, r *http.Request) {
 	v.recoveryMu.Lock()
 	defer v.recoveryMu.Unlock()
 	current := v.snapshot()
-	if current.Lease == nil || current.Lease.Holder != q.Holder || time.Until(current.Lease.Expires) < 30*time.Second || current.ActiveJob != "" || len(v.queue) > 0 {
+	if current.Lease == nil || !current.Lease.HeldBy(q.Holder, maintainerName(r)) || time.Until(current.Lease.Expires) < 30*time.Second || current.ActiveJob != "" || len(v.queue) > 0 {
 		httpErr(w, 409, "own lease covering transition and idle device required")
 		return
 	}

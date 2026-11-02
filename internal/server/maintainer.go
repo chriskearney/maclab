@@ -189,6 +189,7 @@ func (s *Server) hRemoveMaintainer(w http.ResponseWriter, r *http.Request) {
 	case removed:
 		s.conns.end(name)
 		s.log.Printf("Maintainer %s removed by %s", name, maintainerName(r))
+		s.endLeasesOf(name, "ended: Maintainer "+name+" was removed by "+maintainerName(r))
 		writeJSON(w, map[string]string{"removed": name})
 	case s.store.hasMaintainer(name):
 		httpErr(w, 409, "%s is the last Maintainer; add another first", name)

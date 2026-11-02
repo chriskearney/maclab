@@ -41,8 +41,25 @@ type OOBConfig struct {
 }
 
 type Lease struct {
-	Holder  string    `json:"holder"`
-	Expires time.Time `json:"expires"`
+	Holder string `json:"holder"`
+	// Maintainer is whose token took the lease; empty for one labd stored
+	// before it recorded that. Only they renew it, release it, or run jobs
+	// under it, whatever holder another Maintainer names.
+	Maintainer string    `json:"maintainer,omitempty"`
+	Expires    time.Time `json:"expires"`
+}
+
+// HeldBy is whether the lease is holder's, acting for maintainer.
+func (l *Lease) HeldBy(holder, maintainer string) bool {
+	return l.Holder == holder && (l.Maintainer == "" || l.Maintainer == maintainer)
+}
+
+// Who names the lease's holder, and its Maintainer when that is someone else.
+func (l *Lease) Who() string {
+	if l.Maintainer == "" || l.Maintainer == l.Holder {
+		return l.Holder
+	}
+	return l.Holder + " (Maintainer " + l.Maintainer + ")"
 }
 
 // HumanAction is the one instruction a person needs when the lab cannot recover a device itself.

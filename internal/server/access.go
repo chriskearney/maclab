@@ -45,7 +45,9 @@ func (v *dev) syncAccessLocked(ci api.Checkin) bool {
 	v.d.AccessLevel, v.d.Publish = ci.AccessLevel, ci.Publish
 	if l := v.d.Lease; lowered && l != nil && v.s.now().Before(l.Expires) {
 		v.s.log.Printf("%s: its Volunteer lowered the Access level; %s's lease ends", v.d.Name, l.Holder)
-		v.d.Lease = &api.Lease{Holder: l.Holder, Expires: v.s.now()}
+		ended := *l
+		ended.Expires = v.s.now()
+		v.d.Lease = &ended
 	}
 	return true
 }

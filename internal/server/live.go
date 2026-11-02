@@ -129,7 +129,7 @@ func (v *dev) viewLocked() DeviceView {
 		oob.Token = ""
 		d.OOB = &oob
 	}
-	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue), ScreenAt: v.screenAt}
+	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue) + len(v.parked), ScreenAt: v.screenAt}
 }
 
 // publishLocked sends the device to the web UI, which adds a device it

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/window"
 )
 
@@ -79,7 +78,9 @@ func (v *dev) capLeaseLocked() bool {
 	if !l.Expires.After(end) {
 		return false
 	}
-	v.d.Lease = &api.Lease{Holder: l.Holder, Expires: end}
+	capped := *l
+	capped.Expires = end
+	v.d.Lease = &capped
 	return true
 }
 
