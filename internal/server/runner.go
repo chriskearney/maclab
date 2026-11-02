@@ -486,11 +486,21 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	if err != nil {
 		return api.OutcomeCanceled, "canceled while booting"
 	}
+	// The arm was acked, but the Mac stayed up on the boot it armed:
+	// lab-agent's re-arm before the reboot, or the reboot itself, failed.
+	// The test kernel never ran, so that is the lab's failure, not its.
+	const neverRebooted = "the Mac never rebooted into the test kernel after its one-shot was armed: lab-agent's re-arm before the reboot, or the reboot itself, failed"
 	if !ok {
+		if neverLeft(steps) {
+			return api.OutcomeInfra, neverRebooted
+		}
 		o, cause := r.classify(t0, steps)
 		return o, cause
 	}
 	d = v.snapshot()
+	if d.Health.JobTag != j.ID && neverLeft(steps) {
+		return api.OutcomeInfra, neverRebooted
+	}
 	if d.Health.JobTag != j.ID {
 		o, cause := r.classify(t0, steps)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.FellBack = true })

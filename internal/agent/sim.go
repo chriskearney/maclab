@@ -95,6 +95,9 @@ type Sim struct {
 	stageFail  func(attempt int) error
 	stageTries int
 
+	armFail func(arm int) (wrote bool, err error) // see FailArm
+	arms    int
+
 	// A Volunteer's Mac. Every knob is off by default.
 	// Encrypted holds every cold boot at the disk password prompt until TypePassword.
 	Encrypted bool
@@ -283,6 +286,22 @@ func (s *Sim) FailStage(f func(attempt int) error) {
 	s.stageFail, s.stageTries = f, 0
 }
 
+// FailArm makes arming the one-shot fail where f says: it is called with
+// each arm's number from 1, and an error fails that arm, after the one-shot
+// is written if wrote, as a persist or readback failing would.
+func (s *Sim) FailArm(f func(arm int) (wrote bool, err error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armFail, s.arms = f, 0
+}
+
+// Armed is the one-shot boot entry, "" if none.
+func (s *Sim) Armed() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
+}
+
 // Quiet makes the machine unreachable for d on the same boot, as a network
 // outage would: no check-ins, no reports, and whatever runs carries on.
 func (s *Sim) Quiet(d time.Duration) { s.suspend(d, false) }
@@ -365,6 +384,15 @@ func (s *Sim) BootOnce(entry string) error {
 	defer s.mu.Unlock()
 	if _, ok := s.staged[strings.TrimPrefix(entry, entryPrefix)]; !ok {
 		return fmt.Errorf("entry %s is not staged", entry)
+	}
+	s.arms++
+	if s.armFail != nil {
+		if wrote, err := s.armFail(s.arms); err != nil {
+			if wrote {
+				s.armed = entry
+			}
+			return err
+		}
 	}
 	s.armed = entry
 	return nil
