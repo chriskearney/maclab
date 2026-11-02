@@ -29,7 +29,8 @@ import (
 // reboot-in-test (reboots with no kernel message), hang-in-test (goes silent
 // for HangFor, then a watchdog resets it, again with no kernel message),
 // crash-after-boot (reaches labd, then reboots with no kernel message as labd
-// takes its first screenshot, which never answers) and no-network (boots to
+// takes its first screenshot, which never answers), crash-after-tests (the
+// same, at the first screenshot after a test ran) and no-network (boots to
 // the login prompt, then never reaches labd). A field
 // apple_wdt=n says the kernel was built without apple_wdt.
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
@@ -61,6 +62,7 @@ type Sim struct {
 	armed        string
 	staged       map[string]simEntry
 	behavior     string
+	tested       bool // a test has run on this boot
 	gen          int
 	kmsg         chan string
 	Boots        int
@@ -534,6 +536,7 @@ func (s *Sim) up(gen int, e simEntry) {
 		return
 	}
 	s.kernel, s.cmdline, s.behavior, s.noAppleWDT = e.krel, e.cmdline, e.behavior, e.noAppleWDT
+	s.tested = false
 	s.alive = e.behavior != "no-network" // up, but labd never hears from it
 	if unit := s.earlyUnit; unit != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -724,6 +727,7 @@ func (s *Sim) Inhibitors() []string {
 func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	s.mu.Lock()
 	b, length, down := s.behavior, s.testLength, s.down
+	s.tested = true
 	s.mu.Unlock()
 	if length > 0 {
 		wait := time.NewTimer(length)
@@ -820,9 +824,9 @@ func (s *Sim) Collect(ctx context.Context, boot, outDir string) error {
 
 func (s *Sim) Screenshot(ctx context.Context, path string, wait time.Duration) (int, int, error) {
 	s.mu.Lock()
-	k, b := s.kernel, s.behavior
+	k, b, tested := s.kernel, s.behavior, s.tested
 	s.mu.Unlock()
-	if b == "crash-after-boot" {
+	if b == "crash-after-boot" || b == "crash-after-tests" && tested {
 		s.boot("")
 		<-ctx.Done()
 		return 0, 0, errors.New("machine went away")

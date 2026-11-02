@@ -507,6 +507,19 @@ func TestRebootRightAfterBootIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
 	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
 }
 
+// So does one that goes down after its last test, before labd collects its
+// logs: they are not collected from the known-good boot, nor judged a pass.
+func TestRebootAfterTheTestsIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-fragile behavior=crash-after-tests")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "crashed or hung after its tests") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
 func TestHangDuringTestResetByWatchdog(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
