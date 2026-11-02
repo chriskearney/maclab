@@ -72,7 +72,8 @@ BugNames == {
     "CancelBlamesLost",
     "RestoreHandsEarly",  \* c478594: restore's reboot wait doesn't wait out the watchdog
     "NetBackIsHung",      \* 58a73c1: a Lab boot back on the same boot reads as hung
-    "LateAckReboots"}     \* 4a5a608: a late arm result, labd having given up, still reboots   \* 3021d9f: a cancel while waiting for a lost boot blames its kernel
+    "LateAckReboots",     \* 4a5a608: a late arm result, labd having given up, still reboots
+    "WaitAfterForgottenArm"} \* bfa3a3e: restore waits for the reboot of an arm labd gave up on   \* 3021d9f: a cancel while waiting for a lost boot blames its kernel
 
 ASSUME /\ BootTimeout \in Nat \ {0}
        /\ BootLen \in Nat \ {0}
@@ -99,7 +100,9 @@ CollectTimeout  == 5   \* runner.go collectTimeout
 Budget          == TestLen + 1                 \* watchdog.go testBudget: timeout + 20 s
 LostLabdReset   == WatchdogIdle + WatchdogHW   \* watchdog.go LostLabdReset
 JobLen          == 3 * BootTimeout + 5 + TestLen + TestGrace  \* runner.go labBootJob
-RestoreBudget   == 3 * BootTimeout + 5         \* runner.go runJob: restore's context
+RestoreBudget   ==                             \* runner.go runJob: restore's context, with
+    3 * BootTimeout + 5                        \* the watchdog allowance when there is no
+    + (IF OOB THEN 0 ELSE WatchdogIdle + WatchdogHW + BootTimeout)  \* hard reset (bfa3a3e)
 NoContactWait   ==                             \* labboot.go NoContactDeadline
     IF "NoContactUncapped" \in Bugs THEN 2 * BootTimeout
     ELSE Min(2 * BootTimeout, WatchdogIdle - NoContactMargin)
@@ -317,7 +320,6 @@ NeedsHands(ret, nl) ==
     /\ devState' = "needs_hands"
     /\ lphase' = "done"
     /\ outcome' = IF ret = "boot" /\ nl /\ "NeverLeftIsHung" \notin Bugs THEN "infra_error"
-                  ELSE IF ret = "test" /\ nl /\ "NetBackIsHung" \notin Bugs THEN "lost_contact"
                   ELSE IF ret \in {"boot", "test"} THEN "hung"
                   ELSE IF outcome = "pass" THEN "infra_error" ELSE outcome
     /\ restoreErr' = (restoreErr \/ ret \in RestoreRets)
@@ -355,7 +357,7 @@ LArmTimeout ==
     /\ lphase = "arming" /\ now >= wdl
     /\ armVerdict' = "timeout"
     /\ cmd' = NoCmd
-    /\ EnterRestore("infra_error")
+    /\ EnterRestoreIf("infra_error", "WaitAfterForgottenArm" \in Bugs)
     /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmdLost, labdBoot,
                    labdTag, labdSeenAt, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
@@ -364,7 +366,7 @@ LArmTimeout ==
 LArmLost ==
     /\ lphase = "arming" /\ labdBoot /= 0
     /\ armVerdict' = "lost"
-    /\ EnterRestore("infra_error")
+    /\ EnterRestoreIf("infra_error", "WaitAfterForgottenArm" \in Bugs)
     /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmd, cmdLost,
                    labdBoot, labdTag, labdSeenAt, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
@@ -404,20 +406,24 @@ LTestLostReboot ==
                    armVerdict, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
 
+\* When lab-agent's watchdog stops being fed for the last test labd sent: its
+\* budget, which labd's own timeout for it covers (bfa3a3e).
+WatchdogTestEnd == testStart + TestLen + TestGrace
+
 \* How long lostDuringTest waits for a Lab boot it lost: max(boot -
 \* quietGrace, 1), and on a Mac with no hard reset until the agent's watchdog
 \* has reset it and a boot timeout more (lostSelfRecovery, 10f4ab6).
 LostWait ==
     LET timeout == Max(BootTimeout - QuietGrace, 1)
-    IN  IF OOB \/ "HandsBeforeWatchdog" \in Bugs THEN timeout
-        ELSE Max(timeout, labdSeenAt + LostLabdReset - now + BootTimeout)
+    IN  IF OOB \/ "HandsBeforeWatchdog" \in Bugs \/ Alive THEN timeout
+        ELSE Max(timeout, Max(labdSeenAt + LostLabdReset, WatchdogTestEnd) - now + BootTimeout)
 
 \* restore's wait for its reboot to the Known-good kernel: a boot timeout,
 \* and on a Mac with no hard reset until the watchdog has reset a Lab boot
 \* that can't hear the reboot (c478594).
 RestoreRebootWait ==
-    IF OOB \/ "RestoreHandsEarly" \in Bugs THEN BootTimeout
-    ELSE Max(BootTimeout, labdSeenAt + LostLabdReset - now + BootTimeout)
+    IF OOB \/ "RestoreHandsEarly" \in Bugs \/ Alive THEN BootTimeout
+    ELSE Max(BootTimeout, Max(labdSeenAt + LostLabdReset, WatchdogTestEnd) - now + BootTimeout)
 
 \* run_test fails: the Mac has been silent past quietGrace on the same boot.
 LTestSilent ==
