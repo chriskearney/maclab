@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
@@ -15,30 +14,17 @@ import (
 var (
 	panicGrace  = 60 * time.Second  // panic=10 should have rebooted it well within this
 	serialStall = 120 * time.Second // console silent mid-boot for this long = hung
-	// rebootGrace is how long after being asked to reboot a Mac may still be
-	// heard on its old boot: one going down stops talking within seconds, so
-	// one still checking in after this never went down at all.
-	rebootGrace = 15 * time.Second
 )
-
-// stillOnOldBoot starts the ladder's reason for a Mac that never left the
-// boot it was asked to leave; neverLeft finds it in the ladder's steps.
-const stillOnOldBoot = "still on the old boot"
-
-// neverLeft is whether waitBack's ladder found the Mac still up on the boot
-// it waited for it to leave: it never rebooted by itself, whatever the ladder
-// did after.
-func neverLeft(steps []string) bool {
-	return len(steps) > 0 && strings.HasPrefix(steps[0], "detected: "+stillOnOldBoot)
-}
 
 // waitBack waits for the Mac to come up on a new boot after `since`. When it
 // doesn't, it gives the Mac selfRecovery more to come back by itself (a Lab
 // boot's deadlines reboot it), then walks the recovery ladder. It returns the
-// ladder steps used and whether the Mac is back.
-func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout, selfRecovery time.Duration) ([]string, bool, error) {
+// ladder steps used, whether the Mac is back, and whether the ladder found it
+// still up on oldBoot: it never went down by itself, whatever the ladder did
+// after.
+func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout, selfRecovery time.Duration) (steps []string, ok, neverLeft bool, err error) {
 	var reason string
-	err := v.waitFor(ctx, timeout+selfRecovery, func() bool {
+	err = v.waitFor(ctx, timeout+selfRecovery, func() bool {
 		if v.d.BootID != oldBoot && v.d.LastSeen.After(since) {
 			return true
 		}
@@ -61,29 +47,30 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 		return false
 	})
 	if err != nil && err != context.DeadlineExceeded {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	v.mu.Lock()
 	back := v.d.BootID != oldBoot && v.d.LastSeen.After(since)
 	// A Mac that is going down stops talking within seconds. Only one still
 	// checking in well after the reboot request never went down at all.
-	stillUp := v.d.BootID == oldBoot && v.aliveLocked() && v.d.LastSeen.After(since.Add(rebootGrace))
+	stillUp := v.d.BootID == oldBoot && v.aliveLocked() && v.d.LastSeen.After(since.Add(v.s.cfg.RebootGrace))
 	v.mu.Unlock()
 	if back {
-		return nil, true, nil
+		return nil, true, false, nil
 	}
 	if reason == "" {
 		switch {
 		case stillUp:
-			reason = fmt.Sprintf(stillOnOldBoot+" %s after asking it to reboot", timeout+selfRecovery)
+			neverLeft = true
+			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout+selfRecovery)
 		case selfRecovery > 0:
 			reason = fmt.Sprintf("did not check in within %s, nor come back by itself %s after that", timeout, selfRecovery)
 		default:
 			reason = fmt.Sprintf("did not check in within %s", timeout)
 		}
 	}
-	steps, ok := v.ladder(ctx, reason, timeout, stillUp)
-	return steps, ok, nil
+	steps, ok = v.ladder(ctx, reason, timeout, stillUp)
+	return steps, ok, neverLeft, nil
 }
 
 // ladder is the recovery ladder: soft reboot, hard reset (twice), then a

@@ -49,6 +49,14 @@ type Config struct {
 	// keeps the LAN default; labd's flags default to remote-sized values.
 	AliveWindow time.Duration // how stale a heartbeat may be before a Mac counts unresponsive
 	QuietGrace  time.Duration // silence on the same boot before a command counts lost
+	// RebootGrace, LabClockSkew and WatchdogIdleReset are lab-agent's times
+	// that labd waits on; zero keeps their real values (a harness with
+	// seconds-long boots sets them shorter). RebootGrace: how long a Mac asked
+	// to reboot may still be heard on its old boot, 15 s. LabClockSkew: how
+	// far a Lab boot's clock may run behind, agent.NoContactMargin.
+	// WatchdogIdleReset: how long after its last sign of labd the agent's
+	// watchdog resets a Lab boot outside a test, agent.LostLabdReset.
+	RebootGrace, LabClockSkew, WatchdogIdleReset time.Duration
 	// WatchdogOpenTimeout is watchdog.open_timeout on every Lab boot's command
 	// line; 0 leaves it to lab-agent: half the job's boot timeout, at least
 	// 120 s.
@@ -220,6 +228,15 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	if cfg.QuietGrace == 0 {
 		cfg.QuietGrace = quietGrace
+	}
+	if cfg.RebootGrace == 0 {
+		cfg.RebootGrace = 15 * time.Second
+	}
+	if cfg.LabClockSkew == 0 {
+		cfg.LabClockSkew = agent.NoContactMargin
+	}
+	if cfg.WatchdogIdleReset == 0 {
+		cfg.WatchdogIdleReset = agent.LostLabdReset
 	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
