@@ -417,6 +417,12 @@ func (v *dev) send(kind, job string, args any) string { return v.sendFor(caller{
 // Mac's own Volunteer, or when neither whoever submitted the job. The Mac
 // records who in its Audit log.
 func (v *dev) sendFor(c caller, kind, job string, args any) string {
+	return v.sendForBoot(c, "", kind, job, args)
+}
+
+// sendForBoot is sendFor for one boot of the Mac ("" is the one it is on
+// now): no other boot ever gets the command.
+func (v *dev) sendForBoot(c caller, boot, kind, job string, args any) string {
 	maintainer := c.maintainer
 	if maintainer == "" && c.login == "" && job != "" {
 		if j, err := v.s.store.job(job); err == nil {
@@ -428,7 +434,10 @@ func (v *dev) sendFor(c caller, kind, job string, args any) string {
 	v.mu.Lock()
 	v.grantLocked(cmd)
 	v.pending = append(v.pending, cmd)
-	v.target[cmd.ID] = v.d.BootID
+	if boot == "" {
+		boot = v.d.BootID
+	}
+	v.target[cmd.ID] = boot
 	v.bump()
 	v.mu.Unlock()
 	return cmd.ID
@@ -526,11 +535,21 @@ func (v *dev) lostLocked(now time.Time) bool {
 // may be off the network (up to maxQuiet), and quietGrace otherwise. note, if
 // set, hears about sleeping and waking.
 func (v *dev) callNote(ctx context.Context, kind, job string, args any, timeout time.Duration, out any, note func(string)) error {
+	return v.callNoteOn(ctx, "", kind, job, args, timeout, out, note)
+}
+
+// callNoteOn is callNote for a command meant for one boot of the Mac ("" is
+// the one it is on now). If the Mac has left that boot, even before the
+// command goes out, the command is lost: a test labd sends for a Lab boot
+// that has already gone down must not run on the boot that replaced it.
+func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, timeout time.Duration, out any, note func(string)) error {
 	v.mu.Lock()
-	boot := v.d.BootID
+	if boot == "" {
+		boot = v.d.BootID
+	}
 	name := v.d.Name
 	v.mu.Unlock()
-	id := v.sendFor(callerOfCtx(ctx), kind, job, args)
+	id := v.sendForBoot(callerOfCtx(ctx), boot, kind, job, args)
 	deadline := v.s.now().Add(timeout)
 	var (
 		res            api.CommandResult

@@ -44,10 +44,32 @@ type fixture struct {
 	locked                     bool
 }
 
+// diskTempDir is t.TempDir on a disk: recovery archives refuse tmpfs and
+// ramfs, which /tmp is on some machines and CI runners. It falls back to the
+// package directory, part of a checkout.
+func diskTempDir(t *testing.T) string {
+	t.Helper()
+	d := t.TempDir()
+	var fs syscall.Statfs_t
+	if syscall.Statfs(d, &fs) == nil && uint64(fs.Type) != 0x01021994 && uint64(fs.Type) != 0x858458f6 {
+		return d
+	}
+	d, err := os.MkdirTemp(".", ".test-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(d) })
+	abs, err := filepath.Abs(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return abs
+}
+
 func fx(t *testing.T) *fixture {
 	t.Helper()
 	f := &fixture{}
-	root := t.TempDir()
+	root := diskTempDir(t)
 	esp := filepath.Join(root, "esp")
 	os.Mkdir(esp, 0700)
 	before := []byte("timeout: 3\ndefault_entry: Working\n/Working\n protocol: efi\n path: boot():/working.efi\n/Retired\n protocol: efi\n path: boot():/retired.efi\n/Other\n protocol: efi\n path: boot():/other.efi\n")

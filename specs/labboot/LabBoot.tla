@@ -58,7 +58,8 @@ BugNames == {
     "RearmNoCancel",      \* b804c41: a failed re-arm leaves the one-shot set
     "NoContactUncapped",  \* 2f2e337: no-contact deadline is 2x the boot timeout, uncapped
     "WdIdleFromAnyEvent", \* 953652a: a test ending feeds the watchdog from now
-    "RestoreNoWait"}      \* 1995466: restore decides on the boot it sees at once
+    "RestoreNoWait",      \* 1995466: restore decides on the boot it sees at once
+    "RunTestOnAnyBoot"}   \* 6b6eae6: run_test goes to whatever boot labd knows
 
 ASSUME /\ BootTimeout \in Nat \ {0}
        /\ BootLen \in Nat \ {0}
@@ -220,15 +221,16 @@ EnterRestore(o) ==
              ELSE /\ lphase' = "restore_check"
                   /\ UNCHANGED <<wdl, waitFrom>>
 
-\* Send the test (runner.go execute). callNote binds a command to the boot
-\* labd knows when it sends it, not to the boot it judged.
+\* Send the test (runner.go execute) to the Lab boot labd judged (callNoteOn
+\* with r.bootID). If the Mac has left it, the test is lost at once.
 \* Assigns cmd, cmdLost, lphase, wdl, waitFrom.
 StartTests ==
-    /\ cmd' = [kind |-> "run_test", target |-> labdBoot]
-    /\ cmdLost' = FALSE
-    /\ lphase' = "testing"
-    /\ wdl' = now + TestLen + TestGrace
-    /\ waitFrom' = labdBoot
+    LET b == IF "RunTestOnAnyBoot" \in Bugs THEN labdBoot ELSE waitFrom
+    IN  /\ cmd' = [kind |-> "run_test", target |-> b]
+        /\ cmdLost' = FALSE
+        /\ lphase' = "testing"
+        /\ wdl' = now + TestLen + TestGrace
+        /\ waitFrom' = b
 
 \* The Mac is back after the arm (runner.go execute): on the test entry,
 \* take the after-boot screenshot, then run the test; fell back, ask
@@ -329,8 +331,7 @@ LWaitbackExpire ==
     /\ UNCHANGED <<espVars, recVars, agentVars, wdVars, histVars>>
 
 \* The after-boot screenshot ends without an answer: the Mac is on another
-\* boot, or silent past quietGrace. execute logs it and runs the test anyway,
-\* on whatever boot labd knows now.
+\* boot, or silent past quietGrace. execute logs it and sends the test.
 LCaptureLost ==
     /\ lphase = "capture"
     /\ labdBoot /= waitFrom \/ now - labdSeenAt >= QuietGrace

@@ -18,7 +18,7 @@ The properties, named as in the module:
 | Property | What must hold | Guards |
 |---|---|---|
 | `BlameSound` | labd blames the test kernel (`boot_failed`, `hung`, `crashed_or_hung`, `tests_failed`) only for what the kernel did; an infra fault reads as `infra_error` or `lost_contact` | 18b9311, 2f2e337 |
-| `PassSound` | a pass is the test kernel's: it booted, and the test ran on it | open |
+| `PassSound` | a pass is the test kernel's: it booted, and the test ran on it | 6b6eae6 |
 | `NetLossNotBlamed` | a Lab boot that only lost its network is not the kernel's failure | open (#44, part 1) |
 | `LabBootOnlyDuringJob` | once labd is done, the Mac runs its Known-good kernel, or labd has taken it out of the pool | 1995466 |
 | `ArmFailedMeansDisarmed` | lab-agent never tells labd an arm failed while the one-shot is still set | b804c41 |
@@ -34,11 +34,10 @@ Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, 
 - **`bug-*.cfg`**: a fixed bug, replayed by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
 - **`open-*.cfg`**: what today's code still gets wrong, as far as the model knows. Each must fail. When one is fixed, its fix goes into the spec, the model is expected to pass, and it moves into `current*.cfg`'s faults or properties.
 
-The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them.
+The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them. A ninth, a test kernel that panicked just after reaching labd passing on the Known-good kernel, was fixed in 6b6eae6 and is now `bug-6b6eae6-tests-on-any-boot`.
 
 | Model | What happens | How likely |
 |---|---|---|
-| `open-pass-on-known-good` | The test kernel panics just after its first check-in, during the after-boot screenshot. If the Known-good boot checks in before quietGrace (3 min) runs out, `callNote` binds `run_test` to it (`device.go` `callNote` takes the BootID at the call's start, `runner.go` never checks `JobTag` again), the test runs on the Known-good kernel, and the job **passes**. | A race between the reboot (about 2 to 4 minutes) and quietGrace. |
 | `open-rearm-fails-after-ack` | The re-arm before the reboot fails (lock held by a snapshot sync), so the Mac never reboots; the ladder soft-reboots it and classify says `hung`. | Needs a lock held past a minute in a few seconds' window. |
 | `open-cancel-fails` | A re-arm fails on the lock, the cancel behind it fails on the same lock and is only logged: labd hears the arm failed with the one-shot still set. | Rare: two lock timeouts in a row. |
 | `open-arm-fails-after-write` | The first arm, in `exec`, does not cancel when it fails after writing the one-shot, as the re-arm does. | Narrow on U-Boot Macs: only a failure after the variable file is renamed in place. |
