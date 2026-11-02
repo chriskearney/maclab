@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/iconidentify/maclab/internal/agent"
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/detect"
 	"github.com/iconidentify/maclab/internal/installed"
@@ -838,7 +839,17 @@ func (r *jobRun) expectedLength() time.Duration {
 // by itself: lab-agent's early unit reboots one that never reaches labd at its
 // no-contact deadline (twice the boot timeout, at most 9 minutes), and the Mac then needs a boot
 // to check in.
-func (r *jobRun) noContactWait() time.Duration { return 2 * r.boot }
+// noContactWait is how long past its boot timeout labd gives a Lab boot that
+// never reached it: until lab-agent's no-contact deadline, on a clock that
+// may run that margin behind, has rebooted it; at least twice the boot
+// timeout. The boot timeout itself is left for the known-good boot after.
+func (r *jobRun) noContactWait() time.Duration {
+	return max(2*r.boot, agent.NoContactDeadline(r.boot)+labClockSkew)
+}
+
+// labClockSkew is how far behind a Lab boot's clock may run, as lab-agent's
+// no-contact deadline allows for (a knob, for the harness's short boots).
+var labClockSkew = agent.NoContactMargin
 
 // selfRecovery is how long past its boot timeout labd waits for a Lab boot to
 // come back by itself before the recovery ladder. A Lab-owned Mac's OOB hard

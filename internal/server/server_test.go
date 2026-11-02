@@ -160,6 +160,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 		quietGrace = 3 * time.Second
 		quickReboot = 3 * time.Second
 		rebootGrace = 2 * time.Second
+		labClockSkew = time.Second
 		stageBackoff = []time.Duration{50 * time.Millisecond, 50 * time.Millisecond}
 	})
 	ctx, cancel := context.WithCancel(context.Background())
