@@ -79,7 +79,7 @@ func (v *dev) capLeaseLocked() bool {
 	if !l.Expires.After(end) {
 		return false
 	}
-	v.d.Lease = &api.Lease{Holder: l.Holder, Expires: end}
+	v.d.Lease = &api.Lease{Holder: l.Holder, Expires: end, By: l.By}
 	return true
 }
 
