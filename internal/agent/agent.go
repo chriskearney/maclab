@@ -340,7 +340,23 @@ func (a *Agent) noteLostLabd() {
 	bootID, _, _ := a.sys.Identity()
 	a.log.Printf("nothing from labd for %s: letting the watchdog reset this Lab boot", watchdogIdle)
 	seen := labBootSeen{BootID: bootID, Deadline: api.DeadlineLostLabd}
-	if err := writeJSONAtomic(filepath.Join(a.labBootDir(), labBootSeenFile), seen); err != nil {
+	// Not writeJSONAtomic: its fixed .tmp is the early unit's too, which may
+	// write boot.json at this moment.
+	b, _ := json.Marshal(seen)
+	f, err := os.CreateTemp(a.labBootDir(), labBootSeenFile+".lost-*")
+	if err == nil {
+		_, err = f.Write(b)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			err = os.Rename(f.Name(), filepath.Join(a.labBootDir(), labBootSeenFile))
+		}
+		if err != nil {
+			os.Remove(f.Name())
+		}
+	}
+	if err != nil {
 		a.log.Printf("Lab boot %s: %v", bootID, err)
 		return
 	}

@@ -621,6 +621,11 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 			}
 			return false
 		}()
+		if lost || timedOut {
+			// in the same hold of mu: a result reported from now on is
+			// answered forgotten, never taken and then dropped
+			v.forgetLocked(id)
+		}
 		ch := v.changed
 		v.mu.Unlock()
 		for _, n := range notes {
@@ -647,11 +652,9 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 		}
 	}
 	if timedOut {
-		v.forget(id)
 		return fmt.Errorf("%s: no result after %s", kind, timeout)
 	}
 	if lost {
-		v.forget(id)
 		return errDeviceLost
 	}
 	if !res.OK {
@@ -672,6 +675,10 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 func (v *dev) forget(id string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
+	v.forgetLocked(id)
+}
+
+func (v *dev) forgetLocked(id string) {
 	now := v.s.now()
 	for g, at := range v.gaveUp {
 		if now.Sub(at) > time.Hour {
