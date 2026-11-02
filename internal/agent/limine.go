@@ -28,7 +28,6 @@ const (
 	limineEnd      = "# maclab: end"
 	limineEntry    = "entry.limine"
 	limineStageDir = "maclab"
-	limineMinFree  = 120 << 20 // one test UKI is about 50 MB
 )
 
 var errNoLimine = errors.New("the ESP's EFI loader is not Limine")
