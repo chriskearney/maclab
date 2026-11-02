@@ -89,3 +89,25 @@ func TestTestKernelTheLadderBootsAfterAFailedRebootIsJudged(t *testing.T) {
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-panics behavior=panic")})
 	l.expect(j, api.OutcomePanicked)
 }
+
+// Snapshot syncs stop just before the last re-arm, so none can drop the
+// lab's block from limine.conf between it and the firmware reading it; they
+// start again only if the reboot doesn't happen (specs/labboot:
+// open-snapper-at-shutdown).
+func TestSnapshotSyncsStopBeforeTheLastRearm(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	before := len(l.sim.BootOps())
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok behavior=ok")}), api.OutcomePass)
+	ops := strings.Join(l.sim.BootOps()[before:], " ")
+	if !strings.HasPrefix(ops, "arm arm quiesce arm reboot") || strings.Contains(ops, "resume") {
+		t.Fatalf("boot-menu operations: %s", ops)
+	}
+
+	l.sim.FailReboots(1)
+	before = len(l.sim.BootOps())
+	l.expect(l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-ok2 behavior=ok")}), api.OutcomeInfra)
+	if ops := strings.Join(l.sim.BootOps()[before:], " "); !strings.HasPrefix(ops, "arm arm quiesce arm reboot cancel resume") {
+		t.Fatalf("boot-menu operations after a failed reboot: %s", ops)
+	}
+}

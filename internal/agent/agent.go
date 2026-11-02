@@ -1169,8 +1169,13 @@ func (a *Agent) labBootAfterAck(entry string) *afterAck {
 		return nil
 	}
 	return &afterAck{check: rearm, run: func() {
+		// Nothing may rewrite limine.conf between the last re-arm and the
+		// firmware reading it: a snapshot sync during shutdown would drop the
+		// block, and labd would blame the test kernel.
+		resume := a.sys.QuiesceBootSync()
 		if err := rearm(); err != nil {
 			a.log.Printf("not rebooting: %v", err)
+			resume()
 			return
 		}
 		a.log.Printf("rebooting")
@@ -1181,6 +1186,7 @@ func (a *Agent) labBootAfterAck(entry string) *afterAck {
 			if cerr := a.sys.CancelBootOnce(); cerr != nil {
 				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
 			}
+			resume()
 		}
 	}}
 }

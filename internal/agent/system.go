@@ -33,6 +33,10 @@ type System interface {
 	// CancelBootOnce clears an armed one-shot, so the next reboot boots the
 	// Mac's default entry.
 	CancelBootOnce() error
+	// QuiesceBootSync stops, until the next boot, what rewrites the boot menu
+	// behind the lab (limine-snapper-sync), letting a rewrite under way end
+	// first. resume starts it again, for when the reboot doesn't happen.
+	QuiesceBootSync() (resume func())
 	// Install installs a Release's packages as its installer does, fetching
 	// them from labd by sha256.
 	Install(ctx context.Context, job string, a api.InstallArgs, fetch Fetcher) error
