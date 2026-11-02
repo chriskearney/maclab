@@ -11,14 +11,14 @@ specs/labboot/check.sh models/current.cfg           # one model (set TLA2TOOLS t
 
 ## labboot: one Lab boot
 
-`labboot/LabBoot.tla` follows one Lab boot of a Lab-owned Mac in whole minutes. labd sends `boot_once`. lab-agent writes the deadline record, arms the Limine one-shot, re-arms before its report and again before the reboot, and holds the watchdog on the Lab boot. The firmware boots whatever the one-shot and `limine.conf` select. The early unit enforces the No-contact deadline and the Hard ceiling. labd waits, walks the recovery ladder, classifies, and restores the Mac to its Known-good kernel. Faults (snapshot syncs, failed arms and cancels, lost reports, no network, a broken or crashing kernel, a cancel) strike whenever they like.
+`labboot/LabBoot.tla` follows one Lab boot of a Lab-owned Mac in whole minutes. labd sends `boot_once`. lab-agent writes the deadline record, arms the Limine one-shot, re-arms before its report and again before the reboot, and holds the watchdog on the Lab boot. The firmware boots whatever the one-shot and `limine.conf` select. The early unit enforces the No-contact deadline and the Hard ceiling. labd waits, walks the recovery ladder, classifies, and restores the Mac to its Known-good kernel. Faults (snapshot syncs, failed arms and cancels, lost reports, no network, a broken kernel or one crashing before, during or after its test, a cancel) strike whenever they like.
 
 The properties, named as in the module:
 
 | Property | What must hold | Guards |
 |---|---|---|
 | `BlameSound` | labd blames the test kernel (`boot_failed`, `hung`, `crashed_or_hung`, `tests_failed`) only for what the kernel did; an infra fault reads as `infra_error` or `lost_contact` | 18b9311, 2f2e337 |
-| `PassSound` | a pass is the test kernel's: it booted, and the test ran on it | 6b6eae6 |
+| `PassSound` | a pass is the test kernel's: it booted, its test ran on it, and it did not crash before labd's verdict | 6b6eae6, e250121 |
 | `NetLossNotBlamed` | a Lab boot that only lost its network is not the kernel's failure | open (#44, part 1) |
 | `LabBootOnlyDuringJob` | once labd is done, the Mac runs its Known-good kernel, or labd has taken it out of the pool | 1995466 |
 | `ArmFailedMeansDisarmed` | lab-agent never tells labd an arm failed while the one-shot is still set | b804c41, 693811d |
@@ -35,7 +35,7 @@ Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, 
 - **`bug-*.cfg`**: a fixed bug, replayed by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
 - **`open-*.cfg`**: what today's code still gets wrong, as far as the model knows. Each must fail. When one is fixed, its fix goes into the spec, the model is expected to pass, and it moves into `current*.cfg`'s faults or properties.
 
-The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them. Three are fixed and now replayed as bugs: a test kernel that panicked just after reaching labd passing on the Known-good kernel (6b6eae6), a Mac that never left its armed boot read as `hung` (f20641b), and a failed first arm leaving the one-shot set while restore rebooted the Mac into it (693811d).
+The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them. Four are fixed and now replayed as bugs: a test kernel that panicked just after reaching labd passing on the Known-good kernel (6b6eae6), a Mac that never left its armed boot read as `hung` (f20641b), a failed first arm leaving the one-shot set while restore rebooted the Mac into it (693811d), and a test kernel that went down after its last test passing on the Known-good boot's logs (e250121).
 
 | Model | What happens | How likely |
 |---|---|---|

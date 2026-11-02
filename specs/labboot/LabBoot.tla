@@ -50,6 +50,7 @@ FaultNames == {
     "DeadKernel",         \* the test kernel never reaches userspace
     "CrashInTest",        \* the test kernel panics during the test
     "CrashBeforeTest",    \* the test kernel panics after reaching labd, before the test
+    "CrashAfterTests",    \* ... or after its test, before labd has its logs
     "Cancel"}             \* a Maintainer cancels the job while labd waits on the Mac
 
 BugNames == {
@@ -62,7 +63,8 @@ BugNames == {
     "RunTestOnAnyBoot",   \* 6b6eae6: run_test goes to whatever boot labd knows
     "NeverLeftIsHung",    \* f20641b: a Mac that never left its armed boot reads as hung
     "FirstArmNoCancel",   \* 693811d: boot_once's own failed arm leaves the one-shot set
-    "ArmFailWaits"}       \* 693811d: after a failed arm, restore waits for a reboot
+    "ArmFailWaits",       \* 693811d: after a failed arm, restore waits for a reboot
+    "CollectOnAnyBoot"}   \* e250121: collect goes to whatever boot labd knows
 
 ASSUME /\ BootTimeout \in Nat \ {0}
        /\ BootLen \in Nat \ {0}
@@ -85,6 +87,7 @@ QuietGrace      == 3   \* labd --quiet-grace
 AliveWindow     == 1   \* labd --alive-window
 TestGrace       == 2   \* labd waits this long past a test's timeout
 CleanupTimeout  == 2   \* runner.go restore's cleanup call
+CollectTimeout  == 5   \* runner.go collectTimeout
 Budget          == TestLen + 1                 \* watchdog.go testBudget: timeout + 20 s
 SelfRecovery    == 2 * BootTimeout             \* runner.go selfRecovery, Lab-owned Mac
 JobLen          == 3 * BootTimeout + 5 + TestLen + TestGrace  \* runner.go labBootJob
@@ -262,13 +265,34 @@ JudgeBoot ==
                            ELSE "boot_failed")
            /\ UNCHANGED <<cmd, cmdLost, ladderUsed, neverLeft>>
 
+\* How lostDuringTest names a Lab boot lost during or after the test.
+LostOutcome ==
+    IF seen \in Deadlines THEN "lost_contact"
+    ELSE IF ladderUsed THEN "hung"
+    ELSE "crashed_or_hung"
+
 \* The Mac is back after it went away during the test (lostDuringTest).
 \* Assigns the same as JudgeBoot.
 JudgeTest ==
-    /\ EnterRestore(IF seen \in Deadlines THEN "lost_contact"
-                    ELSE IF ladderUsed THEN "hung"
-                    ELSE "crashed_or_hung")
+    /\ EnterRestore(LostOutcome)
     /\ UNCHANGED <<cmd, cmdLost, ladderUsed, neverLeft>>
+
+\* After the test, collect the logs (runner.go execute): from the Lab boot
+\* labd judged (e250121), the Mac's current boot if CollectOnAnyBoot.
+\* Assigns cmd, cmdLost, lphase, wdl, waitFrom.
+StartCollect ==
+    /\ cmd' = [kind |-> "collect",
+               target |-> IF "CollectOnAnyBoot" \in Bugs THEN labdBoot ELSE waitFrom]
+    /\ cmdLost' = FALSE
+    /\ lphase' = "collect"
+    /\ wdl' = now + CollectTimeout
+    /\ UNCHANGED waitFrom
+
+\* The verdict once collect has answered or failed: a Mac no longer on the
+\* judged Lab boot was lost after its tests (e250121); otherwise a pass.
+AfterCollect ==
+    EnterRestore(IF "CollectOnAnyBoot" \notin Bugs /\ labdBoot /= waitFrom
+                 THEN LostOutcome ELSE "pass")
 
 \* The ladder's last rung (recover.go ladder): a person must power cycle it.
 \* execute's classify then finds the "detected:" step: hung, unless the Mac
@@ -346,12 +370,13 @@ LWaitbackExpire ==
     /\ UNCHANGED <<now, boot, kernel, userspace, bootAt, skew, net>>
     /\ UNCHANGED <<espVars, recVars, agentVars, wdVars, histVars>>
 
-\* The after-boot screenshot ends without an answer: the Mac is on another
-\* boot, or silent past quietGrace. execute logs it and sends the test.
+\* The after-boot (or after-tests) screenshot ends without an answer: the
+\* Mac is on another boot, or silent past quietGrace. execute logs it and
+\* sends the test (or collects).
 LCaptureLost ==
-    /\ lphase = "capture"
+    /\ lphase \in {"capture", "aftertests"}
     /\ labdBoot /= waitFrom \/ now - labdSeenAt >= QuietGrace
-    /\ StartTests
+    /\ IF lphase = "capture" THEN StartTests ELSE StartCollect
     /\ UNCHANGED <<outcome, rdl, ladderStep, ladderRet, ladderUsed, neverLeft, devState,
                    labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
@@ -511,9 +536,36 @@ LRestoreBudget ==
                    devState, cmd, cmdLost, labdBoot, labdTag, labdSeenAt, armVerdict>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
 
+\* collect times out with the Mac still checking in: execute logs it and
+\* goes on to its verdict.
+LCollectTimeout ==
+    /\ lphase = "collect" /\ now >= wdl /\ Alive
+    /\ cmd' = NoCmd
+    /\ AfterCollect
+    /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmdLost,
+                   labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
+    /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
+
+\* collect is lost: the Mac is on another boot than the one it was sent to,
+\* or silent past quietGrace. Since e250121 that is losing the Lab boot, as
+\* during a test (lostDuringTest); before, execute logged it and went on.
+LCollectLost ==
+    /\ lphase = "collect"
+    /\ \/ cmdLost \/ now - labdSeenAt >= QuietGrace
+       \/ cmd.kind = "collect" /\ cmd.target /= labdBoot
+    /\ cmd' = NoCmd
+    /\ IF "CollectOnAnyBoot" \in Bugs
+         THEN AfterCollect
+         ELSE /\ lphase' = "lostwait"
+              /\ wdl' = now + Max(BootTimeout - QuietGrace, 1)
+              /\ UNCHANGED <<outcome, rdl, waitFrom>>
+    /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmdLost,
+                   labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
+    /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, wdVars, histVars>>
+
 Labd ==
     \/ LArmTimeout \/ LArmLost
-    \/ LBackWaitback \/ LWaitbackExpire \/ LCaptureLost
+    \/ LBackWaitback \/ LWaitbackExpire \/ LCaptureLost \/ LCollectTimeout \/ LCollectLost
     \/ LTestLostReboot \/ LTestSilent \/ LTestTimeout
     \/ LBackLost \/ LLostExpire
     \/ LBackLadder \/ LLadderExpire
@@ -542,12 +594,13 @@ DoBootOnce ==
                    ladderUsed, neverLeft, devState, cmdLost, labdBoot, labdTag, labdSeenAt,
                    armVerdict, restoreErr, macVars, wdVars, histVars>>
 
-\* screen: the after-boot screenshot answers, and labd sends the test.
+\* screen: the after-boot screenshot answers, and labd sends the test; or the
+\* after-tests one, and labd collects.
 DoCapture ==
-    /\ IF lphase = "capture"
-         THEN StartTests
-         ELSE /\ cmd' = NoCmd
-              /\ UNCHANGED <<cmdLost, lphase, wdl, waitFrom>>
+    /\ CASE lphase = "capture"    -> StartTests
+         [] lphase = "aftertests" -> StartCollect
+         [] OTHER -> /\ cmd' = NoCmd
+                     /\ UNCHANGED <<cmdLost, lphase, wdl, waitFrom>>
     /\ UNCHANGED <<outcome, rdl, ladderStep, ladderRet, ladderUsed, neverLeft, devState, labdBoot,
                    labdTag, labdSeenAt, armVerdict, restoreErr>>
     /\ UNCHANGED <<macVars, espVars, recVars, agentVars, wdVars, histVars>>
@@ -565,6 +618,14 @@ DoRunTest ==
                    armVerdict, restoreErr, macVars, espVars, recVars, agentVars>>
     /\ UNCHANGED <<deadKernel, testBooted, netDropped, kernelCrashed, wdBeatDeadline,
                    blockDropped, strayBoot>>
+
+\* collect: lab-agent sends the boot's logs, and labd reaches its verdict.
+DoCollect ==
+    /\ cmd' = NoCmd
+    /\ AfterCollect
+    /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmdLost,
+                   labdBoot, labdTag, labdSeenAt, armVerdict, restoreErr>>
+    /\ UNCHANGED <<macVars, espVars, recVars, agentVars, wdVars, histVars>>
 
 \* reboot: the plain rebootLater, with no re-arm.
 DoReboot ==
@@ -589,6 +650,7 @@ Deliver ==
     /\ CASE cmd.kind = "boot_once" -> DoBootOnce
          [] cmd.kind = "capture"   -> DoCapture
          [] cmd.kind = "run_test"  -> DoRunTest
+         [] cmd.kind = "collect"   -> DoCollect
          [] cmd.kind = "reboot"    -> DoReboot
          [] cmd.kind = "cleanup"   -> DoCleanup
     /\ UNCHANGED now
@@ -681,9 +743,12 @@ AgentTestReport ==
     /\ testDone /\ Reach /\ ~EarlyDue
     /\ testDone' = FALSE
     /\ IF lphase = "testing" /\ labdBoot = boot
-         THEN EnterRestore("pass")
-         ELSE UNCHANGED <<outcome, lphase, wdl, rdl, waitFrom>>
-    /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, cmd, cmdLost, labdBoot,
+         THEN /\ lphase' = "aftertests"
+              /\ cmd' = [kind |-> "capture", target |-> labdBoot]
+              /\ cmdLost' = FALSE
+         ELSE UNCHANGED <<lphase, cmd, cmdLost>>
+    /\ UNCHANGED <<outcome, wdl, rdl, waitFrom>>
+    /\ UNCHANGED <<ladderStep, ladderRet, ladderUsed, neverLeft, devState, labdBoot,
                    labdTag, labdSeenAt, armVerdict, restoreErr>>
     /\ UNCHANGED <<wdHeld, wdUntil, heard, testing, testStart>>
     /\ UNCHANGED <<now, macVars, espVars, recVars, agentVars, histVars>>
@@ -782,13 +847,14 @@ NetBack ==
     /\ UNCHANGED <<boot, kernel, mac, graceful, userspace, bootAt, skew>>
     /\ UNCHANGED <<now, labdVars, espVars, recVars, agentVars, wdVars, histVars>>
 
-\* The test kernel panics once it has reached labd: during the test, or
-\* before it; panic=10 reboots it in seconds.
+\* The test kernel panics once it has reached labd: during the test, before
+\* it, or after it; panic=10 reboots it in seconds.
 KernelCrash ==
     /\ kernel = "Test" /\ mac = "running" /\ userspace /\ contact
     /\ \/ "CrashInTest" \in Faults /\ testing
        \/ "CrashBeforeTest" \in Faults /\ ~testing /\ ~testDone
           /\ lphase \in {"capture", "testing"}
+       \/ "CrashAfterTests" \in Faults /\ lphase \in {"aftertests", "collect"}
     /\ HardReset
     /\ kernelCrashed' = TRUE
     /\ UNCHANGED <<boot, kernel, userspace, bootAt, skew, net>>
@@ -872,13 +938,14 @@ Spec == Init /\ [][Next]_vars
 
 TypeOK ==
     /\ now \in 0..MaxTime
-    /\ lphase \in {"arming", "waitback", "capture", "testing", "lostwait", "ladder",
-                   "done"} \cup RestorePhases
+    /\ lphase \in {"arming", "waitback", "capture", "testing", "aftertests", "collect",
+                   "lostwait", "ladder", "done"} \cup RestorePhases
     /\ outcome \in {"none", "pass", "infra_error", "canceled", "lost_contact"} \cup KernelBlame
     /\ ladderStep \in {"none", "soft", "oob", "oob2"}
     /\ ladderRet \in {"none", "boot", "test"} \cup RestoreRets
     /\ devState \in {"pool", "needs_hands", "new"}
-    /\ cmd.kind \in {"none", "boot_once", "capture", "run_test", "reboot", "cleanup"}
+    /\ cmd.kind \in {"none", "boot_once", "capture", "run_test", "collect", "reboot",
+                    "cleanup"}
     /\ armVerdict \in {"none", "ok", "agent_failed", "timeout", "lost"}
     /\ kernel \in {"KG", "Test"} /\ labdTag \in {"KG", "Test"}
     /\ mac \in {"running", "shutdown"}
@@ -900,9 +967,10 @@ BlameSound ==
          testBooted /\ (deadKernel \/ netDropped \/ kernelCrashed)
     /\ outcome = "lost_contact" => testBooted
 
-\* A pass is the test kernel's: it booted, and the test ran on it.
+\* A pass is the test kernel's: it booted, the test ran on it, and it did not
+\* crash before labd had its verdict.
 PassSound ==
-    outcome = "pass" => testBooted /\ ~deadKernel /\ ~ranOnKG
+    outcome = "pass" => testBooted /\ ~deadKernel /\ ~ranOnKG /\ ~kernelCrashed
 
 \* A Lab boot that only lost its network is not the kernel's failure. Open:
 \* labd can't tell a network loss from a hang (malik-na/maclab#44, part 1).
