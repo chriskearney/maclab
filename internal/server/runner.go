@@ -990,6 +990,14 @@ func lostSelfRecovery(hasOOB bool, lastSeen, now time.Time, boot, timeout time.D
 	return max(0, lastSeen.Add(lostLabdReset).Sub(now)+boot-timeout)
 }
 
+// watchdogRecovery is lostSelfRecovery for this job's Mac now, after timeout.
+func (r *jobRun) watchdogRecovery(timeout time.Duration) time.Duration {
+	r.v.mu.Lock()
+	hasOOB, lastSeen := r.v.effectiveOOBLocked() != nil, r.v.d.LastSeen
+	r.v.mu.Unlock()
+	return lostSelfRecovery(hasOOB, lastSeen, r.s.now(), r.boot, timeout)
+}
+
 // lostLabdReset is lab-agent's watchdog reset after the last sign of labd (a
 // knob, for the harness's short boots).
 var lostLabdReset = agent.LostLabdReset
@@ -1054,11 +1062,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	lost := r.s.now()
 	// A hang has already had quietGrace of silence to show itself.
 	timeout := max(r.boot-r.s.quietGrace(), time.Minute)
-	r.v.mu.Lock()
-	hasOOB, lastSeen := r.v.effectiveOOBLocked() != nil, r.v.d.LastSeen
-	r.v.mu.Unlock()
-	self := lostSelfRecovery(hasOOB, lastSeen, r.s.now(), r.boot, timeout)
-	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, self)
+	steps, ok, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, r.watchdogRecovery(timeout))
 	r.addRecovery(steps)
 	if err != nil && !r.kernelFailedSince(r.bootedAt.Add(-time.Second)) {
 		// Canceled before the Mac came back, with nothing to say its kernel
@@ -1228,7 +1232,9 @@ func (r *jobRun) restore(ctx context.Context) error {
 		t0 := r.s.now()
 		v.send(api.CmdReboot, r.j.ID, nil)
 		v.rearmSerial(3 * time.Minute)
-		steps, ok, err := v.waitBack(ctx, d.BootID, t0, r.boot, 0)
+		// A Lab boot that can't hear the reboot (no network) is reset by
+		// lab-agent's watchdog: give it that before asking for hands.
+		steps, ok, err := v.waitBack(ctx, d.BootID, t0, r.boot, r.watchdogRecovery(r.boot))
 		r.addRecovery(steps)
 		if err != nil {
 			return err
