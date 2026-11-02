@@ -12,7 +12,7 @@ import (
 
 // A Lab boot whose last re-arm, after labd's ack, fails never happens: the
 // agent cancels the one-shot and stays up. That is the lab's failure, not the
-// test kernel's, which never ran (specs/labboot: open-rearm-fails-after-ack).
+// test kernel's, which never ran (specs/labboot: bug-f20641b-never-left-is-hung).
 func TestRearmFailingAfterTheAckIsAnInfraError(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
@@ -34,7 +34,7 @@ func TestRearmFailingAfterTheAckIsAnInfraError(t *testing.T) {
 // A first arm that fails after writing the one-shot cancels it, as a failed
 // re-arm does, and labd, told the arm failed, restores the Mac without
 // waiting for a reboot that isn't coming: nothing reboots it into the test
-// kernel (specs/labboot: open-arm-fails-after-write).
+// kernel (specs/labboot: bug-693811d-first-arm-no-cancel).
 func TestFirstArmFailingAfterItsWriteLeavesNothingArmed(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()

@@ -21,7 +21,8 @@ The properties, named as in the module:
 | `PassSound` | a pass is the test kernel's: it booted, and the test ran on it | 6b6eae6 |
 | `NetLossNotBlamed` | a Lab boot that only lost its network is not the kernel's failure | open (#44, part 1) |
 | `LabBootOnlyDuringJob` | once labd is done, the Mac runs its Known-good kernel, or labd has taken it out of the pool | 1995466 |
-| `ArmFailedMeansDisarmed` | lab-agent never tells labd an arm failed while the one-shot is still set | b804c41 |
+| `ArmFailedMeansDisarmed` | lab-agent never tells labd an arm failed while the one-shot is still set | b804c41, 693811d |
+| `NoUnwatchedLabBoot` | the test kernel never boots after lab-agent told labd its arm failed | 693811d |
 | `NoContactBeforeWatchdog` | the No-contact deadline, not the agent's watchdog, ends a Lab boot that never reached labd | 2f2e337 |
 | `WatchdogIdleFromLabd` | outside a test, a Lab boot that lost labd is reset `watchdogIdle` after the last sign of labd, no later | 953652a |
 | `BoundedFirmwareWrites`, `OneFirmwareWrite` | NVRAM and U-Boot's file see one one-shot write per Lab boot, however long labd is out of reach | b804c41 |
@@ -30,17 +31,15 @@ The properties, named as in the module:
 
 Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, and `check.sh` fails the build otherwise:
 
-- **`current*.cfg`**: today's design, with and without an out-of-band hard reset (and with failing arms), under every fault it is meant to survive. They must pass. Their `\* witnesses:` line names outcomes TLC must show are reachable (a pass, a lost_contact, a needs_hands, a snapshot sync repaired by the re-arm...), so a change to the spec can't make the properties hold by cutting off the runs they are about.
+- **`current*.cfg`**: today's design, with and without an out-of-band hard reset, and with failing arms and cancels, under every fault it is meant to survive. They must pass. Their `\* witnesses:` line names outcomes TLC must show are reachable (a pass, a lost_contact, a needs_hands, a snapshot sync repaired by the re-arm...), so a change to the spec can't make the properties hold by cutting off the runs they are about.
 - **`bug-*.cfg`**: a fixed bug, replayed by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
 - **`open-*.cfg`**: what today's code still gets wrong, as far as the model knows. Each must fail. When one is fixed, its fix goes into the spec, the model is expected to pass, and it moves into `current*.cfg`'s faults or properties.
 
-The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them. A ninth, a test kernel that panicked just after reaching labd passing on the Known-good kernel, was fixed in 6b6eae6 and is now `bug-6b6eae6-tests-on-any-boot`.
+The open models today, each a counterexample TLC finds in today's design. Each was read against the code: the rearm, arm-after-write, snapshot, hands and short-timeout ones by reviewers trying to refute them, the rest raised by reviewers of the spec's fidelity and confirmed in the code. All are real; some are narrower than the model makes them. Three are fixed and now replayed as bugs: a test kernel that panicked just after reaching labd passing on the Known-good kernel (6b6eae6), a Mac that never left its armed boot read as `hung` (f20641b), and a failed first arm leaving the one-shot set while restore rebooted the Mac into it (693811d).
 
 | Model | What happens | How likely |
 |---|---|---|
-| `open-rearm-fails-after-ack` | The re-arm before the reboot fails (lock held by a snapshot sync), so the Mac never reboots; the ladder soft-reboots it and classify says `hung`. | Needs a lock held past a minute in a few seconds' window. |
-| `open-cancel-fails` | A re-arm fails on the lock, the cancel behind it fails on the same lock and is only logged: labd hears the arm failed with the one-shot still set. | Rare: two lock timeouts in a row. |
-| `open-arm-fails-after-write` | The first arm, in `exec`, does not cancel when it fails after writing the one-shot, as the re-arm does. | Narrow on U-Boot Macs: only a failure after the variable file is renamed in place. |
+| `open-cancel-fails` | A failed arm's cancel fails on the same lock and is only logged: lab-agent tells labd the arm failed with the one-shot still set. Since 693811d labd's cleanup disarms it before anything reboots (`current-cancelfails`), so only the report is wrong. | Rare: two lock timeouts in a row. |
 | `open-snapper-at-shutdown` | A snapshot sync during shutdown, after the last re-arm, drops the block; labd says `boot_failed`. | snapper-cleanup's `ExecStopPost` runs limine-snapper-sync when shutdown stops it. |
 | `open-hands-before-watchdog` | A tier 1 Mac's Lab boot loses its network in a test: labd asks for hands about 6 minutes after it last heard from it, before the agent's watchdog (11 minutes) would bring it back. | Any network loss mid-test on the fork's M1. |
 | `open-back-in-pool-on-test-kernel` | ... and if the network comes back, the check-in returns the Mac to the pool on its test kernel, restore skipped, until the next job's pre-job restore. | Follows the one above. |
@@ -51,7 +50,7 @@ To read a counterexample, run TLC on the model by hand. It prints the run state 
 
 ```sh
 cd specs/labboot
-java -cp ../.tools/tla2tools.jar tlc2.TLC -deadlock -config models/open-rearm-fails-after-ack.cfg LabBoot
+java -cp ../.tools/tla2tools.jar tlc2.TLC -deadlock -config models/open-snapper-at-shutdown.cfg LabBoot
 ```
 
 ### What the model leaves out
