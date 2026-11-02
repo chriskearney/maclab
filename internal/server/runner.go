@@ -544,7 +544,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		}
 		r.ev("test %s: running", t.Name)
 		var tr api.TestResult
-		err := v.callNote(ctx, api.CmdRunTest, j.ID, t, r.testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
+		// On the Lab boot labd judged, which may have gone down since: a test
+		// that runs on the boot after it would pass the known-good kernel.
+		err := v.callNoteOn(ctx, r.bootID, api.CmdRunTest, j.ID, t, r.testTimeout(t), &tr, func(n string) { r.ev("%s", n) })
 		if errors.Is(err, errDeviceLost) {
 			return r.lostDuringTest(ctx, t.Name)
 		}

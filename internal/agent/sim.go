@@ -27,8 +27,10 @@ import (
 // Wi-Fi fails in omarchy-m-test), panic (at boot),
 // hang (at boot), silent (hang with no serial output), crash-in-test,
 // reboot-in-test (reboots with no kernel message), hang-in-test (goes silent
-// for HangFor, then a watchdog resets it, again with no kernel message) and
-// no-network (boots to the login prompt, then never reaches labd). A field
+// for HangFor, then a watchdog resets it, again with no kernel message),
+// crash-after-boot (reaches labd, then reboots with no kernel message as labd
+// takes its first screenshot, which never answers) and no-network (boots to
+// the login prompt, then never reaches labd). A field
 // apple_wdt=n says the kernel was built without apple_wdt.
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
 // logind does; one named quiet-suspend-* sleeps without announcing it. The
@@ -790,8 +792,13 @@ func (s *Sim) Collect(ctx context.Context, boot, outDir string) error {
 
 func (s *Sim) Screenshot(ctx context.Context, path string, wait time.Duration) (int, int, error) {
 	s.mu.Lock()
-	k := s.kernel
+	k, b := s.kernel, s.behavior
 	s.mu.Unlock()
+	if b == "crash-after-boot" {
+		s.boot("")
+		<-ctx.Done()
+		return 0, 0, errors.New("machine went away")
+	}
 	const w, h = 640, 400
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	// A desktop-ish frame: dark background, a bar, and a window whose tint encodes the kernel.

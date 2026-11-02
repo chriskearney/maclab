@@ -492,6 +492,20 @@ func TestRebootDuringTestWithNoKernelError(t *testing.T) {
 	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
 }
 
+// A test kernel that goes down just after it reaches labd fails the job:
+// its tests go to the boot labd judged, and never run on the known-good
+// boot that replaced it, which would pass them.
+func TestRebootRightAfterBootIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-fragile behavior=crash-after-boot")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "crashed or hung during test boot-health") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
 func TestHangDuringTestResetByWatchdog(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
