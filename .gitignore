@@ -9,3 +9,6 @@ __pycache__/
 dist/
 *.pyc
 /loop/
+
+# tla2tools.jar, fetched by make spec
+/specs/.tools/
