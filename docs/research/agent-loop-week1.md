@@ -227,9 +227,10 @@ label baseline  17     -             10/17        7/17         7          -
 
 - maclab labelled 18 of 20 boots as predicted. Both `netdown` boots ended
   `boot_failed`, not `lost_contact`: the Mac fell back without the
-  no-contact deadline being recorded (#61 since keeps that deadline ahead of
-  lab-agent's watchdog), and the lost boot's journal wasn't collected because
-  journalctl was given a dashed boot ID (#60).
+  no-contact deadline being recorded (malik-na/maclab#61 since keeps that
+  deadline ahead of lab-agent's watchdog), and the lost boot's journal wasn't
+  collected because journalctl was given a dashed boot ID
+  (malik-na/maclab#60).
 - The judge failed to start on the first three boots (`loop-judge.sh` wasn't
   executable). Of the 17 it judged it got 9 exactly and 12 by class, never
   named a fault of the wrong class, and abstained on all 5 early faults. The label alone
