@@ -1,0 +1,70 @@
+# Specs
+
+TLA+ specifications of the parts of maclab where the bugs have been in how several actors interleave, not in any one function. TLC, the TLA+ model checker, tries every interleaving of a small model and either proves the properties hold for it or prints the shortest run that breaks one. See `docs/adr/0004-model-the-lab-boot-in-tla.md` for why.
+
+```sh
+make spec                                           # fetches the pinned tla2tools.jar, then checks every model
+specs/labboot/check.sh models/current.cfg           # one model (set TLA2TOOLS to the jar)
+specs/labboot/check.sh bug-6b6eae6-tests-on-any-boot # one bug replay, by its name in models/bugs.txt
+```
+
+`make spec` needs `java` (17 or later). CI runs it in the `spec` job of `.github/workflows/test.yml`.
+
+## labboot: one Lab boot
+
+`labboot/LabBoot.tla` follows one Lab boot of a Lab-owned Mac in whole minutes. labd sends `boot_once`. lab-agent writes the deadline record, arms the Limine one-shot, re-arms before its report and again before the reboot, and holds the watchdog on the Lab boot. The firmware boots whatever the one-shot and `limine.conf` select. The early unit enforces the No-contact deadline and the Hard ceiling. labd waits, walks the recovery ladder, classifies, and restores the Mac to its Known-good kernel. Faults (snapshot syncs, failed arms and cancels, lost reports, no network, a broken kernel or one crashing before, during or after its test, a cancel) strike whenever they like.
+
+The properties, named as in the module:
+
+| Property | What must hold | Guards |
+|---|---|---|
+| `BlameSound` | labd blames the test kernel (`boot_failed`, `hung`, `crashed_or_hung`, `tests_failed`) only for what the kernel did; an infra fault reads as `infra_error` or `lost_contact` | 18b9311, 2f2e337, f20641b, dd4cd55, 1b269f5 |
+| `PassSound` | a pass is the test kernel's: it booted, its test ran on it, and it did not crash before labd's verdict | 6b6eae6, e250121 |
+| `NetLossNotBlamed` | a Lab boot that only lost its network is not the kernel's failure | 3797cce, 58a73c1, 3021d9f; open with a hard reset (malik-na/maclab#44, part 1) |
+| `LabBootOnlyDuringJob` | once labd is done, the Mac runs its Known-good kernel, or labd has taken it out of the pool | 1995466 |
+| `ArmFailedMeansDisarmed` | lab-agent never tells labd an arm failed while the one-shot is still set | b804c41, 693811d |
+| `NoUnwatchedLabBoot` | the test kernel never boots after lab-agent told labd its arm failed | 693811d |
+| `NoContactBeforeWatchdog` | the No-contact deadline, not the agent's watchdog, ends a Lab boot that never reached labd | 2f2e337 |
+| `WatchdogIdleFromLabd` | outside a test, a Lab boot that lost labd is reset `watchdogIdle` after the last sign of labd, no later | 953652a |
+| `BoundedFirmwareWrites`, `OneFirmwareWrite` | NVRAM and U-Boot's file see one one-shot write per Lab boot, however long labd is out of reach | b804c41 |
+| `HandsOnlyWhenStuck` | labd asks for hands only when the Mac can't come back by itself (CONTEXT.md, Needs hands) | 1b269f5, 10f4ab6, c478594, 4a5a608 |
+| `Terminates` | labd finishes the job before the model's clock runs out | |
+
+Each model in `labboot/models/` says on its `\* expect:` line how TLC must end, and `check.sh` fails the build otherwise:
+
+- **`current*.cfg`**: today's design, with and without an out-of-band hard reset, and with failing arms and cancels, under every fault it is meant to survive. They must pass. Their `\* witnesses:` line names outcomes TLC must show are reachable (a pass, a lost_contact, a needs_hands, a snapshot sync repaired by the re-arm...), so a change to the spec can't make the properties hold by cutting off the runs they are about.
+- **`bugs.txt`**: one line per fixed bug, which `check.sh` turns into a `bug-*` model replaying it by undoing its fix (a name in `Bugs`). TLC must find the property the fix protects violated. The same model with `Bugs = {}` must pass, which shows the fix, and not something else, is what makes it hold.
+- **`open-*.cfg`**: what today's code still gets wrong, as far as the model knows. Each must fail. When one is fixed, its fix goes into the spec, the model is expected to pass, and it moves into `current*.cfg`'s faults or properties.
+
+The models began as nine open findings (the first TLC run, each read against the code, five by reviewers trying to refute them). Fixed ones are replayed as bugs; one is accepted:
+
+- **Fixed:** a test kernel that panicked just after reaching labd passing on the Known-good kernel (6b6eae6); one that went down after its last test passing on the Known-good boot's logs (e250121); a Mac that never left its armed boot read as `hung` (f20641b); a failed first arm leaving the one-shot set while restore rebooted the Mac into it (693811d); a snapshot sync during shutdown dropping the block (dd4cd55); short boot timeouts giving up before the no-contact reboot was back (1b269f5); labd asking for hands on a Mac with no hard reset before its watchdog acted (10f4ab6, and in restore, c478594), and the Mac back in the pool on its test kernel after; a network loss mid-test blamed on the kernel (3797cce, 58a73c1, 3021d9f); a late arm result rebooting into a Lab boot labd had given up on (4a5a608), with restore no longer waiting for that reboot (bfa3a3e).
+- **Accepted:** if cancelling a failed arm also fails (two boot-partition lock timeouts in a row), lab-agent reports the arm failed with the one-shot still set. labd's cleanup disarms it before anything reboots, which `current-cancelfails` checks (`NoUnwatchedLabBoot`); only the agent's own report is wrong.
+
+| Open model | What happens | How likely |
+|---|---|---|
+| `open-net-loss-blamed` | On a Mac **with** a hard reset, a Lab boot that only lost its network mid-test is reset by labd's ladder before lab-agent's watchdog can say it lost labd, and is classified `hung`. Without a hard reset it reads `lost_contact`. | Any network loss mid-test on a Mac with oobd (malik-na/maclab#44, part 1). |
+
+To read a counterexample, run TLC on the model by hand. It prints the run state by state, each headed by the action taken:
+
+```sh
+cd specs/labboot
+java -cp ../.tools/tla2tools.jar tlc2.TLC -deadlock -config models/open-net-loss-blamed.cfg LabBoot
+```
+
+### What the model leaves out
+
+labd restarting mid-job, lab-agent crashing or restarting, a lost check-in response, a check-in from a dead boot arriving late, Volunteer Macs (Availability windows, Pause, Access level), the release gate, and the Known-good kernel drifting between labd, the agent and the default entry. Each is a candidate for its own spec, or for a fault here.
+
+Some timing is finer than a minute, and the model has none of it:
+
+- **watchdog.open_timeout against lab-agent's start.** lab-agent starts after `network-online.target`, and the kernel stops feeding apple_wdt at `max(boot timeout / 2, 120 s)`. On a Lab boot with no network, if wait-online takes long enough, apple_wdt resets the Mac before the no-contact deadline and leaves no reason: the 2f2e337 symptom again. It looks possible for boot timeouts of 4.5 minutes or less, labd's own fallback default being 4. It needs measured times to settle.
+- A boot-partition lock can take a minute, so arms and cancels can outlast labd's 2-minute arm timeout without any lost report.
+- A `reboot` command waits for its own result to be acked; the model reboots on delivery.
+- NVRAM and U-Boot's variable file are one copy of the one-shot here, two on a real Mac.
+
+The model's margins rest on `Skew <= 1` (how far a Lab boot's clock may run behind) and `BootLen = 2` (minutes from a reboot to lab-agent checking in). `NoContactBeforeWatchdog` fails at `Skew = 2`.
+
+### Changing the spec
+
+When the code changes how a Lab boot works, change the spec the same way, in the same PR. Keep the action's comment pointing at the code it models. If a fix closes an `open-*` model, flip its `expect:` to `pass` or fold it into `current*.cfg`. If you add a fault or a property, add a witness that shows the new behaviour is reachable.
