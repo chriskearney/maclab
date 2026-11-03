@@ -12,7 +12,7 @@ import (
 
 // A Lab boot whose last re-arm, after labd's ack, fails never happens: the
 // agent cancels the one-shot and stays up. That is the lab's failure, not the
-// test kernel's, which never ran (specs/labboot: bug-f20641b-never-left-is-hung).
+// test kernel's, which never ran (f20641b).
 func TestRearmFailingAfterTheAckIsAnInfraError(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
@@ -34,7 +34,7 @@ func TestRearmFailingAfterTheAckIsAnInfraError(t *testing.T) {
 // A first arm that fails after writing the one-shot cancels it, as a failed
 // re-arm does, and labd, told the arm failed, restores the Mac without
 // waiting for a reboot that isn't coming: nothing reboots it into the test
-// kernel (specs/labboot: bug-693811d-first-arm-no-cancel).
+// kernel (693811d).
 func TestFirstArmFailingAfterItsWriteLeavesNothingArmed(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()
@@ -92,8 +92,7 @@ func TestTestKernelTheLadderBootsAfterAFailedRebootIsJudged(t *testing.T) {
 
 // Snapshot syncs stop just before the last re-arm, so none can drop the
 // lab's block from limine.conf between it and the firmware reading it; they
-// start again only if the reboot doesn't happen (specs/labboot:
-// bug-dd4cd55-no-quiesce).
+// start again only if the reboot doesn't happen (dd4cd55).
 func TestSnapshotSyncsStopBeforeTheLastRearm(t *testing.T) {
 	l := newLab(t, false)
 	l.baseline()

@@ -28,19 +28,3 @@ boot-test-dist:
 	tar -xzf "$(BOOT_TEST_OUT)/frontend-resources.tar.gz" -C "$(BOOT_TEST_OUT)"
 
 .PHONY: boot-test-dist
-
-# Model-checks the TLA+ specs under specs/ (see specs/README.md). Needs java.
-TLA2TOOLS_VERSION = 1.7.4
-TLA2TOOLS_SHA256 = 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-TLA2TOOLS = specs/.tools/tla2tools.jar
-
-$(TLA2TOOLS):
-	mkdir -p $(dir $@)
-	curl -fsSL -o $@.tmp https://github.com/tlaplus/tlaplus/releases/download/v$(TLA2TOOLS_VERSION)/tla2tools.jar
-	echo "$(TLA2TOOLS_SHA256)  $@.tmp" | sha256sum -c -
-	mv $@.tmp $@
-
-spec: $(TLA2TOOLS)
-	TLA2TOOLS=$(abspath $(TLA2TOOLS)) specs/labboot/check.sh
-
-.PHONY: spec
