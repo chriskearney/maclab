@@ -46,6 +46,10 @@ spec:
             # to start with it rather than trust a guess.
             - --trusted-proxy=SET-INGRESS-NGINX-POD-CIDR
             - --maintainer=chris                       # used once, on a labd with no Maintainer yet; ignored after
+            # After this pod is running, an eligible baseline uploads. An ordinary
+            # known-good run does not. No --omt-every: no reboot refresh, no backfill.
+            # Appended so path-prefix still replaces args/3 (--public-url).
+            - --omt-publish
           env:
             - { name: HOME, value: /tmp }
           ports:
