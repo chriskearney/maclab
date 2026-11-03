@@ -61,13 +61,17 @@ func TestSerialEventsAreStampedWithTheBoot(t *testing.T) {
 	}
 }
 
-// A fatal event the waited-on boot outlived (it was heard after it) is
-// superseded; one it has not outlived, or one of a boot not waited on, is not.
+// A fatal event the waited-on boot outlived (it was heard after it), or one
+// of the boot before it, is superseded; one it has not outlived, one of a
+// boot labd has not heard from, or one of a boot not waited on, is not.
 func TestSupersededEvents(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
 	v := l.s.dev(l.name)
 	boot := v.snapshot().BootID
+	v.mu.Lock()
+	v.endedBoot = "earlier"
+	v.mu.Unlock()
 	now := l.s.now()
 	for _, c := range []struct {
 		name string
@@ -76,8 +80,9 @@ func TestSupersededEvents(t *testing.T) {
 	}{
 		{"before the last check-in, no boot", api.KernelEvent{Time: now.Add(-time.Hour), Kind: detect.Panic}, true},
 		{"before the last check-in, same boot", api.KernelEvent{Time: now.Add(-time.Hour), Kind: detect.Panic, BootID: boot}, true},
-		{"after the last check-in", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Panic, BootID: boot}, false},
-		{"another boot's, reported late", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Panic, BootID: "earlier"}, true},
+		{"serial, after the last check-in", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Panic, Source: "serial", BootID: boot}, false},
+		{"the boot before's, reported late", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Panic, Source: "kmsg", BootID: "earlier"}, true},
+		{"a boot labd has not heard from", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Oops, Source: "kmsg", BootID: "test-kernel"}, false},
 	} {
 		v.mu.Lock()
 		got := v.supersededLocked(c.e, boot)
@@ -93,6 +98,42 @@ func TestSupersededEvents(t *testing.T) {
 	if got {
 		t.Error("an event was superseded for a boot the Mac was never on")
 	}
+}
+
+// lab-agent on the boot the Mac is leaving reads a fatal line as it shuts
+// down for the reboot, after its last check-in: it is that boot's, not the
+// test kernel's, which then hangs. (chriskearney/maclab#63's review of the
+// fix for its review.)
+func TestOldBootKmsgLineAfterItsLastCheckinIsNotTheTestKernels(t *testing.T) {
+	l := newLab(t, true)
+	l.baseline()
+	v := l.s.dev(l.name)
+	old := v.snapshot().BootID
+	l.sim.FailArm(func(n int) (bool, error) {
+		if n == 3 {
+			v.report(api.Report{Events: []api.KernelEvent{{Kind: detect.Oops, Source: "kmsg", BootID: old, Line: "Unable to handle kernel NULL pointer dereference (old boot, shutting down)"}}})
+		}
+		return false, nil
+	})
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-silent behavior=silent")})
+	l.expect(j, api.OutcomeHung)
+}
+
+// The test kernel's own Oops, reported before its first check-in, is its own,
+// even if the Mac never checks in on it: labd has not heard from that boot,
+// so it is not the boot before's, reported late.
+func TestTestKernelOopsBeforeItsFirstCheckinIsItsOwn(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	v := l.s.dev(l.name)
+	l.sim.FailArm(func(n int) (bool, error) {
+		if n == 3 {
+			v.report(api.Report{Events: []api.KernelEvent{{Kind: detect.Oops, Source: "kmsg", BootID: "the-test-kernels-boot", Line: "Internal error: Oops: 96000004 [#1] SMP"}}})
+		}
+		return false, nil
+	})
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-silent behavior=silent")})
+	l.expect(j, api.OutcomePanicked)
 }
 
 // A fatal event of an earlier boot, reported while the Lab boot was up, is not

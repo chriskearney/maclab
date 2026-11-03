@@ -140,8 +140,23 @@ func TestReportListsWantedResults(t *testing.T) {
 	if len(forgotten) != 1 || forgotten[0] != "c-gave-up" {
 		t.Fatalf("forgotten %v, want [c-gave-up]", forgotten)
 	}
-	// The same report again, its first reply lost: labd has the result, so it still wants it.
+	// The same report again, its first reply lost: labd has the result, so it
+	// still wants it, and still after its waiter took it.
 	if _, wanted = v.report(api.Report{Results: rep.Results[:1]}); len(wanted) != 1 {
-		t.Fatalf("a result labd already took is not wanted on a resend: %v", wanted)
+		t.Fatalf("a result labd has is not wanted on a resend: %v", wanted)
+	}
+	v.mu.Lock()
+	_, took := v.takeResultLocked("c-wanted")
+	v.mu.Unlock()
+	if !took {
+		t.Fatal("the result was not there to take")
+	}
+	if _, wanted = v.report(api.Report{Results: rep.Results[:1]}); len(wanted) != 1 {
+		t.Fatalf("a result labd took is not wanted on a resend: %v", wanted)
+	}
+	// Until labd gives up on it.
+	v.forget("c-wanted")
+	if forgotten, wanted = v.report(api.Report{Results: rep.Results[:1]}); len(wanted) != 0 || len(forgotten) != 1 {
+		t.Fatalf("after forget: wanted %v, forgotten %v", wanted, forgotten)
 	}
 }
