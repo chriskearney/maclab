@@ -2,8 +2,6 @@
 
 Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all operations.
 
-They live on the fork, `malik-na/maclab` (`origin`), not upstream `chriskearney/maclab` (`upstream`); see `docs/adr/0003-develop-on-the-fork-with-a-lab-of-its-own.md`. The two repos number issues separately, so always write `owner/repo#N`.
-
 ## Conventions
 
 - **Create an issue**: `gh issue create --title "..." --body "..."`. Use a heredoc for multi-line bodies.
@@ -13,7 +11,7 @@ They live on the fork, `malik-na/maclab` (`origin`), not upstream `chriskearney/
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-With both remotes in a clone, `gh` may pick upstream: run `gh repo set-default malik-na/maclab` once per clone, or pass `-R malik-na/maclab`.
+Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
 ## Pull requests as a triage surface
 
