@@ -37,6 +37,7 @@ type dev struct {
 	fetchGrant    *fetchGrant       // a Maintainer's explicit grant (see hArtifactGrants)
 	results       map[string]api.CommandResult
 	gaveUp        map[string]time.Time // commands labd stopped waiting for, and when (see forget)
+	taken         map[string]time.Time // results their waiter took, and when (see takeResultLocked)
 	changed       chan struct{}
 	events        []api.KernelEvent
 	dirty         bool // a lab kernel may still be staged on the Mac
@@ -92,7 +93,7 @@ type dev struct {
 
 func newDev(s *Server, d api.Device, secretHash string) *dev {
 	v := &dev{s: s, d: d, secretHash: secretHash, volunteeredBy: d.VolunteeredBy, inflight: map[string]time.Time{}, sent: map[string]api.Command{}, target: map[string]string{},
-		results: map[string]api.CommandResult{}, gaveUp: map[string]time.Time{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), stop: make(chan struct{}), auditHave: -1}
+		results: map[string]api.CommandResult{}, gaveUp: map[string]time.Time{}, taken: map[string]time.Time{}, changed: make(chan struct{}), queue: make(chan string, 256), gone: make(chan struct{}), stop: make(chan struct{}), auditHave: -1}
 	return v
 }
 
@@ -305,8 +306,8 @@ func (v *dev) deliver(bootID string) api.CheckinResponse {
 }
 
 // report takes in what lab-agent reports, and returns the results it reports
-// for commands labd gave up waiting for.
-func (v *dev) report(rep api.Report) (forgotten []string) {
+// for commands labd gave up waiting for, and those it is waiting for or took.
+func (v *dev) report(rep api.Report) (forgotten, wanted []string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if q := rep.Quiet; q != nil && q.BootID == v.d.BootID {
@@ -330,6 +331,14 @@ func (v *dev) report(rep api.Report) (forgotten []string) {
 			delete(v.sent, r.ID)
 			delete(v.target, r.ID)
 			v.results[r.ID] = r
+			wanted = append(wanted, r.ID)
+		} else if _, ok := v.results[r.ID]; ok {
+			// Had already: the reply to that report was lost and the agent
+			// is sending it again.
+			wanted = append(wanted, r.ID)
+		} else if _, ok := v.taken[r.ID]; ok {
+			// The same, after its waiter took the result.
+			wanted = append(wanted, r.ID)
 		} else if _, ok := v.gaveUp[r.ID]; ok {
 			forgotten = append(forgotten, r.ID)
 		}
@@ -338,7 +347,7 @@ func (v *dev) report(rep api.Report) (forgotten []string) {
 		v.addEventLocked(e)
 	}
 	v.bump()
-	return forgotten
+	return forgotten, wanted
 }
 
 func (v *dev) addEventLocked(e api.KernelEvent) {
@@ -385,6 +394,60 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 	return out
 }
 
+// supersededLocked is whether e, a kernel event, cannot be about the boot a
+// job is waiting for, a Lab boot that never reached labd. oldBoot is the boot
+// the job asked to reboot. Two cases:
+//   - e is stamped with the boot before oldBoot, while the Mac is on oldBoot:
+//     that boot's event, reported late. A boot labd has not heard from is not
+//     one: it may be the test kernel, reporting before its first check-in.
+//   - e is from the boot oldBoot survived: the Mac was heard on oldBoot after
+//     e (still on it, or labd saw it end after e). A Mac that went on checking
+//     in did not die of that line, and the test kernel, which has not checked
+//     in, cannot have printed it: it was the boot before's, or a previous
+//     job's console. e.BootID "" (older agents, tests) counts as oldBoot's.
+//
+// A test kernel that panics before it checks in is in no case: the Mac stops
+// checking in, or comes back on a new boot. It uses heard, not LastSeen:
+// LastSeen also moves when labd answers a held check-in, which a Mac that just
+// died can't hear.
+func (v *dev) supersededLocked(e api.KernelEvent, oldBoot string) bool {
+	if e.BootID != "" && e.BootID != oldBoot {
+		return v.d.BootID == oldBoot && e.BootID == v.endedBoot
+	}
+	return (v.d.BootID == oldBoot && v.heard.After(e.Time)) || (v.endedBoot == oldBoot && v.endedHeard.After(e.Time))
+}
+
+// eventsSinceBoot is eventsSince without the events that can't be the test
+// kernel's after the Mac was asked to leave oldBoot: those supersededLocked
+// names, and those lab-agent read on oldBoot itself (a kmsg line stamped
+// oldBoot, say as it shut down for the reboot), whenever they came. A serial
+// line is stamped by labd, with the boot it last heard, so it has only
+// supersededLocked's rule. (waitBack, which also waits for a boot to die,
+// uses supersededLocked alone.)
+func (v *dev) eventsSinceBoot(t time.Time, oldBoot string) []api.KernelEvent {
+	var out []api.KernelEvent
+	for _, e := range v.eventsSince(t) {
+		v.mu.Lock()
+		sup := v.supersededLocked(e, oldBoot)
+		v.mu.Unlock()
+		if !sup && !(e.BootID == oldBoot && e.Source != "serial") {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// eventsOnBoot is eventsSince without the events of any other boot than boot.
+func (v *dev) eventsOnBoot(t time.Time, boot string) []api.KernelEvent {
+	var out []api.KernelEvent
+	for _, e := range v.eventsSince(t) {
+		if e.BootID == "" || e.BootID == boot {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // onSerial ingests one serial console line.
 func (v *dev) onSerial(line string) {
 	v.mu.Lock()
@@ -399,7 +462,9 @@ func (v *dev) onSerial(line string) {
 		v.marker, v.markerTime = m, now
 	}
 	if k := detect.Classify(line); k != "" {
-		v.addEventLocked(api.KernelEvent{Time: now, Kind: k, Source: "serial", Line: line})
+		// Stamped with the boot the Mac was last heard on, as kmsg events are.
+		// Before the next check-in that is still the boot before: see supersededLocked.
+		v.addEventLocked(api.KernelEvent{Time: now, Kind: k, Source: "serial", BootID: v.d.BootID, Line: line})
 	}
 	v.bump()
 }
@@ -569,9 +634,8 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 	for {
 		v.mu.Lock()
 		done := func() bool {
-			if r, ok := v.results[id]; ok {
+			if r, ok := v.takeResultLocked(id); ok {
 				res = r
-				delete(v.results, id)
 				return true
 			}
 			if v.goneWhy != "" || v.d.BootID != boot {
@@ -668,6 +732,26 @@ func (v *dev) callNoteOn(ctx context.Context, boot, kind, job string, args any, 
 	return nil
 }
 
+// takeResultLocked takes command id's result, if it is in, and remembers for
+// an hour that it was taken: if the agent's report of it is sent again (the
+// reply to it was lost), labd still wants it, and the agent goes on with what
+// follows it, such as a Lab boot's reboot.
+func (v *dev) takeResultLocked(id string) (api.CommandResult, bool) {
+	r, ok := v.results[id]
+	if !ok {
+		return r, false
+	}
+	delete(v.results, id)
+	now := v.s.now()
+	for t, at := range v.taken {
+		if now.Sub(at) > time.Hour {
+			delete(v.taken, t)
+		}
+	}
+	v.taken[id] = now
+	return r, true
+}
+
 // forget stops waiting for command id. A result for it that comes later is
 // answered as forgotten, so lab-agent doesn't act on it (a Lab boot's reboot
 // for an arm labd timed out on); labd remembers that for an hour.
@@ -685,6 +769,7 @@ func (v *dev) forgetLocked(id string) {
 		}
 	}
 	v.gaveUp[id] = now
+	delete(v.taken, id)
 	delete(v.inflight, id)
 	delete(v.sent, id)
 	delete(v.target, id)
