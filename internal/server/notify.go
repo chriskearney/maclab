@@ -142,7 +142,17 @@ func (s *Server) tellVolunteerJobEndedByRestart(j *api.Job, outcome string) {
 		return
 	}
 	d := v.snapshot()
-	if d.IsVolunteer() && d.JobNotices {
-		s.notify(s.volunteerDoneNotice(d, j.ID, outcome))
+	if !d.IsVolunteer() || !d.JobNotices {
+		return
 	}
+	n := s.volunteerDoneNotice(d, j.ID, outcome)
+	// labd keeps a Mac that needs hands as it was: the all-clear waits for
+	// the Mac to be back, as tellVolunteerJobDone does.
+	if d.State == api.StateNeedsHands || d.State == api.StateRecovering {
+		v.mu.Lock()
+		v.owedDone = &n
+		v.mu.Unlock()
+		return
+	}
+	s.notify(n)
 }

@@ -263,6 +263,31 @@ func TestARestartDuringAJobSendsTheDoneNoticeTheJobOwed(t *testing.T) {
 	}
 }
 
+// A Mac that needs hands when labd restarts is still needs_hands: the restart
+// must hold the all-clear for the job it lost until the Mac is back, not tell
+// the Volunteer they can use it.
+func TestARestartHoldsTheDoneNoticeWhileTheMacStillNeedsHands(t *testing.T) {
+	n := newJobNoticeLab(t, true)
+	v := n.s.dev(n.name)
+	v.setState(api.StateNeedsHands, "test")
+	n.s.tellVolunteerJobEndedByRestart(&api.Job{ID: "lost-hands", Spec: api.JobSpec{Device: n.name}, State: api.JobBooting}, "infra_error")
+	v.mu.Lock()
+	needsHands, held := v.d.State == api.StateNeedsHands, v.owedDone != nil
+	v.mu.Unlock()
+	if needsHands && !held {
+		t.Fatalf("the restart sent the all-clear while the Mac still needs hands: %+v", forJob(n.ntfy.at(n.macTopic()), "lost-hands"))
+	}
+	// the Mac checks in again: the held notice goes once
+	topic := n.macTopic()
+	if !n.waitPosts(topic, 5*time.Second, anyPost(func(p ntfyPost) bool { return p.jobDone("lost-hands") })) {
+		t.Fatalf("the held notice never went once the Mac was back: %+v", n.ntfy.at(topic))
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := countDone(n, topic, "lost-hands"); got != 1 {
+		t.Fatalf("%d done notices for lost-hands, want 1", got)
+	}
+}
+
 func TestARestartSendsNothingToAVolunteerWhoDidNotAsk(t *testing.T) {
 	n := newJobNoticeLab(t, false)
 	topic := n.macTopic()
