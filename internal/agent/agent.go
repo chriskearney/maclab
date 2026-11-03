@@ -654,6 +654,15 @@ func (a *Agent) post(ctx context.Context, rep api.Report) error {
 	var reply api.ReportReply // an older labd answers "ok"
 	if json.Valid(body) && json.Unmarshal(body, &reply) == nil {
 		a.mu.Lock()
+		if reply.Proto >= 1 {
+			// labd says which of these results it wants: refuse the rest, as
+			// if forgotten (one it lost track of must not reboot the Mac).
+			for _, r := range rep.Results {
+				if !slices.Contains(reply.Wanted, r.ID) && slices.ContainsFunc(a.after, func(f afterAck) bool { return f.id == r.ID }) {
+					a.forgotten[r.ID] = true
+				}
+			}
+		}
 		for _, id := range reply.Forgotten {
 			if slices.ContainsFunc(a.after, func(f afterAck) bool { return f.id == id }) {
 				a.forgotten[id] = true

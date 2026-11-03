@@ -1124,9 +1124,9 @@ func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, reportBodyMax, &rep) {
 		return
 	}
-	forgotten := agentDev(r).report(rep)
+	forgotten, wanted := agentDev(r).report(rep)
 	agentDev(r).copyAudit(rep.Audit)
-	writeJSON(w, api.ReportReply{Forgotten: forgotten})
+	writeJSON(w, api.ReportReply{Forgotten: forgotten, Proto: 1, Wanted: wanted})
 }
 
 var reSHA = regexp.MustCompile(`^[0-9a-f]{64}$`)
