@@ -34,7 +34,7 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 			return false
 		}
 		for _, e := range v.events {
-			if e.Time.After(since) && !(v.networkOnlyLocked() && e.Source == "serial") && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
+			if e.Time.After(since) && !(v.networkOnlyLocked() && e.Source == "serial") && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace && !v.supersededLocked(e, oldBoot) {
 				reason = "kernel panicked and did not reboot within " + panicGrace.String()
 				return true
 			}

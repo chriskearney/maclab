@@ -260,6 +260,16 @@ type ReportReply struct {
 	// a cancel): what was to follow their acknowledgement, a Lab boot's
 	// reboot, must not happen.
 	Forgotten []string `json:"forgotten,omitempty"`
+	// Proto is 1 from a labd that answers Wanted. Without it (an older labd,
+	// or "ok") the agent has only Forgotten to go by.
+	Proto int `json:"proto,omitempty"`
+	// Wanted are the results in the Report that labd is waiting for or has
+	// taken. With Proto 1, the agent runs what follows the acknowledgement of a
+	// command only if its id is here: a result labd knows nothing of (it
+	// restarted, or forgot the command long ago) must not reboot the Mac into
+	// a Lab boot no job is waiting for. Forgotten is a list of what to refuse;
+	// Wanted is a list of what to allow, so it fails closed.
+	Wanted []string `json:"wanted,omitempty"`
 }
 
 // Quiet is the agent saying, while it can, that the Mac is about to go off
