@@ -507,12 +507,14 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	// unless the ladder's reboot ran it after all (a one-shot left armed)
 	// and a kernel failed since.
 	const neverRebooted = "the Mac never rebooted into the test kernel after its one-shot was armed: lab-agent's re-arm before the reboot, or the reboot itself, failed"
-	never := neverLeft && !r.kernelFailedSince(t0)
+	// A fatal line from the boot the Mac stayed up on is not the test kernel's.
+	armEvents := v.eventsSinceBoot(t0, oldBoot)
+	never := neverLeft && !kernelFailed(armEvents)
 	if !ok {
 		if never {
 			return api.OutcomeInfra, neverRebooted
 		}
-		o, cause := r.classify(t0, steps)
+		o, cause := r.classify(armEvents, steps)
 		return o, cause
 	}
 	d = v.snapshot()
@@ -520,7 +522,7 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 		return api.OutcomeInfra, neverRebooted
 	}
 	if d.Health.JobTag != j.ID {
-		o, cause := r.classify(t0, steps)
+		o, cause := r.classify(armEvents, steps)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.FellBack = true })
 		r.ev("came back on %s instead of the test entry: %s", d.Kernel, cause)
 		if lost := r.collectLost(ctx); lost.Deadline == api.DeadlineWindowClosed {
@@ -1021,9 +1023,9 @@ func (r *jobRun) watchdogAllowance() time.Duration {
 	return r.s.cfg.WatchdogIdleReset + r.boot
 }
 
-// kernelFailedSince is whether labd saw a fatal kernel event since t0.
-func (r *jobRun) kernelFailedSince(t0 time.Time) bool {
-	for _, e := range r.v.eventsSince(t0) {
+// kernelFailed is whether a fatal kernel event is among events.
+func kernelFailed(events []api.KernelEvent) bool {
+	for _, e := range events {
 		if detect.Fatal(e.Kind) {
 			return true
 		}
@@ -1031,9 +1033,8 @@ func (r *jobRun) kernelFailedSince(t0 time.Time) bool {
 	return false
 }
 
-// classify names what went wrong from the kernel events seen since t0.
-func (r *jobRun) classify(t0 time.Time, steps []string) (string, string) {
-	events := r.v.eventsSince(t0)
+// classify names what went wrong from the kernel events.
+func (r *jobRun) classify(events []api.KernelEvent, steps []string) (string, string) {
 	r.s.updateJob(r.j, func(j *api.Job) { j.Result.KernelEvents = events })
 	var worst *api.KernelEvent
 	for i := range events {
@@ -1083,18 +1084,20 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 	timeout := max(r.boot-r.s.quietGrace(), time.Minute)
 	steps, ok, neverLeft, err := r.v.waitBack(ctx, r.bootID, r.bootedAt, timeout, r.watchdogRecovery(timeout))
 	r.addRecovery(steps)
-	kernelFailed := r.kernelFailedSince(r.bootedAt.Add(-time.Second))
-	if err != nil && !kernelFailed {
+	// Only this boot's events: an earlier boot's are not the test kernel's.
+	events := r.v.eventsOnBoot(r.bootedAt.Add(-time.Second), r.bootID)
+	failed := kernelFailed(events)
+	if err != nil && !failed {
 		// Canceled before the Mac came back, with nothing to say its kernel
 		// failed: a Lab boot that lost its network looks just the same.
 		return api.OutcomeCanceled, "canceled while waiting for the Mac, lost " + during
 	}
-	if ok && neverLeft && !kernelFailed {
+	if ok && neverLeft && !failed {
 		// Still up on the same boot, and checking in again: it lost its
 		// network for a while, and its kernel never went down.
 		return api.OutcomeLostContact, "labd lost the Mac " + during + ", but it came back on the same boot: its network went, not its kernel"
 	}
-	o, cause := r.classify(r.bootedAt.Add(-time.Second), steps)
+	o, cause := r.classify(events, steps)
 	if o == api.OutcomeBootFailed {
 		// Nothing says panic: only how long it took to come back hints at what happened.
 		o, cause = api.OutcomeCrashedOrHung, "the Mac rebooted with no kernel error captured"
@@ -1122,7 +1125,7 @@ func (r *jobRun) lostDuringTest(ctx context.Context, test string) (string, strin
 			return accessCut(during + ": lab-agent rebooted the Mac to " + r.v.snapshot().Kernel)
 		case api.DeadlineLostLabd:
 			// A kernel error seen before the network went is still the kernel's.
-			if !kernelFailed {
+			if !failed {
 				o, cause = api.OutcomeLostContact, "labd lost the Lab boot, and lab-agent's watchdog rebooted it for that"
 			}
 		default:

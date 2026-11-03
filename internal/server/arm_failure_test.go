@@ -118,8 +118,46 @@ func TestReportAnswersCommandsLabdGaveUpOn(t *testing.T) {
 	l := newLab(t, false)
 	v := l.s.dev(l.name)
 	v.forget("c-gave-up")
-	got := v.report(api.Report{Results: []api.CommandResult{{ID: "c-gave-up", OK: true}, {ID: "c-unknown", OK: true}}})
+	got, _ := v.report(api.Report{Results: []api.CommandResult{{ID: "c-gave-up", OK: true}, {ID: "c-unknown", OK: true}}})
 	if len(got) != 1 || got[0] != "c-gave-up" {
 		t.Fatalf("forgotten %v, want [c-gave-up]", got)
+	}
+}
+
+// labd answers which results it wants, so the agent reboots only for those: a
+// command labd lost track of (it restarted, or forgot it long ago) is not one.
+func TestReportListsWantedResults(t *testing.T) {
+	l := newLab(t, false)
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	v.inflight["c-wanted"] = l.s.now()
+	v.mu.Unlock()
+	v.forget("c-gave-up")
+	rep := api.Report{Results: []api.CommandResult{{ID: "c-wanted", OK: true}, {ID: "c-gave-up", OK: true}, {ID: "c-unknown", OK: true}}}
+	forgotten, wanted := v.report(rep)
+	if len(wanted) != 1 || wanted[0] != "c-wanted" {
+		t.Fatalf("wanted %v, want [c-wanted]", wanted)
+	}
+	if len(forgotten) != 1 || forgotten[0] != "c-gave-up" {
+		t.Fatalf("forgotten %v, want [c-gave-up]", forgotten)
+	}
+	// The same report again, its first reply lost: labd has the result, so it
+	// still wants it, and still after its waiter took it.
+	if _, wanted = v.report(api.Report{Results: rep.Results[:1]}); len(wanted) != 1 {
+		t.Fatalf("a result labd has is not wanted on a resend: %v", wanted)
+	}
+	v.mu.Lock()
+	_, took := v.takeResultLocked("c-wanted")
+	v.mu.Unlock()
+	if !took {
+		t.Fatal("the result was not there to take")
+	}
+	if _, wanted = v.report(api.Report{Results: rep.Results[:1]}); len(wanted) != 1 {
+		t.Fatalf("a result labd took is not wanted on a resend: %v", wanted)
+	}
+	// Until labd gives up on it.
+	v.forget("c-wanted")
+	if forgotten, wanted = v.report(api.Report{Results: rep.Results[:1]}); len(wanted) != 0 || len(forgotten) != 1 {
+		t.Fatalf("after forget: wanted %v, forgotten %v", wanted, forgotten)
 	}
 }

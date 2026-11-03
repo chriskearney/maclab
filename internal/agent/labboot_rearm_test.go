@@ -173,3 +173,71 @@ func TestLabBootForgottenByLabdIsCancelledNotBooted(t *testing.T) {
 		t.Fatalf("%d reboots, %d cancels, %d left to run; want 0, 1, 0", sys.reboots, sys.cancels, len(a.after))
 	}
 }
+
+// A labd that answers which results it wants (Proto 1), and not this one
+// (it restarted and lost the command): cancelled, though it never said
+// "forgotten".
+func TestLabBootLabdNotWantingTheResultIsCancelledNotBooted(t *testing.T) {
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(api.ReportReply{Proto: 1, Wanted: []string{}})
+	}))
+	t.Cleanup(hs.Close)
+	sys := &rearmSystem{Sim: NewSim(t.TempDir())}
+	a := New(&Config{Server: hs.URL, Secret: "test"}, sys, log.New(io.Discard, "", 0))
+	after := a.labBootAfterAck(entryPrefix + "j1")
+	after.id = "c1"
+	a.results = []api.CommandResult{{ID: "c1", OK: true}}
+	a.after = []afterAck{*after}
+	if err := a.report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sys.mu.Lock()
+	defer sys.mu.Unlock()
+	if sys.reboots != 0 || sys.cancels != 1 || len(a.after) != 0 {
+		t.Fatalf("%d reboots, %d cancels, %d left to run; want 0, 1, 0", sys.reboots, sys.cancels, len(a.after))
+	}
+}
+
+// ... and one it wants is booted.
+func TestLabBootLabdWantingTheResultIsBooted(t *testing.T) {
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(api.ReportReply{Proto: 1, Wanted: []string{"c1"}})
+	}))
+	t.Cleanup(hs.Close)
+	sys := &rearmSystem{Sim: NewSim(t.TempDir())}
+	a := New(&Config{Server: hs.URL, Secret: "test"}, sys, log.New(io.Discard, "", 0))
+	after := a.labBootAfterAck(entryPrefix + "j1")
+	after.id = "c1"
+	a.results = []api.CommandResult{{ID: "c1", OK: true}}
+	a.after = []afterAck{*after}
+	if err := a.report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sys.mu.Lock()
+	defer sys.mu.Unlock()
+	if sys.reboots != 1 || sys.cancels != 0 || len(a.after) != 0 {
+		t.Fatalf("%d reboots, %d cancels, %d left to run; want 1, 0, 0", sys.reboots, sys.cancels, len(a.after))
+	}
+}
+
+// An older labd answers "ok": no Wanted to go by, so only Forgotten counts.
+func TestLabBootOldLabdAnsweringOkStillBoots(t *testing.T) {
+	hs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	t.Cleanup(hs.Close)
+	sys := &rearmSystem{Sim: NewSim(t.TempDir())}
+	a := New(&Config{Server: hs.URL, Secret: "test"}, sys, log.New(io.Discard, "", 0))
+	after := a.labBootAfterAck(entryPrefix + "j1")
+	after.id = "c1"
+	a.results = []api.CommandResult{{ID: "c1", OK: true}}
+	a.after = []afterAck{*after}
+	if err := a.report(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sys.mu.Lock()
+	defer sys.mu.Unlock()
+	if sys.reboots != 1 || sys.cancels != 0 || len(a.after) != 0 {
+		t.Fatalf("%d reboots, %d cancels, %d left to run; want 1, 0, 0", sys.reboots, sys.cancels, len(a.after))
+	}
+}
