@@ -61,10 +61,9 @@ func TestSerialEventsAreStampedWithTheBoot(t *testing.T) {
 	}
 }
 
-// A fatal event the waited-on boot outlived (it was heard after it), one
-// lab-agent read on that boot, or one of the boot before it is superseded; a
-// serial line it has not outlived, one of a boot labd has not heard from, or
-// one of a boot not waited on, is not.
+// A fatal event the waited-on boot outlived (it was heard after it), or one
+// of the boot before it, is superseded; one it has not outlived, one of a
+// boot labd has not heard from, or one of a boot not waited on, is not.
 func TestSupersededEvents(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()
@@ -82,7 +81,6 @@ func TestSupersededEvents(t *testing.T) {
 		{"before the last check-in, no boot", api.KernelEvent{Time: now.Add(-time.Hour), Kind: detect.Panic}, true},
 		{"before the last check-in, same boot", api.KernelEvent{Time: now.Add(-time.Hour), Kind: detect.Panic, BootID: boot}, true},
 		{"serial, after the last check-in", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Panic, Source: "serial", BootID: boot}, false},
-		{"lab-agent's, after the last check-in", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Oops, Source: "kmsg", BootID: boot}, true},
 		{"the boot before's, reported late", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Panic, Source: "kmsg", BootID: "earlier"}, true},
 		{"a boot labd has not heard from", api.KernelEvent{Time: now.Add(time.Hour), Kind: detect.Oops, Source: "kmsg", BootID: "test-kernel"}, false},
 	} {

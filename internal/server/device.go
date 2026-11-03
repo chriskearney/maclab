@@ -396,9 +396,7 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 
 // supersededLocked is whether e, a kernel event, cannot be about the boot a
 // job is waiting for, a Lab boot that never reached labd. oldBoot is the boot
-// the job asked to reboot. Three cases:
-//   - lab-agent read e on oldBoot itself (a kmsg line stamped oldBoot, say as
-//     it shut down for the reboot): the test kernel has another boot ID.
+// the job asked to reboot. Two cases:
 //   - e is stamped with the boot before oldBoot, while the Mac is on oldBoot:
 //     that boot's event, reported late. A boot labd has not heard from is not
 //     one: it may be the test kernel, reporting before its first check-in.
@@ -406,35 +404,33 @@ func (v *dev) eventsSince(t time.Time) []api.KernelEvent {
 //     e (still on it, or labd saw it end after e). A Mac that went on checking
 //     in did not die of that line, and the test kernel, which has not checked
 //     in, cannot have printed it: it was the boot before's, or a previous
-//     job's console. This is the only case for a serial line, which labd
-//     stamps with the boot it last heard, and for e.BootID "" (older agents,
-//     tests).
+//     job's console. e.BootID "" (older agents, tests) counts as oldBoot's.
 //
 // A test kernel that panics before it checks in is in no case: the Mac stops
 // checking in, or comes back on a new boot. It uses heard, not LastSeen:
 // LastSeen also moves when labd answers a held check-in, which a Mac that just
 // died can't hear.
 func (v *dev) supersededLocked(e api.KernelEvent, oldBoot string) bool {
-	switch {
-	case e.BootID == "":
-	case e.BootID == oldBoot:
-		if e.Source != "serial" {
-			return true
-		}
-	default:
+	if e.BootID != "" && e.BootID != oldBoot {
 		return v.d.BootID == oldBoot && e.BootID == v.endedBoot
 	}
 	return (v.d.BootID == oldBoot && v.heard.After(e.Time)) || (v.endedBoot == oldBoot && v.endedHeard.After(e.Time))
 }
 
-// eventsSinceBoot is eventsSince without the events oldBoot's survival supersedes.
+// eventsSinceBoot is eventsSince without the events that can't be the test
+// kernel's after the Mac was asked to leave oldBoot: those supersededLocked
+// names, and those lab-agent read on oldBoot itself (a kmsg line stamped
+// oldBoot, say as it shut down for the reboot), whenever they came. A serial
+// line is stamped by labd, with the boot it last heard, so it has only
+// supersededLocked's rule. (waitBack, which also waits for a boot to die,
+// uses supersededLocked alone.)
 func (v *dev) eventsSinceBoot(t time.Time, oldBoot string) []api.KernelEvent {
 	var out []api.KernelEvent
 	for _, e := range v.eventsSince(t) {
 		v.mu.Lock()
 		sup := v.supersededLocked(e, oldBoot)
 		v.mu.Unlock()
-		if !sup {
+		if !sup && !(e.BootID == oldBoot && e.Source != "serial") {
 			out = append(out, e)
 		}
 	}
