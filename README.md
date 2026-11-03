@@ -31,9 +31,10 @@ AI agents get the same operations over MCP (`lab mcp`).
    - **Limine** (Omarchy on Apple Silicon: U-Boot, then Limine, then a UKI on
      the ESP): a unified kernel image in `<esp>/maclab/<job>/uki.efi`, listed in
      a marked block at the end of `limine.conf`. Limine reads only FAT, so the
-     ESP needs room for one more UKI plus 121 MiB it keeps free (a 120 MiB
-     reserve and 1 MiB for metadata): about 180 MiB with Omarchy's ~60 MiB UKIs.
-     Preflight sizes the UKI by the largest one in `<esp>/EFI/Linux`.
+     ESP needs room for one UKI rounded up to its allocation unit, plus a
+     margin of `ceil(UKI size / 10)` and 1 MiB for metadata. Preflight uses
+     the largest UKI in `<esp>/EFI/Linux` (or a labelled 64 MiB guess if none
+     exists); the writer and post-copy gate use the generated UKI's actual size.
 
    A failed staging is tried again, up to 3 attempts, 30 s and then 2 min
    apart, with the failed attempt's leftovers removed first. Only an attempt
