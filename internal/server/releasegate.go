@@ -155,7 +155,7 @@ func builtinNames(j *api.Job, b string) []string {
 // compared_to, which names it this way only after a comparison.
 func omtCompared(j *api.Job) bool {
 	o := j.Result.OMT
-	return o != nil && (o.BaselineJob != "" || strings.HasPrefix(o.ComparedTo, "known-good run "))
+	return o != nil && len(o.NotCompared) == 0 && !strings.Contains(o.ComparedTo, "; not compared,") && (o.BaselineJob != "" || strings.HasPrefix(o.ComparedTo, "known-good run "))
 }
 
 // customCmdline says how a job changed the Mac's known-good cmdline, or "".
@@ -180,6 +180,13 @@ func customCmdline(s api.JobSpec) string {
 // and omarchy-m-test when omt) missing. Tests are known by their builtin.
 func lessTested(j *api.Job, omt bool) string {
 	var why []string
+	if o := j.Result.OMT; o != nil {
+		if len(o.NotCompared) > 0 {
+			why = append(why, "OMT checks not run: "+strings.Join(o.NotCompared, ", "))
+		} else if strings.Contains(o.ComparedTo, "; not compared,") {
+			why = append(why, "OMT comparison incomplete")
+		}
+	}
 	if len(j.Spec.OMTAllow) > 0 {
 		why = append(why, "--omt-allow "+strings.Join(j.Spec.OMTAllow, ","))
 	}

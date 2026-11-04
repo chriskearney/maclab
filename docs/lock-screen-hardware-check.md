@@ -39,8 +39,9 @@ Expect, on the screen:
 - `/etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf` is a link to
   `/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf`, which exists, with
   `User=<gui-user>`.
-- The job passes, and its omarchy-m-test report has no `video` section checks
-  (`omarchy-m-test --skip video` ran), neither in the baseline nor the test run.
+- The job passes, and its omarchy-m-test report shows the `video` section's
+  checks skipped (`--unattended` and `--skip video` both ran), in the baseline
+  and the test run alike.
 - The tests start only once the lock is up: `/run/maclab-lab-boot-lock`
   says `locked` before the job's first test begins.
 - The lock screen is still up when the job ends; the Volunteer's password
@@ -70,8 +71,9 @@ if the installer set one, is unchanged.
 ## 6. A Lab-owned Mac is unchanged
 
 On a Lab-owned Mac, `--autologin` and `--stay-awake` still apply, the desktop
-is unlocked after every boot, and its omarchy-m-test report keeps the
-on-screen checks.
+is unlocked after every boot. Its omarchy-m-test run is unattended too: on 0.1.15
+its report skips the on-screen checks, and once maralcbr/omarchy-m-testing#61
+ships they run again.
 
 ## Results
 

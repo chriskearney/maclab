@@ -65,16 +65,18 @@ type omtReport struct {
 			Outcome string `json:"outcome"`
 		} `json:"classification"`
 	} `json:"checks"`
+	Unattended bool `json:"unattended"` // --unattended: only the automatic checks ran
 }
 
 // omtBaseline is the known-good report a Mac's other runs are compared with.
 type omtBaseline struct {
-	Job       string            `json:"job"`
-	Time      time.Time         `json:"time"`
-	Kernel    string            `json:"kernel"`
-	Tool      string            `json:"tool"`
-	Status    map[string]string `json:"status"`              // check id -> pass, fail or skip
-	Unclaimed []string          `json:"unclaimed,omitempty"` // compatibles of the device-tree nodes no driver claimed
+	NotCompared []string          `json:"not_compared,omitempty"`
+	Job         string            `json:"job"`
+	Time        time.Time         `json:"time"`
+	Kernel      string            `json:"kernel"`
+	Tool        string            `json:"tool"`
+	Status      map[string]string `json:"status"`              // check id -> pass, fail or skip
+	Unclaimed   []string          `json:"unclaimed,omitempty"` // compatibles of the device-tree nodes no driver claimed
 	// UnclaimedNodes counts those nodes per compatible. References from
 	// before it was kept have only Unclaimed.
 	UnclaimedNodes map[string]int `json:"unclaimed_nodes,omitempty"`
@@ -147,6 +149,8 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 			res.Skip++
 		}
 	}
+	base := r.s.omtBaseline(j.Spec.Device)
+	res.NotCompared = omtMissingCoverage(rep.Unattended, base, status)
 	var unclaimed []string
 	for _, u := range rep.Inventory.Unclaimed {
 		unclaimed = append(unclaimed, u.Compatible)
@@ -158,11 +162,11 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		// never becomes a reference
 		res.KnownGood = false
 		r.ir.omt(tr, res, data)
+		tr.Error += omtFrozenSkipNote(r.ir.c.omtUnattended, rep.Unattended, res.Regressions)
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
 		r.ev("omarchy-m-test %s: %d pass, %d fail, %d skipped; %s vs %s", res.Tool, res.Pass, res.Fail, res.Skip, r.ir.res.OMT, res.ComparedTo)
 		return
 	}
-	base := r.s.omtBaseline(j.Spec.Device)
 	switch {
 	case res.KnownGood:
 		res.ComparedTo = "this is the known-good run: later runs are compared with it"
@@ -193,6 +197,9 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 			res.ComparedTo += fmt.Sprintf(" (omarchy-m-test %s then, %s now)", base.Tool, res.Tool)
 		}
 	}
+	if len(res.NotCompared) > 0 {
+		res.ComparedTo += "; coverage not run: " + strings.Join(res.NotCompared, ", ")
+	}
 	r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
 	r.ev("omarchy-m-test %s: %d pass, %d fail, %d skipped; %d regressed, %d fixed vs %s",
 		res.Tool, res.Pass, res.Fail, res.Skip, len(res.Regressions), len(res.Fixed), res.ComparedTo)
@@ -219,7 +226,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 		case j.Spec.Baseline:
 			// lab baseline is how a person sets the references on purpose
 			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
-				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
+				Unclaimed: unclaimed, UnclaimedNodes: nodes, NotCompared: res.NotCompared}, "", "  ")
 			res.Reference = "a baseline: becomes the reference if it passes"
 		case len(res.Regressions) > 0:
 			res.Reference = fmt.Sprintf("kept %s: %s regressed since", base.Job, strings.Join(omtIDs(res.Regressions), ", "))
@@ -229,7 +236,7 @@ func (r *jobRun) omtResult(tr *api.TestResult) {
 			res.Reference = "not a reference: the job changed the known-good cmdline"
 		default:
 			r.omtRef, _ = json.MarshalIndent(omtBaseline{Job: j.ID, Time: r.s.now(), Kernel: res.Kernel, Tool: res.Tool, Status: status,
-				Unclaimed: unclaimed, UnclaimedNodes: nodes}, "", "  ")
+				Unclaimed: unclaimed, UnclaimedNodes: nodes, NotCompared: res.NotCompared}, "", "  ")
 			res.Reference = "becomes the reference if the job passes"
 		}
 		r.s.updateJob(j, func(j *api.Job) { j.Result.OMT = res })
@@ -299,6 +306,79 @@ func omtDiff(before, after map[string]string, byID map[string]api.OMTCheck) (reg
 		}
 	}
 	return
+}
+
+// omtNotRun lists the checks a reference passed that an unattended run skipped.
+// omtDiff rightly calls them neither regressed nor fixed, so without this a
+// lab kernel looks checked for what nothing ran on it. Missing coverage is
+// carried by omtBaseline.NotCompared when the reference is replaced.
+func omtNotRun(unattended bool, before, after map[string]string) []string {
+	if !unattended {
+		return nil
+	}
+	var ids []string
+	for id, was := range before {
+		if was == "pass" && after[id] == "skip" {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// omtMissingCoverage retains missed reference coverage across known-good
+// reference updates. On-screen video skipped by unattended mode is always
+// visible to the release gate, including when the first reference skipped it.
+func omtMissingCoverage(unattended bool, base *omtBaseline, after map[string]string) []string {
+	missing := map[string]bool{}
+	if base != nil {
+		for _, id := range base.NotCompared {
+			if after[id] != "pass" {
+				missing[id] = true
+			}
+		}
+		for _, id := range omtNotRun(unattended, base.Status, after) {
+			missing[id] = true
+		}
+	}
+	if unattended {
+		for _, id := range []string{"video.h264-on-screen", "video.hevc-on-screen"} {
+			if after[id] == "skip" {
+				missing[id] = true
+			}
+		}
+	}
+	ids := make([]string, 0, len(missing))
+	for id := range missing {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// omtFrozenSkipNote names what an unattended Installed run regressed by
+// skipping, and what to do: a frozen pass that is now a skip stays a regression
+// (CompareOMT). Only a report frozen from an attended run can have run more than
+// this mode does, so only then is taking the references again any use.
+func omtFrozenSkipNote(frozenUnattended, unattended bool, regressed []api.OMTCheck) string {
+	if !unattended {
+		return ""
+	}
+	var ids []string
+	for _, c := range regressed {
+		if c.Outcome == "pass -> skip" {
+			ids = append(ids, c.ID)
+		}
+	}
+	switch {
+	case len(ids) == 0:
+		return ""
+	case frozenUnattended:
+		return "; this unattended run skipped what the unattended pre-install report passed: " + strings.Join(ids, ", ") +
+			": see their evidence, and if the screen was locked or covered run it again"
+	}
+	return "; this unattended run skipped what the attended pre-install report passed: " + strings.Join(ids, ", ") +
+		": if the screen was locked or covered run it again, otherwise take the preinstall references again"
 }
 
 // unclaimedNodes counts a report's unclaimed device-tree nodes per

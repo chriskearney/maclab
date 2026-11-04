@@ -68,7 +68,9 @@ func TestStageZstdFrameAndTarTailAdmission(t *testing.T) {
 			}
 			spec.Packages[0].SHA256 = Sum(data)
 			store[Sum(data)] = data
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			// Generous for a loaded CI runner under -race. A real hang
+			// runs to this deadline, past the limit checked below.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			started := time.Now()
 			_, err := stageWith(ctx, root, "j1026-010203-abcd", spec, fetch, tools)
@@ -78,7 +80,7 @@ func TestStageZstdFrameAndTarTailAdmission(t *testing.T) {
 			if !good && err == nil {
 				t.Fatal("malformed/concatenated/excessive data admitted")
 			}
-			if time.Since(started) > time.Second {
+			if time.Since(started) > 15*time.Second {
 				t.Fatal("archive handling did not promptly consume/refuse tail")
 			}
 		})

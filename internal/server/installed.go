@@ -71,9 +71,11 @@ type installedCtx struct {
 	omtStatus map[string]string
 	omtTool   string
 	omtKernel string
-	dmesgPath string
-	dmesgSHA  string
-	dmesg     string
+	// omtUnattended: the frozen report is from an unattended run.
+	omtUnattended bool
+	dmesgPath     string
+	dmesgSHA      string
+	dmesg         string
 	// noPreinstall is why the device has no preinstall references yet: a
 	// Volunteer's Installed run takes them, a Lab-owned Mac's can't run.
 	noPreinstall error
@@ -190,6 +192,10 @@ func (s *Server) loadInstalled(manifestSHA, device string) (*installedCtx, error
 	}
 	_, c.omtTool, c.omtKernel, _ = installed.ReportStatus(rep)
 	c.omtReport, c.omtSHA = filepath.Join(c.dir, "preinstall", device, "omt-report.json"), rsha
+	var frozen omtReport
+	if json.Unmarshal(rep, &frozen) == nil {
+		c.omtUnattended = frozen.Unattended
+	}
 	db, dsha, err := pinned(c.dir, "preinstall/"+device+"/dmesg-errors.txt", pre)
 	if err != nil {
 		return nil, err
