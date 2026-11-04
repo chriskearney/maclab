@@ -245,6 +245,12 @@ Mac still shows tier 1) and feeds it only while:
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
   is reset after 10 minutes without labd.
 
+A test may set `require_watchdog: true` to refuse execution until lab-agent has
+opened the watchdog on that boot. The check records a successful open; it does
+not verify later writes or hardware resets. Deploy labd with this support before
+updating lab-agent, and use the option only after both are updated. Older labd
+versions can discard the field without enforcing it.
+
 Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
 on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd
 is down it resets every 11 minutes or so. The watchdog stays running when lab-agent exits,

@@ -509,11 +509,12 @@ type CrashArgs struct {
 }
 
 type TestSpec struct {
-	Name       string `json:"name"`
-	Builtin    string `json:"builtin,omitempty"` // name of a test embedded in the agent
-	Script     string `json:"script,omitempty"`  // artifact sha256 of a shell script
-	TimeoutSec int    `json:"timeout_sec,omitempty"`
-	GUI        bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
+	Name            string `json:"name"`
+	Builtin         string `json:"builtin,omitempty"` // name of a test embedded in the agent
+	Script          string `json:"script,omitempty"`  // artifact sha256 of a shell script
+	TimeoutSec      int    `json:"timeout_sec,omitempty"`
+	RequireWatchdog bool   `json:"require_watchdog,omitempty"`
+	GUI             bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
 	// SkipOnScreen leaves out the checks that need the screen visible: a
 	// Volunteer's Mac is locked while a test runs.
 	SkipOnScreen bool `json:"skip_on_screen,omitempty"`
