@@ -139,7 +139,7 @@ func describe(c api.Command) string {
 		case t.Script != "" && t.GUI:
 			return fmt.Sprintf("test %s: a Maintainer's script in your desktop session (--gui-script %s)", t.Name, short(t.Script))
 		case t.Script != "":
-			return fmt.Sprintf("test %s: a Maintainer's script as root (--script %s)", t.Name, short(t.Script))
+			return fmt.Sprintf("test %s: a Maintainer's script as root (--script %s)%s", t.Name, short(t.Script), describePayload(t.Payload))
 		case t.Builtin != "":
 			return fmt.Sprintf("test %s (built-in %s)", t.Name, t.Builtin)
 		case t.Identity != nil:
@@ -290,4 +290,17 @@ func latestAudit(workDir string, n int) ([]string, error) {
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+// describePayload names a script's payload files and their hashes, so the
+// Audit log shows what the script is given.
+func describePayload(files []api.PayloadFile) string {
+	var parts []string
+	for _, p := range files {
+		parts = append(parts, p.Name+" "+short(p.SHA256))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " with payload files " + strings.Join(parts, ", ")
 }

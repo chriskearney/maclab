@@ -79,11 +79,7 @@ func (s *Server) gcArtifacts() {
 		return
 	}
 	for _, j := range append(jobs, open...) {
-		refs := append([]string{j.Spec.Kernel}, mesaRefs(j.Spec)...)
-		for _, t := range j.Spec.Tests {
-			refs = append(refs, t.Script)
-		}
-		for _, r := range refs {
+		for _, r := range specRefs(j.Spec) {
 			if r == "" {
 				continue
 			}
@@ -181,4 +177,17 @@ func (s *Server) gcArtifacts() {
 	if n > 0 {
 		s.log.Printf("artifact gc: removed %d (%d MB); store now %d MB of %d MB budget", n, freed>>20, total>>20, budget>>20)
 	}
+}
+
+// specRefs is every artifact a job needs: its kernel, its Mesa packages, and
+// each test's script and payload files.
+func specRefs(spec api.JobSpec) []string {
+	refs := append([]string{spec.Kernel}, mesaRefs(spec)...)
+	for _, t := range spec.Tests {
+		refs = append(refs, t.Script)
+		for _, p := range t.Payload {
+			refs = append(refs, p.SHA256)
+		}
+	}
+	return refs
 }

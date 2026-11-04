@@ -283,6 +283,8 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		fs.Var(&guiTests, "gui-test", "builtin GUI test to run in the Wayland session (repeatable)")
 		fs.Var(&scripts, "script", "shell script test to upload and run (repeatable)")
 		fs.Var(&guiScripts, "gui-script", "shell script test to run in the Wayland session (repeatable)")
+		var payload multi
+		fs.Var(&payload, "payload", "a file for the --script tests to read from $MACLAB_IN, NAME=FILE or NAME=SHA256 (repeatable), e.g. ane.ko=./ane.ko")
 		pos := parse(fs, args)
 		if err := need(pos, 1, "lab run <device> [flags]"); err != nil {
 			return err
@@ -360,6 +362,13 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 				name := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
 				spec.Tests = append(spec.Tests, api.TestSpec{Name: name, Script: sha, GUI: i == 1, TimeoutSec: int(scriptTimeout.Seconds())})
 			}
+		}
+		files, err := payloadFiles(ctx, c, payload)
+		if err != nil {
+			return err
+		}
+		if spec.Tests, err = withPayload(spec.Tests, files); err != nil {
+			return err
 		}
 		return submit(ctx, c, spec, *noWait)
 
@@ -779,6 +788,42 @@ func artifact(ctx context.Context, c *client.Client, v string) (string, error) {
 	}
 	fmt.Fprintf(os.Stderr, "%s\n", sha[:12])
 	return sha, nil
+}
+
+// payloadFiles uploads the files of a --payload list, each NAME=FILE or NAME=SHA256.
+func payloadFiles(ctx context.Context, c *client.Client, list []string) ([]api.PayloadFile, error) {
+	var files []api.PayloadFile
+	for _, p := range list {
+		name, src, ok := strings.Cut(p, "=")
+		if !ok || name == "" || src == "" {
+			return nil, fmt.Errorf("--payload %q: want NAME=FILE or NAME=SHA256", p)
+		}
+		sha, err := artifact(ctx, c, src)
+		if err != nil {
+			return nil, fmt.Errorf("--payload %s: %w", name, err)
+		}
+		files = append(files, api.PayloadFile{Name: name, SHA256: sha})
+	}
+	return files, nil
+}
+
+// withPayload gives the files to every root script test: a GUI script runs as
+// the Volunteer, so it takes none. It is an error to give files with no script.
+func withPayload(tests []api.TestSpec, files []api.PayloadFile) ([]api.TestSpec, error) {
+	if len(files) == 0 {
+		return tests, nil
+	}
+	n := 0
+	for i := range tests {
+		if tests[i].Script != "" && !tests[i].GUI {
+			tests[i].Payload = files
+			n++
+		}
+	}
+	if n == 0 {
+		return nil, errors.New("--payload needs a --script test to read the files")
+	}
+	return tests, nil
 }
 
 func submit(ctx context.Context, c *client.Client, spec api.JobSpec, noWait bool) error {

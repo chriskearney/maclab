@@ -1600,6 +1600,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
 	}
+	if code, err := s.validatePayload(spec, d.Device); err != nil {
+		return nil, code, err
+	}
 	if err := validateRequiredWatchdog(spec.Tests, d.Device); err != nil {
 		return nil, 409, err
 	}

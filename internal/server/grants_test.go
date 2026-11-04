@@ -84,6 +84,36 @@ func TestJobGrantsLastOnlyWhileTheJobIsActive(t *testing.T) {
 	}
 }
 
+func TestPayloadGrantsFollowTheActiveJob(t *testing.T) {
+	for _, kind := range []string{api.CmdRunTest, api.CmdBootOnce} {
+		t.Run(kind, func(t *testing.T) {
+			sha := strings.Repeat("a", 64)
+			test := api.TestSpec{Name: "probe", Script: strings.Repeat("b", 64), Payload: []api.PayloadFile{{Name: "probe.bin", SHA256: sha}}}
+			var args any = test
+			if kind == api.CmdBootOnce {
+				args = api.BootOnceArgs{Tests: []api.TestSpec{test}}
+			}
+			body, err := json.Marshal(args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := &dev{d: api.Device{ID: "enrolled", Name: "mac", ActiveJob: "j1"}}
+			v.grantLocked(api.Command{Kind: kind, JobID: "j1", Args: body})
+			if !v.mayFetchLocked(sha, time.Now()) {
+				t.Fatal("active job cannot fetch its payload")
+			}
+			v.d.ActiveJob = ""
+			if v.mayFetchLocked(sha, time.Now()) {
+				t.Fatal("payload remains fetchable after the job ends")
+			}
+			v.d.ActiveJob = "j2"
+			if v.mayFetchLocked(sha, time.Now()) {
+				t.Fatal("another job inherited the payload grant")
+			}
+		})
+	}
+}
+
 // A real job over the wire: the Mac downloads its kernel through the grant
 // check while the job runs, and once the job is over, without any later job,
 // the same request is refused. No explicit grant is involved.

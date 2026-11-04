@@ -73,11 +73,17 @@ func artifactsIn(c api.Command) []string {
 		var t api.TestSpec
 		json.Unmarshal(c.Args, &t)
 		shas = append(shas, t.Script)
+		for _, p := range t.Payload {
+			shas = append(shas, p.SHA256)
+		}
 	case api.CmdBootOnce:
 		var a api.BootOnceArgs
 		json.Unmarshal(c.Args, &a)
 		for _, t := range a.Tests {
 			shas = append(shas, t.Script)
+			for _, p := range t.Payload {
+				shas = append(shas, p.SHA256)
+			}
 		}
 	case api.CmdInstall:
 		var a api.InstallArgs
