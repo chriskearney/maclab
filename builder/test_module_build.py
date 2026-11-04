@@ -51,7 +51,7 @@ printf 'fixture host modpost' > "$1/scripts/mod/modpost"
         self.put(
             self.obj,
             "include/generated/compile.h",
-            '#define LINUX_COMPILER "fixture cc and linker"\n',
+            '#define LINUX_COMPILER\t\t"fixture cc and linker"\n',
         )
         self.put(self.obj, "include/generated/autoconf.h", "#define CONFIG_MODULES 1\n")
         self.put(
@@ -108,7 +108,7 @@ printf 'fixture host modpost' > "$1/scripts/mod/modpost"
             self.assertEqual(identity["release"], "future-test-release")
             self.assertEqual(
                 identity["linux_compiler"],
-                '#define LINUX_COMPILER "fixture cc and linker"',
+                '#define LINUX_COMPILER\t\t"fixture cc and linker"',
             )
             for path, expected in [
                 ("build/Module.symvers", (self.obj / "Module.symvers").read_bytes()),
@@ -133,6 +133,39 @@ printf 'fixture host modpost' > "$1/scripts/mod/modpost"
                 identity["files"]["input.config"]["sha256"],
                 identity["files"]["build/.config"]["sha256"],
             )
+
+    def test_space_separated_compiler_identity_still_packages(self):
+        self.put(self.obj, "include/generated/compile.h",
+                 '#define LINUX_COMPILER "fixture cc and linker"\n')
+        r = self.run_pack()
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_missing_or_ambiguous_compiler_identity_refuses(self):
+        for text in [
+            '#define LINUX_COMPILE_HOST "fixture"\n',
+            '#define LINUX_COMPILER\t\t\n',
+            '#define LINUX_COMPILER\t"one"\n#define LINUX_COMPILER "two"\n',
+            '#define LINUX_COMPILER_EXTRA "lookalike"\n',
+        ]:
+            with self.subTest(header=text):
+                (self.io / "out/module-build.tar.zst").unlink(missing_ok=True)
+                self.put(self.obj, "include/generated/compile.h", text)
+                r = self.run_pack()
+                self.assertNotEqual(r.returncode, 0)
+                self.assertIn("missing compiled release/compiler identity", r.stderr)
+                self.assertFalse((self.io / "out/module-build.tar.zst").exists())
+
+    def test_native_staging_can_publish_to_another_filesystem(self):
+        shared = Path("/dev/shm")
+        if not shared.is_dir() or shared.stat().st_dev == self.obj.stat().st_dev:
+            self.skipTest("a second writable filesystem is unavailable")
+        with tempfile.TemporaryDirectory(dir=shared) as output:
+            self.io = Path(output)
+            self.put(self.io, "config", 'CONFIG_LOCALVERSION="input"\n')
+            r = self.run_pack()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue((self.io / "out/module-build.tar.zst").is_file())
+            self.assertEqual(list((self.io / "out").glob(".module-build-*")), [])
 
     def test_missing_export_table_refuses_without_artifact(self):
         (self.obj / "Module.symvers").unlink()

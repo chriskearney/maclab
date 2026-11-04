@@ -50,16 +50,18 @@ def package(source, obj, io, gitdir):
         if not path.is_file() or path.stat().st_size == 0:
             raise ValueError("missing completed-kernel input: " + name)
     release = (obj / "include/config/kernel.release").read_text().strip()
-    compiler = [
-        line
-        for line in (obj / "include/generated/compile.h").read_text().splitlines()
-        if line.startswith("#define LINUX_COMPILER ")
-    ]
+    compiler = []
+    for line in (obj / "include/generated/compile.h").read_text().splitlines():
+        fields = line.split(maxsplit=2)
+        if len(fields) == 3 and fields[:2] == ["#define", "LINUX_COMPILER"]:
+            compiler.append(line)
     if len(compiler) != 1 or not release:
         raise ValueError("missing compiled release/compiler identity")
     output = io / "out"
     output.mkdir(exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="module-build-", dir=io) as temp:
+    # The header installer creates Linux symlinks, including absolute links.
+    # /io may be a Mac bind mount, so stage on the native cache filesystem.
+    with tempfile.TemporaryDirectory(prefix="module-build-", dir=obj.parent) as temp:
         root = Path(temp)
         build = root / "build"
         command = "$(srctree)/scripts/package/install-extmod-build " + shlex.quote(
@@ -107,7 +109,17 @@ def package(source, obj, io, gitdir):
             ],
             check=True,
         )
-        os.replace(staged, output / "module-build.tar.zst")
+        # Publishing is an atomic rename within /io, even when the native
+        # staging directory and the host output are different filesystems.
+        fd, publishing = tempfile.mkstemp(prefix=".module-build-", dir=output)
+        os.close(fd)
+        try:
+            shutil.copyfile(staged, publishing)
+            with open(publishing, "rb") as f:
+                os.fsync(f.fileno())
+            os.replace(publishing, output / "module-build.tar.zst")
+        finally:
+            Path(publishing).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
