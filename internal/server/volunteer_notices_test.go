@@ -102,7 +102,11 @@ func newNoticeLab(t *testing.T, c labConfig) *noticeLab {
 	n := &noticeLab{ntfy: newNtfyCatcher(t), cmds: filepath.Join(t.TempDir(), "notify-cmd.log")}
 	n.clock = agent.NewFakeClock(time.Now())
 	c.clock = n.clock
+	prev := c.config
 	c.config = func(cfg *Config) {
+		if prev != nil {
+			prev(cfg)
+		}
 		cfg.NtfyURL = n.ntfy.URL + labWideTopic
 		cfg.NotifyCmd = `printf '%s | %s | %s\n' "$MACLAB_DEVICE" "$MACLAB_TITLE" "$(printf %s "$MACLAB_BODY" | tr '\n' ' ')" >> ` + n.cmds
 	}

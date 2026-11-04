@@ -69,6 +69,7 @@ func showStatus(ctx context.Context, cfg *Config, sys System, args []string, out
 		if e.NtfyURL != "" {
 			fmt.Fprintf(out, "  subscribe to:   %s\n", e.NtfyURL)
 		}
+		fmt.Fprintf(out, "  job notices:    %s (notify --jobs on|off)\n", map[bool]string{true: "on", false: "off"}[e.JobNotices])
 	}
 	if e.Kind != api.KindLabOwned {
 		w, _, err := loadWindow(cfg)

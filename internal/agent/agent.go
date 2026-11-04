@@ -459,6 +459,11 @@ func (a *Agent) poll(ctx context.Context) error {
 		} else {
 			ci.NtfyOwnURL = u
 		}
+		if on, err := loadJobNotices(a.cfg); err != nil {
+			a.log.Printf("job notices: %v", err)
+		} else {
+			ci.JobNotices = &on
+		}
 		if ac, err := loadAccess(a.workDir()); err != nil {
 			a.log.Printf("Access level: %v", err) // labd keeps its last copy; the agent reads it as Qualification
 		} else {
