@@ -1378,7 +1378,7 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 409, "%v", err)
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Maintainer: me, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Maintainer: me, By: me, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
 	v.capLeaseLocked()
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
@@ -1398,9 +1398,9 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 	if live && !force {
 		// Only the Maintainer who took a lease ends it early, unless another
 		// Maintainer forces it: one forgotten would otherwise hold the Mac.
-		if l.Maintainer != "" && l.Maintainer != me {
+		if l.Owner() != "" && l.Owner() != me {
 			v.mu.Unlock()
-			httpErr(w, 409, "%s is leased by %s until %s; only %s can release it, or another Maintainer with `lab release %s --force`", v.d.Name, l.Who(), l.Expires.Format(time.TimeOnly), l.Maintainer, v.d.Name)
+			httpErr(w, 409, "%s is leased by %s until %s; only %s can release it, or another Maintainer with `lab release %s --force`", v.d.Name, l.Who(), l.Expires.Format(time.TimeOnly), l.Owner(), v.d.Name)
 			return
 		}
 		if holder != "" && l.Holder != holder {
@@ -1409,7 +1409,7 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	forced := live && force && (l.Maintainer != me || (holder != "" && l.Holder != holder))
+	forced := live && force && (l.Owner() != me || (holder != "" && l.Holder != holder))
 	v.mu.Unlock()
 	if forced {
 		if !s.endLease(v, l, "ended early by Maintainer "+me+" (lab release --force)") {
@@ -1616,6 +1616,18 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
+const watchdogRequireMinAgent = "0.8.1"
+
+func validateRequiredWatchdog(tests []api.TestSpec, d api.Device) error {
+	for _, t := range tests {
+		if t.RequireWatchdog && !versionAtLeast(d.Facts.AgentVersion, watchdogRequireMinAgent) {
+			return fmt.Errorf("%s runs lab-agent %s; test %s requires watchdog support from %s or later",
+				d.Name, orStr(d.Facts.AgentVersion, "(unknown)"), t.Name, watchdogRequireMinAgent)
+		}
+	}
+	return nil
+}
+
 // submit queues a job for the Maintainer who asked; retryOf names the job it retries, whose source may
 // come with the kernel already built from it, and notes go in the job's
 // events after the first. The job records what lab gate needs to know about
@@ -1694,6 +1706,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	d := s.view(v)
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
+	}
+	if err := validateRequiredWatchdog(spec.Tests, d.Device); err != nil {
+		return nil, 409, err
 	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {

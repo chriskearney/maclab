@@ -105,7 +105,7 @@ func (s *Server) endLeasesOf(name, why string) {
 	for _, v := range s.allDevs() {
 		v.mu.Lock()
 		l := v.d.Lease
-		mine := l != nil && l.Maintainer == name && s.now().Before(l.Expires)
+		mine := l != nil && l.Owner() == name && s.now().Before(l.Expires)
 		v.mu.Unlock()
 		if mine {
 			s.endLease(v, l, why)

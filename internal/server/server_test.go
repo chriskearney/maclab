@@ -667,7 +667,7 @@ func gitRepo(t *testing.T) string {
 	run := func(args ...string) {
 		c := exec.Command("git", args...)
 		c.Dir = dir
-		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		c.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=816217+joshuaswarren@users.noreply.github.com", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=816217+joshuaswarren@users.noreply.github.com")
 		if out, err := c.CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}
@@ -1469,7 +1469,7 @@ func TestRetryPinsCommit(t *testing.T) {
 	}
 	// main moves on, and the kernel the first job booted is collected
 	dir := strings.TrimSuffix(strings.TrimPrefix(src, "file://"), "@main")
-	commit := exec.Command("git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "moved on")
+	commit := exec.Command("git", "-c", "user.name=t", "-c", "user.email=816217+joshuaswarren@users.noreply.github.com", "commit", "-q", "--allow-empty", "-m", "moved on")
 	commit.Dir = dir
 	if out, err := commit.CombinedOutput(); err != nil {
 		t.Fatalf("git commit: %v %s", err, out)
