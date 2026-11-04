@@ -155,6 +155,18 @@ printf 'fixture host modpost' > "$1/scripts/mod/modpost"
                 self.assertIn("missing compiled release/compiler identity", r.stderr)
                 self.assertFalse((self.io / "out/module-build.tar.zst").exists())
 
+    def test_native_staging_can_publish_to_another_filesystem(self):
+        shared = Path("/dev/shm")
+        if not shared.is_dir() or shared.stat().st_dev == self.obj.stat().st_dev:
+            self.skipTest("a second writable filesystem is unavailable")
+        with tempfile.TemporaryDirectory(dir=shared) as output:
+            self.io = Path(output)
+            self.put(self.io, "config", 'CONFIG_LOCALVERSION="input"\n')
+            r = self.run_pack()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue((self.io / "out/module-build.tar.zst").is_file())
+            self.assertEqual(list((self.io / "out").glob(".module-build-*")), [])
+
     def test_missing_export_table_refuses_without_artifact(self):
         (self.obj / "Module.symvers").unlink()
         r = self.run_pack()
