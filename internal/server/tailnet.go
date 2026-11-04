@@ -92,6 +92,11 @@ func (s *Server) tokenless(r *http.Request) (access, string) {
 	if !s.cfg.Tailscale {
 		return noAccess, ""
 	}
+	// A relayed request's TCP peer is the relay, not the person: a proxy on
+	// the tailnet would otherwise lend everyone behind it its own identity.
+	if forwarded(r) || s.fromTrustedProxy(r) {
+		return noAccess, ""
+	}
 	p := s.tailnetPeer(r)
 	if p == nil {
 		return noAccess, ""

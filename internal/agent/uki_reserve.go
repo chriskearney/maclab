@@ -15,9 +15,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// Allow for the directory entry, atomic menu update and persisted EFI store,
-// in addition to the rounded UKI allocation. Do not spend the retained 120MiB
-// reserve on these later steps. Only one UKI copy is created on the ESP.
+// Allow for the directory entry, atomic menu update and persisted EFI store.
+// Only one UKI copy is created on the ESP.
 const ukiMetadataAllowance uint64 = 1 << 20
 
 type ukiSpace struct{ Available, Allocation, Device uint64 }
@@ -106,7 +105,7 @@ func writeUKIWith(ctx context.Context, krel, image, cmdline, out string, w ukiWr
 		return err
 	}
 	if free.Available < needed {
-		return fmt.Errorf("ESP reserve: need %d bytes free for UKI allocation plus retained reserve and metadata, have %d", needed, free.Available)
+		return fmt.Errorf("ESP reserve: need %d bytes free for UKI allocation plus 10%% UKI margin and metadata, have %d", needed, free.Available)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(out), ".maclab-uki-*")
 	if err != nil {
@@ -153,8 +152,12 @@ func writeUKIWith(ctx context.Context, krel, image, cmdline, out string, w ukiWr
 	if free.Device != destinationSpace.Device {
 		return fmt.Errorf("UKI destination filesystem changed after copy")
 	}
-	if free.Available < limineMinFree+ukiMetadataAllowance {
-		return fmt.Errorf("ESP reserve no longer available after UKI copy")
+	postCopyReserve, err := ukiRetainedSpace(uint64(st.Size()))
+	if err != nil {
+		return err
+	}
+	if free.Available < postCopyReserve {
+		return fmt.Errorf("ESP reserve no longer available after UKI copy: need %d bytes, have %d", postCopyReserve, free.Available)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -174,17 +177,31 @@ func writeUKIWith(ctx context.Context, krel, image, cmdline, out string, w ukiWr
 	}
 	return nil
 }
+func ukiRetainedSpace(size uint64) (uint64, error) {
+	margin := size / 10
+	if size%10 != 0 {
+		margin++
+	}
+	if margin > ^uint64(0)-ukiMetadataAllowance {
+		return 0, fmt.Errorf("UKI reserve overflow")
+	}
+	return margin + ukiMetadataAllowance, nil
+}
+
 func ukiRequiredSpace(size, allocation uint64) (uint64, error) {
 	max := ^uint64(0)
 	if size == 0 || allocation == 0 || size > max-(allocation-1) {
 		return 0, fmt.Errorf("invalid UKI allocation size")
 	}
 	rounded := (size + allocation - 1) / allocation * allocation
-	overhead := uint64(limineMinFree) + ukiMetadataAllowance
-	if rounded > max-overhead {
+	retained, err := ukiRetainedSpace(size)
+	if err != nil {
+		return 0, err
+	}
+	if rounded > max-retained {
 		return 0, fmt.Errorf("UKI allocation overflow")
 	}
-	return rounded + overhead, nil
+	return rounded + retained, nil
 }
 
 // buildUKIFile preserves the existing generator and flags. All generated
@@ -259,9 +276,7 @@ func largestUKI(esp string) (string, uint64) {
 
 // limineStageProblem says why the ESP can't take a staged test kernel, or ""
 // if it can. free is what staging may use (staged jobs count as free: a job
-// cleans them up first); allocation is the ESP's allocation unit. The need is
-// what writeUKIWith checks before it copies a UKI: the UKI, rounded up, plus
-// the retained reserve and the metadata allowance.
+// cleans them up first); allocation is the ESP's allocation unit.
 func limineStageProblem(esp, stage string, free, allocation uint64) string {
 	name, size := largestUKI(esp)
 	what := "the size of " + name
@@ -276,8 +291,8 @@ func limineStageProblem(esp, stage string, free, allocation uint64) string {
 		return ""
 	}
 	return fmt.Sprintf("not enough free space on the ESP to stage a test kernel in %s: staging needs %.1f MiB "+
-		"(a UKI of about %.1f MiB, %s, plus the %d MiB reserve and %d MiB for metadata), and %.1f MiB is free",
-		stage, mib(need), mib(size), what, limineMinFree>>20, ukiMetadataAllowance>>20, mib(free))
+		"(a UKI of about %.1f MiB, %s, plus a 10%% margin over UKI size and %d MiB for metadata), and %.1f MiB is free",
+		stage, mib(need), mib(size), what, ukiMetadataAllowance>>20, mib(free))
 }
 
 func mib(n uint64) float64 { return float64(n) / (1 << 20) }

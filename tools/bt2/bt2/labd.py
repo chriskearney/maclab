@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
-"""Minimal labd API client for bt2. Token is read from ~/.config/maclab/client.json and never logged."""
+"""Minimal labd API client for bt2. Token is read from ~/.config/maclab/client.json and never logged.
+
+Transport follows bt2.labhttp (docs/https.md): https with the system roots plus MACLAB_CA_FILE / client.json "ca_file";
+plain http only to loopback unless MACLAB_ALLOW_PLAIN_HTTP=1 or client.json "allow_plain_http": true; redirects refused.
+The URL may carry a path prefix (https://example.net/maclab): every API path is appended to it."""
 import json
+import os
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from bt2 import labhttp
+
 SECRET_KEYS = ('token', 'secret', 'password', 'authkey')
+TransportRefused = labhttp.TransportRefused
+WAIT_CHUNK = 50   # each GET /wait asks labd to answer within this, under a reverse proxy's 60 s idle timeout
 
 
 class APIError(RuntimeError):
@@ -26,13 +36,17 @@ def redact(o):
 
 
 class Labd:
-    def __init__(self, url=None, token=None):
-        if url is None or token is None:
+    def __init__(self, url=None, token=None, *, config=None, environ=None):
+        c = config
+        if c is None and (url is None or token is None):
             c = json.loads((Path.home() / '.config/maclab/client.json').read_bytes())
-            url = url or c['url']
-            token = token or c['token']
+        c = c or {}
+        url = url or c['url']
+        token = token or c['token']
         self.url = url.rstrip('/')
         self._token = token
+        policy = labhttp.maintainer_policy(c, os.environ if environ is None else environ)
+        self._opener = labhttp.opener(self.url, **policy)   # refuses a disallowed URL before any request
 
     # -- transport -------------------------------------------------------
     def _req(self, method, path, body=None, raw=None, timeout=60, ctype='application/json', want_bytes=False,
@@ -42,7 +56,7 @@ class Labd:
                                      headers={'Authorization': 'Bearer ' + self._token,
                                               **({'Content-Type': ctype} if data is not None else {})})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with self._opener.open(req, timeout=timeout) as r:
                 b = r.read() if limit is None else r.read(limit + 1)
         except urllib.error.HTTPError as e:
             raise APIError(e.code, e.read().decode(errors='replace'), path) from None
@@ -94,6 +108,20 @@ class Labd:
     def put_artifact(self, data, timeout=600):
         return self._req('POST', '/api/artifacts', raw=data, timeout=timeout, ctype='application/octet-stream')
 
+    def artifact_grants(self, name, shas, ttl_sec):
+        """Let the Mac's current enrollment fetch exactly these shas from /api/agent/artifacts until ttl_sec runs out
+        (POST /api/devices/<name>/artifact-grants). An empty list revokes. The answer must name exactly what was asked;
+        a grant carries its expiry, and a revocation, which has none, carries no "expires" (labd omits the zero time)."""
+        shas = sorted(shas)
+        res = self.post('/api/devices/%s/artifact-grants' % urllib.parse.quote(name, safe=''),
+                        {'artifacts': shas, 'ttl_sec': int(ttl_sec)}, timeout=15)
+        expiry_ok = (isinstance(res, dict) and isinstance(res.get('expires'), str)) if shas else \
+            (isinstance(res, dict) and res.get('expires') in (None, '0001-01-01T00:00:00Z'))
+        if not (isinstance(res, dict) and res.get('device') == name and sorted(res.get('artifacts') or []) == shas
+                and expiry_ok):
+            raise APIError(200, 'artifact grant answer differs from the request: %r' % (res,), '/api/devices/%s/artifact-grants' % name)
+        return res
+
     # -- jobs -----------------------------------------------------------------
     def submit(self, spec):
         return self.post('/api/jobs', spec, timeout=60)
@@ -102,7 +130,14 @@ class Labd:
         return self.get('/api/jobs/' + urllib.parse.quote(job_id, safe=''))
 
     def wait(self, job_id, timeout=3000):
-        return self.get('/api/jobs/%s/wait' % urllib.parse.quote(job_id, safe=''), timeout=timeout)
+        """The job once it is done, or as it is when timeout runs out. Asks labd in calls of at most WAIT_CHUNK
+        seconds, so a reverse proxy's idle timeout never cuts one."""
+        end = time.monotonic() + timeout
+        while True:
+            chunk = max(1, min(WAIT_CHUNK, int(end - time.monotonic())))
+            j = self.get('/api/jobs/%s/wait?timeout=%d' % (urllib.parse.quote(job_id, safe=''), chunk), timeout=chunk + 30)
+            if not isinstance(j, dict) or j.get('state') == 'done' or time.monotonic() >= end:
+                return j
 
     def job_file(self, job_id, name, limit=16 << 20, timeout=60):
         """Raw bytes of one job file (GET /api/jobs/<id>/files/<name>, server.go hJobFile)."""

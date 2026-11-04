@@ -1,0 +1,34 @@
+# maclab.chonkbase.net -> labd, on its own origin (docs/https.md). The path is passed through unchanged: there is no
+# rewrite-target or strip annotation, and X-Forwarded-Prefix is never used. path-prefix/ is the chonkbase.net/maclab layout.
+# DNS for this host must point straight at the ingress (DNS only, no CDN proxy): lab exec can be silent for up to ~1 h.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: maclab
+  namespace: maclab
+  annotations:
+    # lab exec runs synchronously for up to 3630 s and a job wait holds up to 50 s; neither sends bytes meanwhile
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3700"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3700"
+    # the event stream, serial console and build log are streamed; uploads go straight to labd
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-request-buffering: "off"
+    # artifact and Release uploads (labd caps a Mac's single job file at 1 GiB; Maintainer artifacts can be larger)
+    nginx.ingress.kubernetes.io/proxy-body-size: "4g"
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts: [maclab.chonkbase.net]
+      secretName: maclab-tls
+  rules:
+    - host: maclab.chonkbase.net
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: maclab
+                port:
+                  name: http

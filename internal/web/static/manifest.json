@@ -1,9 +1,9 @@
 {
   "name": "maclab · omarchy",
   "short_name": "maclab",
-  "start_url": "/",
+  "start_url": "../",
   "display": "standalone",
   "background_color": "#1c2235",
   "theme_color": "#1c2235",
-  "icons": [{ "src": "/ui/omarchy-icon.png", "sizes": "300x300", "type": "image/png", "purpose": "any" }]
+  "icons": [{ "src": "omarchy-icon.png", "sizes": "300x300", "type": "image/png", "purpose": "any" }]
 }

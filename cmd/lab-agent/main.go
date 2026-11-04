@@ -17,13 +17,17 @@ import (
 	"golang.org/x/term"
 
 	"github.com/iconidentify/maclab/internal/agent"
+	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
 const usage = `lab-agent: the Mac side of the test lab
 
-  sudo lab-agent setup --server http://labd:7770 --token enr_... [--gui-user you --autologin|--stay-awake] [--volatile-journal]
+  sudo lab-agent setup --server https://labd --token-stdin [--gui-user you --autologin|--stay-awake] [--volatile-journal]
+        [--ca-file <pem>] [--allow-plain-http] [--accept-terms <sha256>]
         [--tailscale-authkey-file <file> | --tailscale-authkey - (key on stdin)] [--tailscale-hostname name]
                                   (a Volunteer's Mac refuses --autologin and --stay-awake)
+  sudo lab-agent move --server <labd's new URL> [--ca-file <pem>] [--allow-plain-http] [--no-check]
+                                  point this enrolled Mac at labd's new address, and change nothing else
   sudo lab-agent status           what this Mac is enrolled as, its ntfy topic, its Availability window,
                                   Access level, Installed-run eligibility and latest Audit log entries
   sudo lab-agent window show|add|remove [<days> <HH:MM-HH:MM>]
@@ -67,8 +71,12 @@ func main() {
 	var err error
 	switch os.Args[1] {
 	case "setup":
-		server := fs.String("server", "", "labd URL")
-		token := fs.String("token", "", "one-time enrollment token from `lab enroll`")
+		server := fs.String("server", "", "labd URL, e.g. https://maclab.example.com")
+		token := fs.String("token", "", "one-time enrollment token from `lab enroll` (shows in the process list and sudo's journal: prefer --token-stdin)")
+		tokenStdin := fs.Bool("token-stdin", false, "read the one-time enrollment token from the first line of stdin")
+		acceptTerms := fs.String("accept-terms", "", "accept labd's participation terms without a terminal: the sha256 of the terms you read (GET <labd>/api/join/terms)")
+		caFile := fs.String("ca-file", "", "PEM file of CA certificates for labd's https certificate, when the system doesn't trust it (kept in agent.json)")
+		plain := fs.Bool("allow-plain-http", false, "allow an http:// labd on another machine: the device secret then crosses the network unencrypted (recorded in agent.json)")
 		gui := fs.String("gui-user", "", "user whose Hyprland session GUI tests drive")
 		auto := fs.Bool("autologin", false, "log the GUI user into the desktop on boot and turn idle lock off")
 		stay := fs.Bool("stay-awake", false, "turn the GUI user's idle lock and screensaver off")
@@ -87,13 +95,38 @@ func main() {
 			}
 			stdin = bytes.NewReader(b)
 		}
+		if *tokenStdin {
+			if *token != "" || *tsKey == "-" {
+				err = fmt.Errorf("--token-stdin goes with neither --token nor --tailscale-authkey -")
+				break
+			}
+			if *token, err = agent.ReadToken(os.Stdin); err != nil {
+				break
+			}
+		}
 		key, e := agent.AuthKey(*tsKey, *tsKeyFile, stdin)
 		if e != nil {
 			err = e
 			break
 		}
 		err = agent.Setup(ctx, agent.SetupOptions{Server: *server, Token: *token, GUIUser: *gui, Autologin: *auto, StayAwake: *stay, VolatileJournal: *volatile,
-			TailscaleAuthKey: key, TailscaleHostname: *tsHost,
+			TailscaleAuthKey: key, TailscaleHostname: *tsHost, CAFile: *caFile, AllowPlainHTTP: *plain, AcceptTerms: *acceptTerms,
+			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
+	case "move":
+		server := fs.String("server", "", "labd's new URL, e.g. https://maclab.example.com")
+		caFile := fs.String("ca-file", "", "PEM file of CA certificates for the new labd's https certificate, when the system doesn't trust it")
+		plain := fs.Bool("allow-plain-http", false, "allow an http:// labd on another machine: the device secret then crosses the network unencrypted")
+		noCheck := fs.Bool("no-check", false, "don't ask the new labd whether it knows this Mac (a move staged before it answers)")
+		fs.Parse(os.Args[2:])
+		if *server == "" {
+			err = fmt.Errorf("usage: sudo lab-agent move --server <labd's new URL> [--ca-file <pem>] [--allow-plain-http] [--no-check]")
+			break
+		}
+		if os.Geteuid() != 0 {
+			err = fmt.Errorf("move must run as root")
+			break
+		}
+		err = agent.Move(ctx, agent.MoveOptions{Server: *server, CAFile: *caFile, AllowPlainHTTP: *plain, NoCheck: *noCheck,
 			Log: func(f string, a ...any) { fmt.Printf("  "+f+"\n", a...) }})
 	case "uninstall":
 		dry := fs.Bool("dry-run", false, "print each action without taking it")
@@ -148,16 +181,31 @@ func main() {
 		token := fs.String("token", "", "enrollment token")
 		delay := fs.Duration("reboot-delay", 100*time.Millisecond, "how long a simulated reboot takes")
 		model := fs.String("model", "Simulated Mac", "device-tree model string to report")
+		caFile := fs.String("ca-file", "", "PEM file of CA certificates for labd's https certificate")
+		plain := fs.Bool("allow-plain-http", false, "allow an http:// labd on another machine")
 		fs.Parse(os.Args[2:])
+		var caPEM []byte
+		if *caFile != "" {
+			if caPEM, err = labhttp.ReadCAFile(*caFile); err != nil {
+				log.Fatal(err)
+			}
+		}
 		sim := agent.NewSim(os.TempDir())
 		sim.RebootDelay = *delay
 		sim.Model = *model
-		resp, e := agent.Enroll(ctx, *server, *token, sim.Facts())
+		pol := labhttp.Policy{CAPEM: caPEM, AllowPlainHTTP: *plain}
+		terms, e := agent.FetchTerms(ctx, *server, *token, pol)
+		if e != nil {
+			log.Fatal(e)
+		}
+		// A simulated Mac has no owner to read the terms: it accepts them.
+		resp, e := agent.EnrollWith(ctx, *server, *token, sim.Facts(), pol, agent.Activation{Key: agent.NewActivationKey(), TermsSHA256: terms.SHA256})
 		if e != nil {
 			log.Fatal(e)
 		}
 		log.Printf("simulated Mac enrolled as %s", resp.Name)
-		err = agent.New(&agent.Config{Server: *server, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: os.TempDir()}, sim, nil).Run(ctx)
+		err = agent.New(&agent.Config{Server: *server, DeviceID: resp.DeviceID, Name: resp.Name, Secret: resp.Secret, WorkDir: os.TempDir(),
+			ServerCA: string(caPEM), AllowPlainHTTP: plain}, sim, nil).Run(ctx)
 	case "version":
 		fmt.Println(agent.Version)
 	default:

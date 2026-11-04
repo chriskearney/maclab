@@ -54,7 +54,7 @@ func TestReviewStoredUnsupportedMesaMustNotReboot(t *testing.T) {
 		t.Fatal(e)
 	}
 	before := l.waitDevice(func(d api.Device) bool { return d.Health.JobTag == "orphan-review" })
-	j := &api.Job{ID: "j-review-stored-mesa", Spec: mesaSpec(l), State: api.JobQueued, Created: time.Now(), Updated: time.Now()}
+	j := &api.Job{ID: "j-review-stored-mesa", Spec: mesaSpec(l), DeviceID: l.s.dev(l.name).snapshot().ID, State: api.JobQueued, Created: time.Now(), Updated: time.Now()}
 	// Staged execution is implemented now; official mode remains explicitly gated.
 	j.Spec.Mesa.OfficialGPU = true
 	if e = l.s.store.saveJob(j); e != nil {

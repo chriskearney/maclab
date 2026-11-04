@@ -31,9 +31,10 @@ AI agents get the same operations over MCP (`lab mcp`).
    - **Limine** (Omarchy on Apple Silicon: U-Boot, then Limine, then a UKI on
      the ESP): a unified kernel image in `<esp>/maclab/<job>/uki.efi`, listed in
      a marked block at the end of `limine.conf`. Limine reads only FAT, so the
-     ESP needs room for one more UKI plus 121 MiB it keeps free (a 120 MiB
-     reserve and 1 MiB for metadata): about 180 MiB with Omarchy's ~60 MiB UKIs.
-     Preflight sizes the UKI by the largest one in `<esp>/EFI/Linux`.
+     ESP needs room for one UKI rounded up to its allocation unit, plus a
+     margin of `ceil(UKI size / 10)` and 1 MiB for metadata. Preflight uses
+     the largest UKI in `<esp>/EFI/Linux` (or a labelled 64 MiB guess if none
+     exists); the writer and post-copy gate use the generated UKI's actual size.
 
    A failed staging is tried again, up to 3 attempts, 30 s and then 2 min
    apart, with the failed attempt's leftovers removed first. Only an attempt
@@ -244,6 +245,12 @@ Mac still shows tier 1) and feeds it only while:
   touch (a long log upload, or a Mac left on a lab entry whose one-shot didn't clear), and
   is reset after 10 minutes without labd.
 
+A test may set `require_watchdog: true` to refuse execution until lab-agent has
+opened the watchdog on that boot. The check records a successful open; it does
+not verify later writes or hardware resets. Deploy labd with this support before
+updating lab-agent, and use the option only after both are updated. Older labd
+versions can discard the field without enforcing it.
+
 Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
 on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd
 is down it resets every 11 minutes or so. The watchdog stays running when lab-agent exits,
@@ -255,9 +262,12 @@ is stopped (`systemctl stop lab-agent`).
 ```sh
 make                                 # binaries in bin/
 labd --maintainer <you>              # first start: you become the first Maintainer (default $USER)
-lab login http://<labd-host>:7770 "$(cat ~/.local/share/maclab/admin.token)"
-lab enroll m1air --label "MacBook Air M1, left desk"
+lab login http://127.0.0.1:7770 "$(cat ~/.local/share/maclab/admin.token)"
+lab enroll m1air --label "MacBook Air M1, left desk"   # prints the one-liner that joins the Mac
 ```
+
+To serve the lab over the internet, with no Tailscale, see
+[HTTPS without Tailscale](#https-without-tailscale).
 
 Each Maintainer has their own labd token. `lab maintainer add <name>` prints
 a new one once (labd keeps only its hash); `lab maintainer list` and
@@ -266,21 +276,44 @@ token at once. Jobs and Promotions record the Maintainer whose token asked.
 Upgrading from a labd with a single admin token keeps that token, in the same
 `admin.token` file, as the first Maintainer's (`--maintainer`, default `$USER`).
 
-labd listens on `127.0.0.1:7770` unless told otherwise. For Macs over Tailscale,
-start it with `--listen <tailnet-ip>:7770` (or `MACLAB_LISTEN`) so it is not
-reachable off the tailnet. Remote links are slow, so the timeouts that assume a
-LAN are flags: `--boot-timeout`, `--offline-after`, `--alive-window`,
-`--quiet-grace` and `--stage-timeout` (defaults are sized for remote Macs).
-Artifact downloads resume with HTTP range requests after a dropped transfer. An
-enrollment token is spent by the Mac's first check-in, so a failed `setup` can
-be run again with the same token until it expires. lab-agent's own request
-timeouts are `http_timeout_sec` and `transfer_timeout_sec` in its config file.
+labd listens on `127.0.0.1:7770` unless told otherwise. Plain http on any other
+address, such as `--listen <tailnet-ip>:7770` for Macs over Tailscale, needs
+`--allow-plain-http`: tokens and device secrets then cross that network in the
+clear. Otherwise give labd a certificate or put it behind an https proxy (see
+[HTTPS without Tailscale](#https-without-tailscale)). Remote links are slow, so
+the timeouts that assume a LAN are flags: `--boot-timeout`, `--offline-after`,
+`--alive-window`, `--quiet-grace` and `--stage-timeout` (defaults are sized for
+remote Macs). Artifact downloads resume with HTTP range requests after a dropped
+transfer. lab-agent's own request timeouts are `http_timeout_sec` and
+`transfer_timeout_sec` in its config file.
 
-On the Mac:
+An enrollment token activates one Mac, once. The first enrollment with it uses
+it up for that Mac's activation key, which `setup` keeps until it has finished:
+a `setup` that stopped half way can run again on the same Mac with the same
+token until the Mac first checks in, while labd keeps running. Once lab-agent
+has started and checked in (which uses the token up), finish with `sudo
+lab-agent setup` and no token. Another Mac holding a copy of the token gets
+nothing. After a labd restart, or once the token has expired, `lab forget
+<name>` and make a new one. `lab enroll <name>
+--revoke` withdraws a token.
+
+On the Mac, `lab enroll`'s one-liner (also in the web UI) downloads lab-agent,
+checks its sha256 and runs `setup`, handing it the token on stdin. By hand:
 
 ```sh
-sudo ./lab-agent setup --server http://<labd-host>:7770 --token enr_... --gui-user <you> --autologin
+printf '%s\n' enr_... | sudo ./lab-agent setup --server https://<labd> --token-stdin --gui-user <you> --autologin
 ```
+
+Before it changes anything, `setup` shows labd's participation terms (what the
+lab may do to the Mac) and goes on only when you type `yes`. Without a terminal
+it stops, unless `--accept-terms <sha256>` names the exact terms you read
+(`GET <labd>/api/join/terms` with the token). labd keeps the sha256 of the
+terms each Mac accepted, and takes no enrollment that accepted others. With
+`--tailscale-authkey`, which joins the tailnet before labd can be reached,
+`--accept-terms` is required: the join happens on that acceptance, and if
+labd's terms then turn out to differ, setup stops before enrolling (the join
+stays). The one-liner holds the token, so keep it private; the token stays
+out of URLs, labd's log and the arguments of the curl and sudo it starts.
 
 `setup` makes these changes. Each one is idempotent and backed up:
 
@@ -319,7 +352,8 @@ every Limine update enroll one; set it to `no` there, then run
 `sudo limine enroll-config --reset <binary>` for each enrolled binary.
 `lab-agent preflight` reports the same as problems, which hold jobs back, and
 warns about a journal that isn't kept across reboots: that loses the logs of a
-lab boot that fails, but doesn't hold jobs back.
+lab boot that fails, but doesn't hold jobs back. For an Omarchy Mac whose disk is
+encrypted, see [docs/encrypted-macs.md](docs/encrypted-macs.md).
 
 Then run the baseline:
 
@@ -579,7 +613,53 @@ Measured on a base M5 (10 cores, VM with 16 GB) with aurora's config: first buil
 rebuild of a warm tree about 40 seconds. Progress (stage, object count, ETA) and the log stream
 live on `/api/stream` (`build`, `buildlog`) and `/api/builds/{id}/log?follow=1`.
 
+### Builders
+
+The controller's own `lab-builder` may use labd's `builder.token`. That token can do anything a builder can, on any build and
+any artifact, so it never leaves the controller.
+
+Any other builder is added by a Maintainer and gets a token of its own:
+
+```sh
+lab builder add m5mbp --kinds kernel -o m5mbp.token   # the token goes only into this new file (mode 0600)
+lab builder list                                       # named builders, shared-token hosts, last seen, current build
+lab builder remove m5mbp                                # its token stops working; what it was building fails
+lab builder remove m5mbp --generation G                 # only while it is the builder that add printed as G
+```
+
+A named builder may only build:
+- it takes queued builds of its kinds (`kernel`, `package`);
+- for the builds it took, it reads their inputs, reports progress, uploads outputs and finishes them, naming only what it
+  uploaded for that build;
+- it reaches no Maintainer, device or job route.
+
+Removing it ends its open requests at once. Adding the same name again makes a new builder that inherits nothing. labd keeps a
+named builder's claims in memory, so a labd restart fails the builds it was running: ask for them again. **A builder's kernels boot as root on lab Macs. Add only builders whose operators you trust with that.**
+
+On the builder Mac, copy the file to a place only root can read and run, as root (a LaunchDaemon, as above):
+
+```sh
+lab-builder --server https://labd.example.com --token-file /usr/local/etc/maclab/builder.token --as-user <user>
+```
+
+- **The token:** `--token-file` refuses a file others can read. `--token` still works, but the token then shows in `ps`.
+- **What children see:** lab-builder starts the container CLI and the build VMs with no `MACLAB_` variables, so they never see
+  the token.
+- **At start:** it logs the name labd knows it by, and stops if labd refuses the token.
+- **A second lab-builder on one Mac**, for another labd, needs its own:
+  - LaunchDaemon label and binary path;
+  - token file;
+  - `--io` directory;
+  - `--volume` (and `--pkg-volume`, or `--pkg-image ''` for kernels only);
+  - `--container-prefix`, since the build VMs are named `<prefix>-<build id>`.
+  Two builders must never share a cache volume. Size `--cpus` and `--memory` so both fit.
+
 ## omarchy-m-test: hardware checks in every job
+
+Unattended reports retain the IDs of skipped on-screen video checks and checks
+that passed in their reference but were not run. This missing coverage survives
+known-good reference updates. Such a run may pass its executed tests, but it
+cannot qualify as a fully compared release-gate pass until those checks run.
 
 On a Mac with a desktop user, every job also runs
 [omarchy-m-test](https://github.com/maralcbr/omarchy-m-testing) in the desktop
@@ -617,8 +697,8 @@ disruptive sections (lid, Wi-Fi reload) don't happen. The run takes 1 to 3 minut
   recorded before the lab counted nodes compares compatibles only.
 - **Skipped checks:** a skip on either side compares as nothing. Against a reference
   from an attended run, an unattended run names what it skipped that the reference
-  passed in "compared with", until a known-good unattended run replaces the
-  reference. An Installed run is stricter: a frozen pass that is now a skip is a
+  passed in "compared with". Missing coverage persists across known-good
+  reference updates, and prevents a fully compared release-gate pass. An Installed run is stricter: a frozen pass that is now a skip is a
   regression. On 0.1.15 that means taking preinstall references frozen from an
   attended run again. Once the on-screen checks run again it means a locked or
   covered screen fails the run, so run Lab-owned Macs with `--autologin` or
@@ -634,6 +714,8 @@ disruptive sections (lid, Wi-Fi reload) don't happen. The run takes 1 to 3 minut
 labd --omt-publish --omt-every 24h   # refresh each idle Mac's known-good report daily, and publish it
 labd --omt=false                     # don't add it to jobs
 ```
+
+The Kubernetes cloud manifests enable `--omt-publish`. Once deployed, eligible baseline jobs upload automatically. An ordinary known-good `lab run` remains manual. Volunteer consent, package identity, and the candidate refusal are unchanged. `--omt-every` is not set, so there is no scheduled reboot and no backfill of stored reports. `deploy/labd.service` does not pass the flag.
 
 ## Release packages from a PKGBUILD
 
@@ -672,6 +754,10 @@ lists and package metadata are identical. Contents are byte-identical except whe
 directory's path leaks in: ELF build-ids, the source paths Rust drivers embed for panics
 (`/cache/work/b/...` here), and the build timestamp in `vmlinuz`. A cold build takes 8 to 12
 minutes on a base M5.
+
+Recipes take their parallelism from `OMARCHY_BUILD_JOBS` (`make -j"${OMARCHY_BUILD_JOBS:-10}"`). lab-builder gives package builds
+`--pkg-jobs` (default: its `--cpus`), and `builder/pkg/pkgbuild` passes it through to makepkg past sudo. An image built before this
+ignores it: rebuild the image, under a new tag if another lab-builder still uses the old one.
 
 The 30+ GB work tree is deleted after every build. The volume keeps downloaded sources (the newest
 six) and the Rust toolchains. `lab-builder` takes package builds only when it has
@@ -931,6 +1017,58 @@ browsers reach labd by another name, a DNS alias say, run labd with
 device secrets and the builder token work by any name, so the lab CLI, agents,
 builders and scripts with a token don't care.
 
+## HTTPS without Tailscale
+
+labd can run as an ordinary HTTPS service on a host of its own, such as
+`https://maclab.chonkbase.net` in Kubernetes behind ingress-nginx. Maintainers
+use the UI, `lab` and MCP over HTTPS; Macs reach labd with outbound requests
+only (long-poll check-ins, reports, uploads, artifact downloads), and nothing
+connects to a Mac. [docs/https.md](docs/https.md) has the deployment, the
+manifests in `deploy/k8s/`, moving labd from one host to another and back, and
+proxy settings.
+
+- **TLS:** `--tls-cert`/`--tls-key` serve TLS 1.2+ and re-read renewed files;
+  or listen on loopback (or, in a pod, with `--allow-plain-http`) behind an
+  https proxy.
+- **One public URL:** `--public-url https://maclab.example.com`. labd can also
+  live under a path of a shared host (`--public-url https://example.com/maclab`):
+  it serves everything under the prefix, removes it once, and answers 404
+  outside it; the proxy passes the path on unchanged. See the next point first.
+- **Proxies:** `--trusted-proxy <CIDRs>`. Only those peers may send
+  `X-Forwarded-Proto`/`X-Forwarded-Host`, and those must name the public URL,
+  or labd answers 421. They are never anyone's identity. It doesn't go with
+  `--tailscale`, and no relayed request ever counts as a tailnet viewer.
+- **Browsers:** a change must come from labd's own origin, scheme, host and
+  port. API answers, Mac uploads included, are sandboxed so an uploaded page
+  can't run in labd's origin, and HSTS is sent over https. A prefix is not an
+  origin: on a host shared with other apps, every script they serve can read
+  the token the UI keeps. That is why labd gets a host of its own; share a host
+  only with apps trusted as much as labd.
+- **Clients** (`lab`, MCP, lab-agent, lab-builder): https is verified against
+  the system's roots plus an optional private CA (`--ca-file`,
+  `MACLAB_CA_FILE`); verification can't be turned off. Redirects and proxies
+  from the environment are not followed. Plain `http://` reaches loopback only
+  unless allowed on purpose (`--allow-plain-http`, `MACLAB_ALLOW_PLAIN_HTTP=1`).
+  An agent.json from before this keeps its plain http with a warning; the next
+  `setup` records the choice. When labd moves, `sudo lab-agent move --server
+  <new URL>` points an enrolled Mac at it: it asks the new labd, with the Mac's
+  own secret, whether it knows the Mac, rewrites only labd's address, CA and
+  plain-http choice in agent.json, and restarts lab-agent; nothing else on the
+  Mac changes. (`setup` refuses to move an enrolled Mac.)
+- **Macs fetch only what their job needs:** a Mac downloads an artifact only
+  if a command for its running job named it, until that job ends, or if a
+  Maintainer granted it explicitly for a while
+  (`POST /api/devices/<name>/artifact-grants`, which bt2 uses). It adds files
+  only to its running job, up to 1 GiB each. A job runs only on the enrollment
+  it was submitted for.
+- **Probes:** `GET <prefix>/healthz` answers `ok` to anyone.
+- **The clock:** right after a reboot a Mac's clock can be decades behind until
+  NTP sets it, and labd's certificate looks not valid yet. lab-agent says so,
+  keeps trying with verification on, and gets through once the time is right.
+- **Out-of-band control** (oobd on the controller Mac) stays on the lab's
+  private network: labd calls it, so a labd in the cloud has none (tier 1)
+  unless given a private route to it. Never expose oobd publicly.
+
 ## Tailscale
 
 Lab Macs and labd can live on a tailnet: the maintainer's own tailnet while
@@ -939,8 +1077,12 @@ joins. Nothing in maclab holds a Tailscale API key; a maintainer does the
 tailnet side by hand.
 
 ```sh
-labd --listen <labd tailnet IP>:7770 --tailscale
+labd --listen <labd tailnet IP>:7770 --allow-plain-http --tailscale
 ```
+
+Tailnet traffic is encrypted by WireGuard, but labd can't tell that from the
+address, so plain http there still needs `--allow-plain-http` (and clients
+their own opt-in, or an https URL).
 
 With `--tailscale`, labd asks the local tailscaled who each tailnet peer is
 (`tailscale whois`; answers are cached for a minute, failed lookups for 5

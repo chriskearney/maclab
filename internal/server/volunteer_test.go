@@ -74,7 +74,7 @@ func TestVolunteerLimits(t *testing.T) {
 		return w.Code, resp
 	}
 	enroll := func(token string) int {
-		return do("POST", "/api/agent/enroll", "100.64.9.9:1", "", `{"token":"`+token+`"}`).Code
+		return do("POST", "/api/agent/enroll", "100.64.9.9:1", "", enrollJSON(token)).Code
 	}
 	peer := func(i int) string { return fmt.Sprintf("100.64.1.%d:40000", i) }
 
@@ -155,7 +155,7 @@ func TestVolunteerDevicesMarked(t *testing.T) {
 	}
 	device := func(token string) api.Device {
 		t.Helper()
-		w := do("POST", "/api/agent/enroll", "100.64.9.9:1", "", `{"token":"`+token+`"}`)
+		w := do("POST", "/api/agent/enroll", "100.64.9.9:1", "", enrollJSON(token))
 		var e api.EnrollResponse
 		if err := json.Unmarshal(w.Body.Bytes(), &e); w.Code != 200 || err != nil {
 			t.Fatalf("enroll: %d %s", w.Code, w.Body)
@@ -228,7 +228,7 @@ func TestVolunteerMacLimit(t *testing.T) {
 	}
 	enroll := func(token string) (int, string) {
 		t.Helper()
-		w := do("POST", "/api/agent/enroll", "100.64.9.9:1", "", `{"token":"`+token+`"}`)
+		w := do("POST", "/api/agent/enroll", "100.64.9.9:1", "", enrollJSON(token))
 		return w.Code, w.Body.String()
 	}
 	var names []string
@@ -348,7 +348,7 @@ func TestAgentBodyLimits(t *testing.T) {
 		facts.Problems = append(facts.Problems, fmt.Sprintf("problem %d: /boot has %d MB free; a lab kernel and its initramfs need 200 MB, so clear old kernels out first", i, i))
 		facts.Warnings = append(facts.Warnings, fmt.Sprintf("warning %d: journald keeps the journal in memory only, so a lab boot that fails takes its journal with it", i))
 	}
-	enrollBody, _ := json.Marshal(api.EnrollRequest{Token: "enr_test_m1", Facts: facts})
+	enrollBody, _ := json.Marshal(api.EnrollRequest{Token: "enr_test_m1", Facts: facts, ActivationKey: testActivationKey, TermsSHA256: termsSum()})
 	checkin, _ := json.Marshal(api.Checkin{BootID: "b1", Kernel: "6.17.0-asahi", Cmdline: strings.Repeat("x", 4096), Facts: &facts,
 		Health: api.Health{Uptime: 100, SystemState: "running"}, Running: []string{"c1", "c2"}})
 	if len(enrollBody) > enrollBodyMax/16 || len(checkin) > checkinBodyMax/16 {
@@ -392,9 +392,14 @@ func TestAgentBodyLimits(t *testing.T) {
 		t.Errorf("a report over %d bytes: %d %s", reportBodyMax, code, body)
 	}
 
-	if err := s.store.saveJob(&api.Job{ID: "j1016-120000-ab12", Spec: api.JobSpec{Device: "m1"}, State: api.JobTesting}); err != nil {
+	// The Mac adds files to its running job, which was submitted for it.
+	if err := s.store.saveJob(&api.Job{ID: "j1016-120000-ab12", Spec: api.JobSpec{Device: "m1"}, DeviceID: e.DeviceID, State: api.JobTesting}); err != nil {
 		t.Fatal(err)
 	}
+	v := s.dev("m1")
+	v.mu.Lock()
+	v.d.ActiveJob = "j1016-120000-ab12"
+	v.mu.Unlock()
 	if code, body := post("/api/agent/upload?job=j1016-120000-ab12&name=boot0/journal.txt", e.Secret, fill(reportBodyMax+1, 'j')); code != 200 {
 		t.Errorf("an upload larger than any report: %d %s", code, body)
 	}

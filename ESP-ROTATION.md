@@ -122,12 +122,15 @@ copy and generator temp coexist. Existing destinations are never free credit.
 such as the exact old6 fallback. Each retirement credits only its observed allocated blocks; `retire-only` explicitly
 makes **no** staging-admission claim. The final observation must still fit.
 
-The separate agent source patch in `internal/agent/uki_reserve.go` fixes the known
+The agent's own stage check (`internal/agent/uki_reserve.go`) fixes the known
 stage peak: generate in root-private non-ESP scratch first, then lock and reserve
-for the exact rounded output +120MiB+1MiB before one ESP temp copy. Fsync/readback
+the exact rounded output plus 10% of the actual UKI size (rounded up) and 1 MiB of
+metadata before one ESP temp copy. Fsync/readback
 and a second reserve check precede rename. It preserves generator flags and does
-not relax module/current/known-good admission. That agent change is source only;
-standalone `lab-esp` deployment alone does not fix the existing daemon generator.
+not relax module/current/known-good admission. The 10% rule is the agent's stage
+budget only: the `lab-esp` capacity contract above and bt2 keep their own,
+separate budgets, and deploying `lab-esp` alone does not change the daemon
+generator.
 
 ## First MBP composition (private packet remains authoritative)
 

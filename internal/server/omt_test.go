@@ -128,7 +128,7 @@ func TestOMTUnattendedRunAgainstAttendedReference(t *testing.T) {
 	if len(o.Regressions) != 0 || len(o.Fixed) != 0 || o.Skip != 2 {
 		t.Fatalf("unattended omt %+v", o)
 	}
-	if !omtCompared(j) || !strings.HasSuffix(o.ComparedTo, "skipped what that one passed: video.h264-on-screen") {
+	if omtCompared(j) || !reflect.DeepEqual(o.NotCompared, []string{"video.h264-on-screen"}) || !strings.HasSuffix(o.ComparedTo, "coverage not run: video.h264-on-screen") {
 		t.Fatalf("compared to %q", o.ComparedTo)
 	}
 
@@ -229,5 +229,32 @@ func TestInstalledJobUnattendedSkip(t *testing.T) {
 				t.Fatalf("test error %q", msg)
 			}
 		})
+	}
+}
+
+func TestOMTMissingCoverageSurvivesReferenceRewrite(t *testing.T) {
+	l := newLab(t, true)
+	l.s.cfg.OMT = true
+	unattended := false
+	l.sim.OMTReport = func(kernel string) []byte { return omtModeReport(kernel, unattended, "pass") }
+	l.waitDevice(func(d api.Device) bool { return d.Facts.AgentVersion != "" })
+	l.baseline()
+	unattended = true
+	kg := l.run(api.JobSpec{})
+	l.expect(kg, api.OutcomePass)
+	base := l.s.omtBaseline(l.name)
+	if !reflect.DeepEqual(base.NotCompared, []string{"video.h264-on-screen"}) {
+		t.Fatalf("replacement reference lost missing coverage: %+v", base)
+	}
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-skipped behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	if omtCompared(j) || lessTested(j, true) == "" {
+		t.Fatal("rewritten reference turned skipped video into qualified coverage")
+	}
+	unattended = false
+	j = l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-covered behavior=ok")})
+	l.expect(j, api.OutcomePass)
+	if len(j.Result.OMT.NotCompared) != 0 || !omtCompared(j) {
+		t.Fatalf("actual execution did not clear missing coverage: %+v", j.Result.OMT)
 	}
 }

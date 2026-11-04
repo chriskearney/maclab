@@ -224,13 +224,16 @@ func (s *Sim) LeavingStagedEntries() int {
 const leftFile = "left.json"
 
 type left struct {
-	Server   string    `json:"server"`
-	DeviceID string    `json:"device_id"`
-	Name     string    `json:"name"`
-	Secret   string    `json:"secret,omitempty"` // until labd has been told
-	EndedBy  string    `json:"ended_by,omitempty"`
-	Time     time.Time `json:"time"`
-	Told     bool      `json:"told"` // labd knows: the Maintainers ended it, or it has been told
+	Server string `json:"server"`
+	// ServerCA and AllowPlainHTTP are agent.json's, for telling labd.
+	ServerCA       string    `json:"server_ca,omitempty"`
+	AllowPlainHTTP *bool     `json:"allow_plain_http,omitempty"`
+	DeviceID       string    `json:"device_id"`
+	Name           string    `json:"name"`
+	Secret         string    `json:"secret,omitempty"` // until labd has been told
+	EndedBy        string    `json:"ended_by,omitempty"`
+	Time           time.Time `json:"time"`
+	Told           bool      `json:"told"` // labd knows: the Maintainers ended it, or it has been told
 }
 
 func readLeft(workDir string) (*left, error) {
@@ -262,7 +265,8 @@ func writeLeft(workDir string, r *left) error {
 func (r *left) tellLabd(ctx context.Context) bool {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	err := postJSON(ctx, http.DefaultClient, strings.TrimRight(r.Server, "/")+"/api/agent/left", r.Secret, struct{}{}, nil)
+	cfg := &Config{Server: r.Server, ServerCA: r.ServerCA, AllowPlainHTTP: r.AllowPlainHTTP}
+	err := postJSON(ctx, cfg.client(0), strings.TrimRight(r.Server, "/")+"/api/agent/left", r.Secret, struct{}{}, nil)
 	var se *statusError
 	return err == nil || (errors.As(err, &se) && se.Code == http.StatusUnauthorized)
 }
@@ -326,7 +330,7 @@ func leaveCmd(ctx context.Context, cfg *Config, sys System, args []string, out i
 	if macIsLabOwned(ctx, cfg) {
 		return errors.New("a Lab-owned Mac has no Volunteer to leave: the Maintainers end its enrollment")
 	}
-	rec := &left{Server: cfg.Server, DeviceID: cfg.DeviceID, Name: cfg.Name, Secret: cfg.Secret, Time: cfg.clock().Now()}
+	rec := &left{Server: cfg.Server, ServerCA: cfg.ServerCA, AllowPlainHTTP: cfg.AllowPlainHTTP, DeviceID: cfg.DeviceID, Name: cfg.Name, Secret: cfg.Secret, Time: cfg.clock().Now()}
 	err := leaveMac(ctx, cfg, sys, rec)
 	fmt.Fprintf(out, "%s has left the lab: any job stopped, the lab's boot entries, units and device secret are removed, and the Mac boots its own system.\n", cfg.Name)
 	if !rec.Told {
@@ -345,7 +349,7 @@ func macIsLabOwned(ctx context.Context, cfg *Config) bool {
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	var live api.AgentEnrollment
-	if err := getJSON(ctx, http.DefaultClient, strings.TrimRight(cfg.Server, "/")+"/api/agent/enrollment", cfg.Secret, &live); err == nil {
+	if err := getJSON(ctx, cfg.client(0), strings.TrimRight(cfg.Server, "/")+"/api/agent/enrollment", cfg.Secret, &live); err == nil {
 		return live.Kind == api.KindLabOwned
 	}
 	return cfg.Enrollment.Kind == api.KindLabOwned
@@ -376,7 +380,7 @@ func (a *Agent) enrollmentEnded(by string) {
 			a.log.Printf("Audit log: %v", err)
 		}
 		desktopNotice(a.sys, a.cfg.GUIUser, fmt.Sprintf("%s ended this Mac's enrollment in the lab. lab-agent is removing the lab from it; `sudo lab-agent log` records it.", by))
-		rec := &left{Server: a.cfg.Server, DeviceID: a.cfg.DeviceID, Name: a.cfg.Name, EndedBy: by, Time: a.clock().Now(), Told: true}
+		rec := &left{Server: a.cfg.Server, ServerCA: a.cfg.ServerCA, AllowPlainHTTP: a.cfg.AllowPlainHTTP, DeviceID: a.cfg.DeviceID, Name: a.cfg.Name, EndedBy: by, Time: a.clock().Now(), Told: true}
 		if err := leaveMac(a.life, a.cfg, a.sys, rec); err != nil {
 			a.log.Printf("leaving: %v", err)
 		}

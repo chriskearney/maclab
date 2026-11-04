@@ -1,0 +1,8 @@
+# Only what labd and lab-agent build from goes in the build context (see Dockerfile).
+*
+!go.mod
+!go.sum
+!cmd/
+!internal/
+**/*_test.go
+**/testdata/

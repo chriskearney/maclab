@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -28,7 +29,8 @@ CREATE TABLE IF NOT EXISTS builds (id TEXT PRIMARY KEY, key TEXT NOT NULL, creat
 CREATE INDEX IF NOT EXISTS builds_key ON builds(key, created);
 CREATE TABLE IF NOT EXISTS maintainers (name TEXT PRIMARY KEY, token_hash TEXT UNIQUE NOT NULL, added INTEGER NOT NULL, added_by TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS ended (secret_hash TEXT PRIMARY KEY, name TEXT NOT NULL, maintainer TEXT NOT NULL, at INTEGER NOT NULL);
-CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, sha TEXT NOT NULL, PRIMARY KEY(device, kernel));`)
+CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, sha TEXT NOT NULL, PRIMARY KEY(device, kernel));
+CREATE TABLE IF NOT EXISTS builders (name TEXT PRIMARY KEY, gen TEXT UNIQUE NOT NULL, token_hash TEXT UNIQUE NOT NULL, kinds TEXT NOT NULL, added INTEGER NOT NULL, added_by TEXT NOT NULL);`)
 	if err != nil {
 		return nil, err
 	}
@@ -39,8 +41,9 @@ CREATE TABLE IF NOT EXISTS configs (device TEXT NOT NULL, kernel TEXT NOT NULL, 
 	if err := addColumn(db, "tokens", "requester", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return nil, err
 	}
-	// A labd from before Volunteer enrollment has tokens without these.
-	for _, col := range []string{"volunteer_name", "contact"} {
+	// A labd from before Volunteer enrollment has tokens without these, and
+	// one from before one-time activation without activated_by.
+	for _, col := range []string{"volunteer_name", "contact", "activated_by"} {
 		if err := addColumn(db, "tokens", col, "TEXT NOT NULL DEFAULT ''"); err != nil {
 			return nil, err
 		}
@@ -149,6 +152,52 @@ func (s *store) token(hash string, now time.Time) (*api.EnrollTokenRequest, erro
 		return nil, sql.ErrNoRows
 	}
 	return &r, nil
+}
+
+// tokenState is token, and the hash of the activation key that used the
+// token up, "" while it is unused.
+func (s *store) tokenState(hash string, now time.Time) (*api.EnrollTokenRequest, string, error) {
+	t, err := s.token(hash, now)
+	if err != nil {
+		return nil, "", err
+	}
+	var by string
+	err = s.db.QueryRow(`SELECT activated_by FROM tokens WHERE token_hash=?`, hash).Scan(&by)
+	return t, by, err
+}
+
+// activateAndSave uses up an unused, unexpired token for the activation
+// whose key hashes to keyHash and saves the device it makes, in one
+// transaction, and says whether it did: of two enrollments racing with one
+// token, one wins, and a crash leaves either both or neither.
+func (s *store) activateAndSave(hash, keyHash string, now time.Time, d *api.Device, secretHash string) (bool, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`UPDATE tokens SET activated_by=? WHERE token_hash=? AND activated_by='' AND expires>=?`, keyHash, hash, now.Unix())
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		return false, err
+	}
+	b, _ := json.Marshal(d)
+	if _, err := tx.Exec(`INSERT INTO devices(id,name,secret_hash,data) VALUES(?,?,?,?)`, d.ID, d.Name, secretHash, string(b)); err != nil {
+		return false, err
+	}
+	return true, tx.Commit()
+}
+
+// revokeTokens deletes the enrollment tokens for a name, used or not, and
+// says how many there were.
+func (s *store) revokeTokens(name string) (int64, error) {
+	res, err := s.db.Exec(`DELETE FROM tokens WHERE name=?`, name)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // spendTokens uses up the enrollment tokens for a name: its Mac has checked in.
@@ -300,6 +349,68 @@ func (s *store) maintainers() ([]api.Maintainer, error) {
 		out = append(out, m)
 	}
 	return out, rows.Err()
+}
+
+// addBuilder records a named builder: gen names this one token of it, and
+// tokenHash is that token's hash.
+func (s *store) addBuilder(b api.Builder, gen, tokenHash string) error {
+	_, err := s.db.Exec(`INSERT INTO builders(name,gen,token_hash,kinds,added,added_by) VALUES(?,?,?,?,?,?)`,
+		b.Name, gen, tokenHash, strings.Join(b.Kinds, ","), b.Added.Unix(), b.AddedBy)
+	return err
+}
+
+// builderByToken is the named builder holding a token hash, and its generation.
+func (s *store) builderByToken(hash string) (api.Builder, string, error) {
+	var b api.Builder
+	var gen, kinds string
+	var added int64
+	err := s.db.QueryRow(`SELECT name,gen,kinds,added,added_by FROM builders WHERE token_hash=?`, hash).Scan(&b.Name, &gen, &kinds, &added, &b.AddedBy)
+	b.Kinds, b.Added = strings.Split(kinds, ","), time.Unix(added, 0)
+	return b, gen, err
+}
+
+// builderGenCurrent reports whether gen is still the token of a named builder.
+func (s *store) builderGenCurrent(gen string) bool {
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM builders WHERE gen=?`, gen).Scan(&n)
+	return gen != "" && n > 0
+}
+
+func (s *store) hasBuilder(name string) bool {
+	var n int
+	s.db.QueryRow(`SELECT count(*) FROM builders WHERE name=?`, name).Scan(&n)
+	return n > 0
+}
+
+func (s *store) builders() ([]api.Builder, error) {
+	rows, err := s.db.Query(`SELECT name,kinds,added,added_by FROM builders ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []api.Builder{}
+	for rows.Next() {
+		var b api.Builder
+		var kinds string
+		var added int64
+		if err := rows.Scan(&b.Name, &kinds, &added, &b.AddedBy); err != nil {
+			return nil, err
+		}
+		b.Kinds, b.Added = strings.Split(kinds, ","), time.Unix(added, 0)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// removeBuilder deletes a named builder and its token, returning the
+// generation that ended; only, if set, deletes it only while it is that
+// generation. ok is false when nothing was deleted.
+func (s *store) removeBuilder(name, only string) (gen string, ok bool, err error) {
+	err = s.db.QueryRow(`DELETE FROM builders WHERE name=? AND (?='' OR gen=?) RETURNING gen`, name, only, only).Scan(&gen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	return gen, err == nil, err
 }
 
 // removeMaintainer deletes a Maintainer, and with them their token, unless

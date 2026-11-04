@@ -92,8 +92,20 @@ type Config struct {
 	// (default 2 minutes); GUIGrace is how much longer for a GUI test (default
 	// 2 minutes, see guiWait). Tests shorten them.
 	TestGrace, GUIGrace time.Duration
-	// AgentBinary is the linux/arm64 lab-agent that ./volunteer downloads.
+	// AgentBinary is the linux/arm64 lab-agent that ./volunteer and the join
+	// command download.
 	AgentBinary string
+	// PublicURL is the URL people and Macs reach labd at, its path being
+	// labd's prefix (--public-url, see edge.go). Nil serves at / and takes
+	// each request's own origin.
+	PublicURL *url.URL
+	// TrustedProxies are the reverse proxies in front of labd
+	// (--trusted-proxy, see edge.go). They need PublicURL, and rule out
+	// Tailscale, whose identities are TCP peers.
+	TrustedProxies []netip.Prefix
+	// Terms is what a Mac's owner accepts before it joins the lab; empty is
+	// DefaultTerms (see terms.go).
+	Terms string
 	// Clock is where labd reads time; nil is the wall clock.
 	Clock agent.Clock
 }
@@ -112,6 +124,7 @@ type Server struct {
 	builds      *buildMgr
 	notifyHooks []func(Notification)
 	conns       maintainerConns
+	bconns      maintainerConns // named builders' open requests, by generation
 	serialMu    sync.Mutex
 	whoMu       sync.Mutex
 	whoCache    map[netip.Addr]whoisEntry
@@ -176,6 +189,12 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	if cfg.OfflineAfter == 0 {
 		cfg.OfflineAfter = time.Minute
 	}
+	if len(cfg.TrustedProxies) > 0 && cfg.PublicURL == nil {
+		return nil, fmt.Errorf("--trusted-proxy needs --public-url: labd checks what a proxy forwards against it")
+	}
+	if len(cfg.TrustedProxies) > 0 && cfg.Tailscale {
+		return nil, fmt.Errorf("--trusted-proxy and --tailscale don't go together: behind a proxy every request's tailnet identity would be the proxy's")
+	}
 	if cfg.Tailscale && cfg.WhoIs == nil {
 		if _, err := exec.LookPath(tailscaleCLI()); err != nil {
 			return nil, fmt.Errorf("--tailscale needs the tailscale CLI: %w", err)
@@ -228,6 +247,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		return nil, err
 	}
 	for _, row := range rows {
+		unused := neverUsed(st, row.d) // as stored, before the changes below
 		d := row.d
 		for _, j := range interrupted {
 			if j.Spec.Device == d.Name && j.State != api.JobQueued && (j.Spec.RecoveryMode == api.RecoveryNetworkOnly || j.EffectiveRecoveryMode == api.RecoveryNetworkOnly) {
@@ -246,7 +266,7 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 			d.State = api.StateOffline
 		}
 		v := newDev(s, d, row.secretHash)
-		v.dirty = true // labd may have stopped mid-job
+		v.dirty = !unused // labd may have stopped mid-job
 		s.devs[d.Name] = v
 		if l := s.screens(d.Name); len(l) > 0 {
 			v.screenAt, v.screenName = l[0].Time, l[0].Name
@@ -268,11 +288,26 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 		st.saveJob(j)
 	}
 	s.builds = newBuildMgr(s)
+	s.reconcileRunningBuilds()
 	go s.monitor()
 	go s.buildMonitor()
 	go s.gcLoop()
 	go s.omtScheduler()
 	return s, nil
+}
+
+// neverUsed reports whether a stored Mac has demonstrably never been used: it
+// was New when labd stopped, with no known-good kernel and no active job, and
+// no job of any state was ever recorded under its name. After a restart labd
+// cleans up every other Mac, in case it stopped mid-job; a Mac never used has
+// nothing of the lab's to clean, and the cleanup would still rewrite its boot
+// entries. Any doubt, a failed lookup included, keeps the cleanup.
+func neverUsed(st *store, d api.Device) bool {
+	if d.Name == "" || d.State != api.StateNew || d.KnownGood != "" || d.ActiveJob != "" {
+		return false
+	}
+	jobs, err := st.jobs(d.Name, 1, false)
+	return err == nil && len(jobs) == 0
 }
 
 // OnNotify registers a hook, used by tests to observe notifications.
@@ -507,6 +542,9 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
 
 	m.HandleFunc("GET /api/auth", s.hAuth)
+	// healthz answers that labd is up, to anyone: a Kubernetes probe. It
+	// says nothing else.
+	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
 	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.maintainer(s.hRecoveryMode))
 	m.HandleFunc("GET /api/recovery", s.viewer(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
@@ -537,6 +575,10 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/enroll-tokens", s.maintainer(s.hEnrollToken))
 	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
 	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
+	m.HandleFunc("GET /api/join/lab-agent", s.joinToken(s.hVolunteerAgent))
+	m.HandleFunc("GET /api/join/terms", s.joinToken(s.hJoinTerms))
+	m.HandleFunc("DELETE /api/enroll-tokens/{name}", s.maintainer(s.hRevokeEnrollTokens))
+	m.HandleFunc("POST /api/devices/{name}/artifact-grants", s.maintainer(s.hArtifactGrants))
 	m.HandleFunc("POST /api/artifacts", s.maintainer(s.hPutArtifact))
 	m.HandleFunc("POST /api/mesa/jobs", s.maintainer(s.hSubmit))
 	m.HandleFunc("POST /api/jobs", s.maintainer(s.hSubmit))
@@ -554,7 +596,8 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
 	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
 	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
-	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hAgentArtifact))
+	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hBuilderGetArtifact))
+	m.HandleFunc("GET /api/builder/self", s.builderAuth(s.hBuilderSelf))
 	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
 	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
 	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
@@ -566,13 +609,15 @@ func (s *Server) Handler() http.Handler {
 	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
 	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
 	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
+	m.HandleFunc("POST /api/builders", s.maintainer(s.hAddBuilder))
+	m.HandleFunc("DELETE /api/builders/{name}", s.maintainer(s.hRemoveBuilder))
 	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
 	m.HandleFunc("GET /api/devices/{name}/audit", s.maintainer(s.hAudit))
 	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
 	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
 	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
-	web.Register(m)
-	return sameOrigin(m)
+	web.Register(m, s.basePath())
+	return s.edge(m)
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -642,19 +687,37 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "device name must be lowercase letters, digits and dashes")
 		return
 	}
-	// A Mac that never checked in hasn't taken the name: its enrollment failed,
-	// and enrolling again with the new token replaces its secret.
-	if v := s.dev(req.Name); v != nil && v.checkedIn() {
-		httpErr(w, 409, "device %s already enrolled", req.Name)
+	// Activation is one-time, so a Mac that enrolled but never checked in
+	// still holds its name: a new token for it would only be refused.
+	if v := s.dev(req.Name); v != nil {
+		if v.checkedIn() {
+			httpErr(w, 409, "device %s already enrolled", req.Name)
+		} else {
+			httpErr(w, 409, "device %s enrolled but never checked in: `lab forget %s`, then enroll it again", req.Name, req.Name)
+		}
 		return
 	}
-	s.issueToken(w, req, "")
+	s.issueToken(w, r, req, "")
+}
+
+// hRevokeEnrollTokens deletes the enrollment tokens for a name, used or not:
+// an invite that hasn't been used stops working, and a used one can't be
+// used again. A Mac that already enrolled with one stays until forgotten.
+func (s *Server) hRevokeEnrollTokens(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	n, err := s.store.revokeTokens(name)
+	if err != nil {
+		httpErr(w, 500, "%v", err)
+		return
+	}
+	s.log.Printf("Maintainer %s revoked %d enrollment token(s) for %s", maintainerName(r), n, name)
+	writeJSON(w, map[string]any{"name": name, "revoked": n})
 }
 
 // issueToken answers with a one-use enrollment token for req, good for a day.
 // A token for volunteer, a tailnet viewer's login, replaces any unused one
 // they hold and counts toward maxVolunteerTokens (see addVolunteerToken).
-func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest, volunteer string) {
+func (s *Server) issueToken(w http.ResponseWriter, r *http.Request, req api.EnrollTokenRequest, volunteer string) {
 	if req.Model == "" {
 		req.Model = api.ModelLaptop
 	}
@@ -679,7 +742,7 @@ func (s *Server) issueToken(w http.ResponseWriter, req api.EnrollTokenRequest, v
 		httpErr(w, 500, "%v", err)
 		return
 	}
-	writeJSON(w, api.EnrollTokenResponse{Name: req.Name, Token: tok, Expires: exp})
+	writeJSON(w, api.EnrollTokenResponse{Name: req.Name, Token: tok, Expires: exp, JoinCommand: s.joinCommand(r, tok)})
 }
 
 // A viewer holds at most one unused volunteer token, and at most
@@ -700,6 +763,10 @@ const (
 // which JSON's escapes can make 6 MB), a journal of up to 20000 lines or the
 // kernel's .config, and up to 500 kernel events. Files go to
 // /api/agent/upload and /api/agent/screen, which these don't limit.
+// enrollBodyTimeout is how long an enrollment's body may take to arrive;
+// tests shorten it.
+var enrollBodyTimeout = 30 * time.Second
+
 const (
 	enrollBodyMax  = 256 << 10
 	checkinBodyMax = 256 << 10
@@ -792,7 +859,7 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(Maintainer "+maintainerName(r)+")"))
-	s.issueToken(w, req, volunteer)
+	s.issueToken(w, r, req, volunteer)
 }
 
 // taggedPeer reports whether r comes from a tagged tailnet device.
@@ -847,49 +914,55 @@ func (s *Server) tokenValid(hash string) bool {
 
 // hEnroll turns an enrollment token into a device. It needs no secret, so
 // its body is held to enrollBodyMax before the token is even looked at.
+//
+// Activation is one-time: the first enrollment with a token uses it up, for
+// the activation key that Mac sent. Should the answer never reach the Mac,
+// only that same activation key enrolls again with the token, and only until
+// the Mac's first check-in: the token alone, copied to another Mac, is worth
+// nothing once used. The owner must have accepted labd's current terms.
 func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
+	// Anyone may send this body, before labd knows who they are: it must
+	// arrive soon, not trickle in to hold the connection.
+	http.NewResponseController(w).SetReadDeadline(time.Now().Add(enrollBodyTimeout))
 	var req api.EnrollRequest
 	if !decodeBody(w, r, enrollBodyMax, &req) {
 		return
 	}
-	t, err := s.store.token(hashSecret(req.Token), s.now())
+	tokHash := hashSecret(req.Token)
+	t, activatedBy, err := s.store.tokenState(tokHash, s.now())
 	if err != nil {
 		httpErr(w, 403, "enrollment token unknown, used or expired")
 		return
 	}
-	secret := "dev_" + randHex(24)
-	// The token is spent by the Mac's first check-in, not by this call: if the
-	// answer never reached the Mac, enrolling again must work. Until then the
-	// Mac it made gets a new secret.
-	if v := s.dev(t.Name); v != nil {
-		v.mu.Lock()
-		// Its own token again, or a new one once the old one has run out.
-		retry := v.d.BootID == "" && (v.enrolledWith == hashSecret(req.Token) || !s.tokenValid(v.enrolledWith))
-		if retry {
-			v.enrolledWith = hashSecret(req.Token)
-			v.secretHash = hashSecret(secret)
-			v.d.Enrollment = enrollment(t, v.d.Enrollment)
-			v.d.Volunteer, v.d.VolunteeredBy = v.d.IsVolunteer(), t.VolunteeredBy
-			v.saveLocked()
-		}
-		d := v.d
-		v.mu.Unlock()
-		if !retry {
-			httpErr(w, 409, "device %s already enrolled", t.Name)
-			return
-		}
-		s.log.Printf("enrolled %s again before its first check-in", t.Name)
-		writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
+	if _, sum := s.terms(); req.TermsSHA256 != sum {
+		httpErr(w, 409, "this Mac's owner hasn't accepted labd's current participation terms: lab-agent setup shows them")
 		return
 	}
+	keyHash := ""
+	if req.ActivationKey != "" {
+		if len(req.ActivationKey) < 32 || len(req.ActivationKey) > 128 {
+			httpErr(w, 400, "activation key: want 32 to 128 characters")
+			return
+		}
+		keyHash = hashSecret(req.ActivationKey)
+	}
+	secret := "dev_" + randHex(24)
+	if activatedBy != "" {
+		s.enrollAgain(w, t, tokHash, keyHash, activatedBy, secret)
+		return
+	}
+	if keyHash == "" { // an older lab-agent: no enrolling again with this token
+		keyHash = "none-" + randHex(16)
+	}
 	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy,
-		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{})}
+		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{}),
+		TermsSHA256: req.TermsSHA256, TermsAccepted: s.now()}
 	d.Volunteer = d.IsVolunteer()
 	if d.IsVolunteer() {
 		d.AccessLevel = api.AccessQualification // until its Volunteer chooses
 	}
 	v := newDev(s, d, hashSecret(secret))
-	v.enrolledWith = hashSecret(req.Token)
+	v.enrolledWith = tokHash
 	s.mu.Lock()
 	if _, dup := s.devs[d.Name]; dup {
 		s.mu.Unlock()
@@ -906,13 +979,45 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// Used up here, under s.mu, in one transaction with the device's row: of
+	// two enrollments racing with one token, one gets the Mac and the other
+	// a 403, and a crash leaves no used token without its Mac.
+	if ok, err := s.store.activateAndSave(tokHash, keyHash, s.now(), &d, hashSecret(secret)); err != nil || !ok {
+		s.mu.Unlock()
+		httpErr(w, 403, "enrollment token unknown, used or expired")
+		return
+	}
 	s.devs[d.Name] = v
 	s.mu.Unlock()
-	v.mu.Lock()
-	v.saveLocked()
-	v.mu.Unlock()
 	go s.deviceLoop(v)
-	s.log.Printf("enrolled %s (%s, %s)", d.Name, d.Kind, req.Facts.DTModel)
+	s.log.Printf("enrolled %s (%s, %s); terms %s accepted", d.Name, d.Kind, req.Facts.DTModel, short(req.TermsSHA256))
+	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
+}
+
+// enrollAgain answers an enrollment with a used token: the same activation
+// enrolling again before its Mac's first check-in, because the first answer
+// never reached it. The Mac keeps its enrollment and gets a new secret.
+// Anything else is refused as an unknown token would be.
+func (s *Server) enrollAgain(w http.ResponseWriter, t *api.EnrollTokenRequest, tokHash, keyHash, activatedBy, secret string) {
+	v := s.dev(t.Name)
+	if keyHash == "" || subtle.ConstantTimeCompare([]byte(keyHash), []byte(activatedBy)) != 1 || v == nil {
+		httpErr(w, 403, "enrollment token unknown, used or expired")
+		return
+	}
+	v.mu.Lock()
+	ok := !v.forgotten && v.d.BootID == "" && v.enrolledWith == tokHash
+	if ok {
+		v.secretHash = hashSecret(secret)
+		v.grants, v.fetchGrant = nil, nil
+		v.saveLocked()
+	}
+	d := v.d
+	v.mu.Unlock()
+	if !ok {
+		httpErr(w, 403, "enrollment token unknown, used or expired")
+		return
+	}
+	s.log.Printf("enrolled %s again with its own activation, before its first check-in", t.Name)
 	writeJSON(w, api.EnrollResponse{DeviceID: d.ID, Name: d.Name, Secret: secret, AgentEnrollment: s.agentEnrollment(d.Enrollment)})
 }
 
@@ -997,15 +1102,6 @@ func (s *Server) artifactPath(sha string) string {
 	return filepath.Join(s.cfg.DataDir, "artifacts", sha)
 }
 
-func (s *Server) hAgentArtifact(w http.ResponseWriter, r *http.Request) {
-	sha := r.PathValue("sha")
-	if !reSHA.MatchString(sha) {
-		httpErr(w, 400, "bad sha256")
-		return
-	}
-	http.ServeFile(w, r, s.artifactPath(sha))
-}
-
 func (s *Server) hPutArtifact(w http.ResponseWriter, r *http.Request) {
 	sha, n, err := s.storeArtifact(r.Body)
 	if err != nil {
@@ -1027,34 +1123,6 @@ func cleanName(name string) (string, bool) {
 		return "", false
 	}
 	return c, true
-}
-
-func (s *Server) hUpload(w http.ResponseWriter, r *http.Request) {
-	job := r.URL.Query().Get("job")
-	name, ok := cleanName(r.URL.Query().Get("name"))
-	if !ok || strings.ContainsAny(job, "/.") || job == "" {
-		httpErr(w, 400, "bad job or name")
-		return
-	}
-	j, err := s.store.job(job)
-	if err != nil || j.Spec.Device != agentDev(r).d.Name {
-		httpErr(w, 404, "no such job for this device")
-		return
-	}
-	p := filepath.Join(s.jobDir(job), name)
-	os.MkdirAll(filepath.Dir(p), 0o755)
-	f, err := os.Create(p)
-	if err != nil {
-		httpErr(w, 500, "%v", err)
-		return
-	}
-	_, err = io.Copy(f, r.Body)
-	f.Close()
-	if err != nil {
-		httpErr(w, 500, "%v", err)
-		return
-	}
-	w.Write([]byte("ok"))
 }
 
 // DeviceView is a device plus what labd derives about it.
@@ -1173,7 +1241,7 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	}
 	if l := v.d.Lease; !force && l != nil && s.now().Before(l.Expires) && l.Holder != holder {
 		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s --holder %s`), or pass --force",
-			name, l.Holder, l.Expires.Format(time.DateTime), name, l.Holder)
+			name, l.Who(), l.Expires.Format(time.DateTime), name, l.Holder)
 	}
 	// An agent that told labd it is leaving may still check in until
 	// uninstall has stopped it. Any other one that checks in is still set up,
@@ -1216,14 +1284,14 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
-		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Who(), l.Expires.Format(time.TimeOnly))
 		return
 	}
 	if v.d.IsVolunteer() && v.openUntilLocked().IsZero() {
 		httpErr(w, 409, "%s's Availability window is closed: a lease on a Volunteer's Mac lasts only inside it", v.d.Name)
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second), By: maintainerName(r)}
 	v.capLeaseLocked()
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
@@ -1238,7 +1306,7 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
-		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
+		httpErr(w, 409, "leased by %s, not %s", l.Who(), holder)
 		return
 	}
 	v.d.Lease = nil
@@ -1267,7 +1335,7 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
 	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
-		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
+		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Who(), lease.Expires.Format(time.DateTime))
 		return
 	}
 	back, err := s.rejoin(v, "reset requested by "+orStr(by, "an admin"))
@@ -1440,6 +1508,18 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
+const watchdogRequireMinAgent = "0.8.1"
+
+func validateRequiredWatchdog(tests []api.TestSpec, d api.Device) error {
+	for _, t := range tests {
+		if t.RequireWatchdog && !versionAtLeast(d.Facts.AgentVersion, watchdogRequireMinAgent) {
+			return fmt.Errorf("%s runs lab-agent %s; test %s requires watchdog support from %s or later",
+				d.Name, orStr(d.Facts.AgentVersion, "(unknown)"), t.Name, watchdogRequireMinAgent)
+		}
+	}
+	return nil
+}
+
 // submit queues a job for the Maintainer who asked; retryOf names the job it retries, whose source may
 // come with the kernel already built from it, and notes go in the job's
 // events after the first. The job records what lab gate needs to know about
@@ -1519,6 +1599,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
 	}
+	if err := validateRequiredWatchdog(spec.Tests, d.Device); err != nil {
+		return nil, 409, err
+	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {
 			return nil, 400, errors.New("baseline and crash-test jobs boot the known-good cmdline; drop --cmdline-base/--cmdline-strip")
@@ -1569,14 +1652,14 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 		}
 	}
 	if l := d.Lease; l != nil && l.Holder != spec.Holder {
-		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Who(), l.Expires.Format(time.TimeOnly))
 	}
 	now := s.now()
 	msg := "queued"
 	if retryOf != "" {
 		msg = "queued: a retry of job " + retryOf
 	}
-	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, Maintainer: maintainer, State: api.JobQueued, Created: now, Updated: now,
+	j := &api.Job{ID: "j" + now.Format("0102-150405") + "-" + randHex(2), Spec: spec, Maintainer: maintainer, DeviceID: d.ID, State: api.JobQueued, Created: now, Updated: now,
 		Events: []api.JobEvent{{Time: now, Msg: msg}}, RetryOf: retryOf,
 		DeviceAtSubmit: &api.DeviceSnapshot{Family: family(d.Facts), Volunteer: d.Volunteer, OMT: s.omtWanted(d.Device, api.JobSpec{})}}
 	for _, n := range notes {

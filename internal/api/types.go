@@ -43,6 +43,19 @@ type OOBConfig struct {
 type Lease struct {
 	Holder  string    `json:"holder"`
 	Expires time.Time `json:"expires"`
+	// By is the Maintainer whose token took the lease: Holder is whatever
+	// name the client chose, so By is how anyone can tell who to ask. It's
+	// empty on a lease taken before labd recorded it.
+	By string `json:"by,omitempty"`
+}
+
+// Who names the lease's holder for people: the holder, then the Maintainer
+// who took it when that's a different name.
+func (l *Lease) Who() string {
+	if l.By == "" || l.By == l.Holder {
+		return l.Holder
+	}
+	return l.Holder + " (" + l.By + ")"
 }
 
 // HumanAction is the one instruction a person needs when the lab cannot recover a device itself.
@@ -94,6 +107,11 @@ type Device struct {
 	// latest check-in carried them. Only the Volunteer changes them, on the Mac.
 	AccessLevel string `json:"access_level,omitempty"`
 	Publish     bool   `json:"publish,omitempty"`
+	// TermsSHA256 is the participation terms the Mac's owner accepted when it
+	// joined, and TermsAccepted when; empty for a Mac that joined before
+	// labd had terms.
+	TermsSHA256   string    `json:"terms_sha256,omitempty"`
+	TermsAccepted time.Time `json:"terms_accepted,omitzero"`
 }
 
 // Access levels of a Volunteer's Mac. Qualification, the default, allows
@@ -504,11 +522,12 @@ type CrashArgs struct {
 }
 
 type TestSpec struct {
-	Name       string `json:"name"`
-	Builtin    string `json:"builtin,omitempty"` // name of a test embedded in the agent
-	Script     string `json:"script,omitempty"`  // artifact sha256 of a shell script
-	TimeoutSec int    `json:"timeout_sec,omitempty"`
-	GUI        bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
+	Name            string `json:"name"`
+	Builtin         string `json:"builtin,omitempty"` // name of a test embedded in the agent
+	Script          string `json:"script,omitempty"`  // artifact sha256 of a shell script
+	TimeoutSec      int    `json:"timeout_sec,omitempty"`
+	RequireWatchdog bool   `json:"require_watchdog,omitempty"`
+	GUI             bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
 	// SkipOnScreen leaves out the checks that need the screen visible: a
 	// Volunteer's Mac is locked while a test runs. omarchy-m-test 0.1.15 skips
 	// them when unattended anyway; once maralcbr/omarchy-m-testing#61 ships it
@@ -720,6 +739,8 @@ type InstalledResult struct {
 // OMTResult summarizes an omarchy-m-test report (github.com/maralcbr/omarchy-m-testing)
 // and compares it with the same Mac's report on its known-good kernel.
 type OMTResult struct {
+	// NotCompared names required/reference coverage absent from this run.
+	NotCompared []string   `json:"not_compared,omitempty"`
 	Report      string     `json:"report"` // job file holding the signed report
 	Tool        string     `json:"tool"`
 	Catalogue   int        `json:"catalogue"`
@@ -760,6 +781,10 @@ type Job struct {
 	Canceled              bool       `json:"canceled,omitempty"`
 	// Maintainer is who submitted it, from their token; empty when labd queued it.
 	Maintainer string `json:"maintainer,omitempty"`
+	// DeviceID is the enrollment (Device.ID) of the Mac it was submitted for.
+	// Only that enrollment runs it, fetches its artifacts and adds its files;
+	// a job from before labd kept it is never run.
+	DeviceID string `json:"device_id,omitempty"`
 	// RetryOf is the job this one retries (lab retry).
 	RetryOf string `json:"retry_of,omitempty"`
 	// DeviceAtSubmit is what the job's Mac was when the job was submitted.
@@ -797,6 +822,21 @@ type DeviceSnapshot struct {
 type EnrollRequest struct {
 	Token string `json:"token"`
 	Facts Facts  `json:"facts"`
+	// ActivationKey is a random secret the Mac made for this activation and
+	// keeps until it is set up. The token is used up by the first enrollment
+	// with it; only the same activation key may enroll with it again, should
+	// the answer never have reached the Mac.
+	ActivationKey string `json:"activation_key,omitempty"`
+	// TermsSHA256 is the sha256 of the participation terms the Mac's owner
+	// accepted (GET /api/join/terms). labd takes only its current terms.
+	TermsSHA256 string `json:"terms_sha256,omitempty"`
+}
+
+// JoinTerms are labd's participation terms, which a Mac's owner accepts
+// before it joins.
+type JoinTerms struct {
+	SHA256 string `json:"sha256"`
+	Text   string `json:"text"`
 }
 
 type EnrollResponse struct {
@@ -842,6 +882,11 @@ type EnrollTokenResponse struct {
 	Name    string    `json:"name"`
 	Token   string    `json:"token"`
 	Expires time.Time `json:"expires"`
+	// JoinCommand is the one-liner that joins a Mac with this token: run on
+	// the Mac by its owner, it downloads lab-agent, checks its sha256, shows
+	// the terms and sets the Mac up. Empty when labd has no lab-agent to
+	// hand out.
+	JoinCommand string `json:"join_command,omitempty"`
 }
 
 type DevicePatch struct {
@@ -1115,6 +1160,64 @@ type MaintainerRequest struct {
 type NewMaintainer struct {
 	Maintainer
 	Token string `json:"token"`
+}
+
+// Builder kinds: the builds a named builder may take.
+const (
+	BuilderKernel  = "kernel"
+	BuilderPackage = "package"
+)
+
+// Builder is a named builder host, added by a Maintainer with a token of its
+// own (lab builder add).
+type Builder struct {
+	Name    string    `json:"name"`
+	Kinds   []string  `json:"kinds"`
+	Added   time.Time `json:"added"`
+	AddedBy string    `json:"added_by"`
+}
+
+type BuilderRequest struct {
+	Name  string   `json:"name"`
+	Kinds []string `json:"kinds,omitempty"` // default: kernel
+}
+
+// NewBuilder carries a new builder's token, the only time labd shows it, and
+// its generation: removing the builder with it removes only this one, never a
+// builder added under the same name since.
+type NewBuilder struct {
+	Builder
+	Token      string `json:"token"`
+	Generation string `json:"generation"`
+}
+
+// RemovedBuilder answers a builder's removal: the builds it was running,
+// which failed with it.
+type RemovedBuilder struct {
+	Removed      string   `json:"removed"`
+	FailedBuilds []string `json:"failed_builds"`
+}
+
+// BuilderSelf is who labd takes a builder's token for. Shared is the data
+// directory's builder.token, the controller's own builder.
+type BuilderSelf struct {
+	Name   string   `json:"name,omitempty"`
+	Kinds  []string `json:"kinds,omitempty"`
+	Shared bool     `json:"shared,omitempty"`
+}
+
+// BuilderStatus is one builder in GET /api/builders: a named builder, or a
+// host that polled with the shared builder.token.
+type BuilderStatus struct {
+	Host       string    `json:"host"`
+	Registered bool      `json:"registered,omitempty"`
+	Shared     bool      `json:"shared,omitempty"`
+	Kinds      []string  `json:"kinds,omitempty"`
+	Added      time.Time `json:"added,omitzero"`
+	AddedBy    string    `json:"added_by,omitempty"`
+	LastSeen   time.Time `json:"last_seen,omitzero"`
+	Alive      bool      `json:"alive"`
+	Build      string    `json:"build,omitempty"` // the build it is running
 }
 
 // EndedHeader is the header on the 401 that tells a Mac its enrollment was
