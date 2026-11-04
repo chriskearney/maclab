@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
@@ -103,6 +104,53 @@ func TestLimineEntriesAfterRewrite(t *testing.T) {
 	}
 	if !strings.Contains(string(got), "linux-aurora-fallback") {
 		t.Fatal("lost limine-update's own entries")
+	}
+}
+
+// limine-snapper-sync rewrites limine.conf hourly and on every snapshot, and
+// may drop the lab's block between arming a Lab boot and the reboot. Arming
+// again puts the block and the one-shot back, and fails, rather than leave
+// the Mac to boot its default entry, when it can't.
+func TestLimineRearmAfterSnapperSync(t *testing.T) {
+	oldVars := efivarsDir
+	t.Cleanup(func() { efivarsDir = oldVars })
+	efivarsDir = t.TempDir()
+	l := testLimine(t)
+	const job = "j1001-120000-abcd"
+	stageLimineEntry(t, l, job)
+	os.WriteFile(filepath.Join(l.Stage, job, "uki.efi"), []byte("uki"), 0o644)
+	if err := l.arm(entryPrefix + job); err != nil {
+		t.Fatal(err)
+	}
+
+	// the sync writes Omarchy's menu back without the block, and the
+	// one-shot is gone too
+	os.WriteFile(l.Conf, []byte(omarchyLimineConf), 0o644)
+	deleteEfivar("LoaderEntryOneShot", bliGUID)
+	if err := l.arm(entryPrefix + job); err != nil {
+		t.Fatal(err)
+	}
+	conf, _ := os.ReadFile(l.Conf)
+	if !strings.Contains(string(conf), "\n/"+entryPrefix+job+"\n") || l.armed() != entryPrefix+job {
+		t.Fatalf("re-arm left one-shot %q and limine.conf:\n%s", l.armed(), conf)
+	}
+
+	// armed already: arming again leaves the one-shot's NVRAM variable alone
+	v := efivarPath("LoaderEntryOneShot", bliGUID)
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(v, old, old)
+	if err := l.arm(entryPrefix + job); err != nil {
+		t.Fatal(err)
+	}
+	if st, err := os.Stat(v); err != nil || !st.ModTime().Equal(old) {
+		t.Errorf("arming an armed entry wrote the one-shot again: %v", err)
+	}
+
+	// no one-shot can be set: arming fails
+	os.WriteFile(l.Conf, []byte(omarchyLimineConf), 0o644)
+	efivarsDir = filepath.Join(t.TempDir(), "gone")
+	if err := l.arm(entryPrefix + job); err == nil {
+		t.Fatal("arm without efivars succeeded")
 	}
 }
 

@@ -19,10 +19,12 @@ var (
 // waitBack waits for the Mac to come up on a new boot after `since`. When it
 // doesn't, it gives the Mac selfRecovery more to come back by itself (a Lab
 // boot's deadlines reboot it), then walks the recovery ladder. It returns the
-// ladder steps used and whether the Mac is back.
-func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout, selfRecovery time.Duration) ([]string, bool, error) {
+// ladder steps used, whether the Mac is back, and whether the ladder found it
+// still up on oldBoot: it never went down by itself, whatever the ladder did
+// after.
+func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, timeout, selfRecovery time.Duration) (steps []string, ok, neverLeft bool, err error) {
 	var reason string
-	err := v.waitFor(ctx, timeout+selfRecovery, func() bool {
+	err = v.waitFor(ctx, timeout+selfRecovery, func() bool {
 		if v.d.BootID != oldBoot && v.d.LastSeen.After(since) {
 			return true
 		}
@@ -32,7 +34,7 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 			return false
 		}
 		for _, e := range v.events {
-			if e.Time.After(since) && !(v.networkOnlyLocked() && e.Source == "serial") && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace {
+			if e.Time.After(since) && !(v.networkOnlyLocked() && e.Source == "serial") && e.Kind == detect.Panic && now.Sub(e.Time) > panicGrace && !v.supersededLocked(e, oldBoot) {
 				reason = "kernel panicked and did not reboot within " + panicGrace.String()
 				return true
 			}
@@ -45,20 +47,21 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 		return false
 	})
 	if err != nil && err != context.DeadlineExceeded {
-		return nil, false, err
+		return nil, false, false, err
 	}
 	v.mu.Lock()
 	back := v.d.BootID != oldBoot && v.d.LastSeen.After(since)
 	// A Mac that is going down stops talking within seconds. Only one still
 	// checking in well after the reboot request never went down at all.
-	stillUp := v.d.BootID == oldBoot && v.aliveLocked() && v.d.LastSeen.After(since.Add(15*time.Second))
+	stillUp := v.d.BootID == oldBoot && v.aliveLocked() && v.d.LastSeen.After(since.Add(v.s.cfg.RebootGrace))
 	v.mu.Unlock()
 	if back {
-		return nil, true, nil
+		return nil, true, false, nil
 	}
 	if reason == "" {
 		switch {
 		case stillUp:
+			neverLeft = true
 			reason = fmt.Sprintf("still on the old boot %s after asking it to reboot", timeout+selfRecovery)
 		case selfRecovery > 0:
 			reason = fmt.Sprintf("did not check in within %s, nor come back by itself %s after that", timeout, selfRecovery)
@@ -66,8 +69,8 @@ func (v *dev) waitBack(ctx context.Context, oldBoot string, since time.Time, tim
 			reason = fmt.Sprintf("did not check in within %s", timeout)
 		}
 	}
-	steps, ok := v.ladder(ctx, reason, timeout, stillUp)
-	return steps, ok, nil
+	steps, ok = v.ladder(ctx, reason, timeout, stillUp)
+	return steps, ok, neverLeft, nil
 }
 
 // ladder is the recovery ladder: soft reboot, hard reset (twice), then a

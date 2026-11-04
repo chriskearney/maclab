@@ -1,6 +1,8 @@
 # maclab kernel builder: runs in an Apple `container` micro-VM on the controller Mac.
-# Toolchain mirrors the linux-aurora PKGBUILD: gcc, rustc pinned by rust-toolchain.toml,
-# bindgen, pahole, dtc. Everything that persists lives on the /cache volume.
+# Toolchains: gcc + binutils for gcc configs, and clang + LLD (LLVM=1) for clang configs such as
+# linux-aurora's, which kbuild picks from CONFIG_CC_IS_CLANG. Debian's clang (19 in trixie) is not
+# the clang 18 linux-aurora is built with. rustc pinned by rust-toolchain.toml, bindgen, pahole,
+# dtc. Everything that persists lives on the /cache volume.
 FROM docker.io/library/debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       build-essential bc bison flex libelf-dev libssl-dev dwarves cpio kmod python3 perl \

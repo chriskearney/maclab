@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -644,5 +645,31 @@ func TestAccessAndPublishRejectBadInput(t *testing.T) {
 	}
 	if out := l.mustVolunteer("status"); alStatusLevel(out) != "qualification" {
 		t.Fatalf("bad input changed the Access level:\n%s", out)
+	}
+}
+
+// A Volunteer reading their own Mac's live journal through labd is in its
+// Audit log under their name, not as labd acting on its own.
+func TestAVolunteersOwnLiveJournalReadIsInTheAuditLogUnderTheirName(t *testing.T) {
+	whois := func(_ context.Context, ip string) (*TailnetPeer, error) {
+		return &TailnetPeer{Login: "visitor@github", Node: "laptop"}, nil
+	}
+	l, _ := windowEndLab(t, labConfig{config: func(c *Config) { c.Tailscale, c.WhoIs = true, whois }})
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	v.volunteeredBy = "visitor@github"
+	v.mu.Unlock()
+	l.longJob("7.2-own-journal")
+	r := httptest.NewRequest("GET", labdAt+"/api/devices/"+l.name+"/logs?lines=5", nil)
+	r.RemoteAddr = "100.64.0.2:40000"
+	w := httptest.NewRecorder()
+	if l.s.Handler().ServeHTTP(w, r); w.Code != 200 {
+		t.Fatalf("the Volunteer's own live journal: %d %s", w.Code, w.Body)
+	}
+	out := l.alWaitLog("Volunteer visitor@github")
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "visitor@github") && strings.HasPrefix(strings.TrimSpace(line[strings.Index(line, "  ")+2:]), "labd") {
+			t.Fatalf("the Volunteer's read is attributed to labd: %q", line)
+		}
 	}
 }

@@ -118,7 +118,7 @@ func readOfficialExport(path string, limit int64) ([]byte, error) {
 	}
 	same := func(st os.FileInfo) bool {
 		now, ok := st.Sys().(*syscall.Stat_t)
-		return ok && st.Mode().IsRegular() && now.Dev == pin.Dev && now.Ino == pin.Ino && now.Mode == pin.Mode && now.Uid == pin.Uid && now.Gid == pin.Gid && now.Size == pin.Size && now.Mtim == pin.Mtim && now.Ctim == pin.Ctim
+		return ok && st.Mode().IsRegular() && now.Dev == pin.Dev && now.Ino == pin.Ino && now.Mode == pin.Mode && now.Uid == pin.Uid && now.Gid == pin.Gid && now.Size == pin.Size && statTimes(now) == statTimes(pin)
 	}
 	if int64(len(body)) != before.Size() || !same(after) || !same(live) {
 		return nil, errors.New("official export read/path drift")

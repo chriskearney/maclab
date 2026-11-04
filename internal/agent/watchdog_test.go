@@ -500,8 +500,9 @@ func (h *wdHarness) finished(id string) {
 }
 
 // Outside a test, every check-in that reaches labd while PID 1 answers, and
-// every command as it starts and as it ends, keeps the watchdog fed; a test's
-// budget is moved by nothing else, in either direction, until the test ends.
+// every command labd sent as it starts, keeps the watchdog fed; a command
+// ending does not, nor does a test ending. A test's budget is moved by nothing
+// else, in either direction, until the test ends.
 func TestWatchdogFollowsCheckinsCommandsAndTests(t *testing.T) {
 	h := newWDHarness(t)
 
@@ -525,7 +526,7 @@ func TestWatchdogFollowsCheckinsCommandsAndTests(t *testing.T) {
 	h.checkin()
 	h.fed(true, "after a check-in while PID 1 answers")
 
-	// a command keeps it fed from when it starts, and again from when it ends
+	// a command keeps it fed from when it starts, but not from when it ends
 	h.at(5 * time.Minute)
 	exec := h.command(api.CmdExec, api.ExecArgs{Command: "sleep"})
 	<-h.sys.execing
@@ -533,8 +534,9 @@ func TestWatchdogFollowsCheckinsCommandsAndTests(t *testing.T) {
 	h.fed(true, "9.5 minutes into a command, 14.5 after the last check-in")
 	h.sys.execDone <- struct{}{}
 	h.finished(exec)
-	h.at(9*time.Minute + 30*time.Second)
-	h.fed(true, "9.5 minutes after a command ended")
+	h.at(time.Minute)
+	h.fed(false, "a minute after a command ended, 10.5 after it started")
+	h.checkin()
 
 	// A test with an hour's timeout: its budget is the timeout plus the margin.
 	test := h.command(api.CmdRunTest, api.TestSpec{Name: "long", Builtin: "x", TimeoutSec: 3600})
@@ -548,11 +550,47 @@ func TestWatchdogFollowsCheckinsCommandsAndTests(t *testing.T) {
 	h.finished(h.command(api.CmdConfig, nil))
 	h.at(2 * time.Minute)
 	h.fed(false, "past the test's budget, after a check-in and a command")
+	h.checkin()
 	h.sys.finish <- struct{}{}
 	h.finished(test)
 	h.fed(true, "after the test ended")
 	h.at(watchdogIdle - time.Second)
-	h.fed(true, "just inside the idle budget after the test")
+	h.fed(true, "just inside the idle budget after the last check-in")
+	h.at(2 * time.Second)
+	h.fed(false, "past the idle budget after the last check-in")
+}
+
+// A test boot that lost labd during a test is reset 10 minutes after it last
+// heard from labd, however long the test and the upload of its output that
+// can't reach labd take after that (malik-na/maclab#44).
+func TestWatchdogCountsFromLabdNotFromTheTestEnding(t *testing.T) {
+	h := newWDHarness(t)
+	var once sync.Once
+	var uploading atomic.Bool
+	h.lab.onUpload = func() {
+		once.Do(func() {
+			// the upload has been retrying since the test ended
+			h.at(5*time.Minute + time.Second)
+			uploading.Store(h.a.wd.Load().tick())
+		})
+	}
+	h.checkin()
+	test := h.command(api.CmdRunTest, api.TestSpec{Name: "wifi", Builtin: "x", TimeoutSec: 600})
+	<-h.sys.running
+	h.lab.down.Store(true) // the test dropped the network
+	h.at(5 * time.Minute)
+	if err := h.a.poll(context.Background()); err == nil {
+		t.Fatal("check-in to a down labd succeeded")
+	}
+	h.sys.finish <- struct{}{}
+	h.finished(test)
+	if uploading.Load() {
+		t.Fatal("fed while uploading, 10 minutes after the last sign of labd")
+	}
+	h.fed(false, "after the test command ended, labd still out of reach")
+	h.lab.down.Store(false)
+	h.checkin()
+	h.fed(true, "once a check-in reaches labd again")
 }
 
 // A test's budget ends when the test does, so uploading its output (over a
@@ -724,5 +762,48 @@ func TestTestCmdlineWatchdog(t *testing.T) {
 		if strings.Contains(got+" ", gone) {
 			t.Errorf("cmdline %q still has %q", got, gone)
 		}
+	}
+}
+
+// Feeding stopping for silence from labd outside a test is a lost labd, said
+// once before the reset; a hung test, or PID 1 gone quiet, is not.
+func TestLabWatchdogNotesALostLabd(t *testing.T) {
+	clock := &wdClock{t: time.Unix(1_000_000, 0)}
+	d := newLabWatchdog(&wdDevice{}, clock.now)
+	noted := 0
+	d.onLostLabd = func() { noted++ }
+
+	done := d.test(clock.now(), 2*time.Minute)
+	clock.add(3 * time.Minute)
+	answers(d, true)
+	if d.tick() || noted != 0 {
+		t.Fatalf("a test past its budget: noted %d, want 0", noted)
+	}
+	done()
+	clock.add(11 * time.Minute)
+	answers(d, true)
+	d.tick()
+	d.tick()
+	if noted != 1 {
+		t.Fatalf("11 minutes without labd outside a test: noted %d, want 1", noted)
+	}
+}
+
+// The lost labd goes where collect_lost reads how a Lab boot ended.
+func TestNoteLostLabdRecordsItForCollectLost(t *testing.T) {
+	sim := NewSim(t.TempDir())
+	a := New(&Config{Server: "http://127.0.0.1:1", Secret: "test", WorkDir: t.TempDir()}, sim, log.New(io.Discard, "", 0))
+	os.MkdirAll(a.labBootDir(), 0o755)
+	a.noteLostLabd()
+	b, err := os.ReadFile(filepath.Join(a.labBootDir(), labBootSeenFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen labBootSeen
+	if err := json.Unmarshal(b, &seen); err != nil || seen.Deadline != api.DeadlineLostLabd {
+		t.Fatalf("boot.json: %s (%v)", b, err)
+	}
+	if id, _, _ := sim.Identity(); seen.BootID != id {
+		t.Fatalf("boot.json names boot %q, want %q", seen.BootID, id)
 	}
 }

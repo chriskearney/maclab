@@ -49,6 +49,14 @@ type Config struct {
 	// keeps the LAN default; labd's flags default to remote-sized values.
 	AliveWindow time.Duration // how stale a heartbeat may be before a Mac counts unresponsive
 	QuietGrace  time.Duration // silence on the same boot before a command counts lost
+	// RebootGrace, LabClockSkew and WatchdogIdleReset are lab-agent's times
+	// that labd waits on; zero keeps their real values (a harness with
+	// seconds-long boots sets them shorter). RebootGrace: how long a Mac asked
+	// to reboot may still be heard on its old boot, 15 s. LabClockSkew: how
+	// far a Lab boot's clock may run behind, agent.NoContactMargin.
+	// WatchdogIdleReset: how long after its last sign of labd the agent's
+	// watchdog resets a Lab boot outside a test, agent.LostLabdReset.
+	RebootGrace, LabClockSkew, WatchdogIdleReset time.Duration
 	// WatchdogOpenTimeout is watchdog.open_timeout on every Lab boot's command
 	// line; 0 leaves it to lab-agent: half the job's boot timeout, at least
 	// 120 s.
@@ -220,6 +228,15 @@ func New(ctx context.Context, cfg Config, logger *log.Logger) (*Server, error) {
 	}
 	if cfg.QuietGrace == 0 {
 		cfg.QuietGrace = quietGrace
+	}
+	if cfg.RebootGrace == 0 {
+		cfg.RebootGrace = 15 * time.Second
+	}
+	if cfg.LabClockSkew == 0 {
+		cfg.LabClockSkew = agent.NoContactMargin
+	}
+	if cfg.WatchdogIdleReset == 0 {
+		cfg.WatchdogIdleReset = agent.LostLabdReset
 	}
 	if cfg.OOBFactory == nil {
 		cfg.OOBFactory = func(d *api.Device) (oob.Controller, error) { return oob.New(d.OOB) }
@@ -531,93 +548,103 @@ func hashSecret(s string) string {
 
 func (s *Server) Handler() http.Handler {
 	m := http.NewServeMux()
-	m.HandleFunc("POST /api/agent/enroll", s.hEnroll)
-	m.HandleFunc("POST /api/agent/checkin", s.agent(s.hCheckin))
-	m.HandleFunc("POST /api/agent/report", s.agent(s.hReport))
-	m.HandleFunc("GET /api/agent/enrollment", s.agent(s.hAgentEnrollment))
-	m.HandleFunc("POST /api/agent/left", s.agent(s.hAgentLeave))
-	m.HandleFunc("GET /api/agent/artifacts/{sha}", s.agent(s.hAgentArtifact))
-	m.HandleFunc("POST /api/agent/upload", s.agent(s.hUpload))
-	m.HandleFunc("POST /api/agent/leave", s.agent(s.hLeave))
-	m.HandleFunc("GET /api/agent/published", s.agent(s.hAgentPublished))
-
-	m.HandleFunc("GET /api/auth", s.hAuth)
-	// healthz answers that labd is up, to anyone: a Kubernetes probe. It
-	// says nothing else.
-	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") })
-	m.HandleFunc("POST /api/devices/{name}/recovery-mode", s.maintainer(s.hRecoveryMode))
-	m.HandleFunc("GET /api/recovery", s.viewer(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
-	}))
-	m.HandleFunc("GET /api/mesa", s.viewer(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, api.MesaCapabilities{Schema: 1, Staged: true, OfficialGPU: false, AgentMin: mesaMinAgent})
-	}))
-	m.HandleFunc("GET /api/devices", s.viewer(s.hDevices))
-	m.HandleFunc("GET /api/devices/{name}", s.viewer(s.hDevice))
-	m.HandleFunc("PATCH /api/devices/{name}", s.maintainer(s.hPatchDevice))
-	m.HandleFunc("DELETE /api/devices/{name}", s.maintainer(s.hForgetDevice))
-	m.HandleFunc("POST /api/devices/{name}/end-enrollment", s.maintainer(s.hEndEnrollment))
-	m.HandleFunc("POST /api/devices/{name}/lease", s.maintainer(s.hLease))
-	m.HandleFunc("DELETE /api/devices/{name}/lease", s.maintainer(s.hRelease))
-	m.HandleFunc("POST /api/devices/{name}/reset", s.maintainer(s.hReset))
-	m.HandleFunc("GET /api/devices/{name}/serial", s.maintainer(s.hSerial))
-	m.HandleFunc("GET /api/devices/{name}/oob", s.viewer(s.hOOBStatus))
-	m.HandleFunc("GET /api/stream", s.viewer(s.hStream))
-	m.HandleFunc("POST /api/devices/{name}/screenshot", s.maintainer(s.hScreenshot))
-	m.HandleFunc("GET /api/devices/{name}/screen", s.viewer(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/screens", s.viewer(s.hScreens))
-	m.HandleFunc("GET /api/devices/{name}/screens/{file}", s.viewer(s.hScreen))
-	m.HandleFunc("GET /api/devices/{name}/logs", s.viewer(s.hLogs))
-	m.HandleFunc("GET /api/devices/{name}/console", s.maintainer(s.hConsoleRaw))
-	m.HandleFunc("POST /api/devices/{name}/console", s.maintainer(s.hConsoleWrite))
-	m.HandleFunc("POST /api/devices/{name}/console/arm", s.maintainer(s.hConsoleArm))
-	m.HandleFunc("POST /api/agent/screen", s.agent(s.hAgentScreen))
-	m.HandleFunc("POST /api/enroll-tokens", s.maintainer(s.hEnrollToken))
-	m.HandleFunc("POST /api/volunteer", s.viewer(s.hVolunteer))
-	m.HandleFunc("GET /api/volunteer/lab-agent", s.viewer(s.hVolunteerAgent))
-	m.HandleFunc("GET /api/join/lab-agent", s.joinToken(s.hVolunteerAgent))
-	m.HandleFunc("GET /api/join/terms", s.joinToken(s.hJoinTerms))
-	m.HandleFunc("DELETE /api/enroll-tokens/{name}", s.maintainer(s.hRevokeEnrollTokens))
-	m.HandleFunc("POST /api/devices/{name}/artifact-grants", s.maintainer(s.hArtifactGrants))
-	m.HandleFunc("POST /api/artifacts", s.maintainer(s.hPutArtifact))
-	m.HandleFunc("POST /api/mesa/jobs", s.maintainer(s.hSubmit))
-	m.HandleFunc("POST /api/jobs", s.maintainer(s.hSubmit))
-	m.HandleFunc("GET /api/jobs", s.viewer(s.hJobs))
-	m.HandleFunc("GET /api/jobs/{id}", s.viewer(s.hJob))
-	m.HandleFunc("GET /api/jobs/{id}/wait", s.viewer(s.hWait))
-	m.HandleFunc("POST /api/jobs/{id}/cancel", s.maintainer(s.hCancel))
-	m.HandleFunc("POST /api/jobs/{id}/retry", s.maintainer(s.hRetry))
-	m.HandleFunc("POST /api/jobs/{id}/publish", s.maintainer(s.hPublish))
-	m.HandleFunc("POST /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
-	m.HandleFunc("DELETE /api/jobs/{id}/exclude", s.maintainer(s.hExclude))
-	m.HandleFunc("GET /api/jobs/{id}/files/{name...}", s.viewer(s.hJobFile))
-	m.HandleFunc("GET /api/gate/{kernel}", s.maintainer(s.hGate))
-	m.HandleFunc("POST /api/builder/poll", s.builderAuth(s.hBuilderPoll))
-	m.HandleFunc("POST /api/builder/builds/{id}/progress", s.builderAuth(s.hBuilderProgress))
-	m.HandleFunc("POST /api/builder/builds/{id}/done", s.builderAuth(s.hBuilderDone))
-	m.HandleFunc("POST /api/builder/artifacts", s.builderAuth(s.hBuilderArtifact))
-	m.HandleFunc("GET /api/builder/artifacts/{sha}", s.builderAuth(s.hBuilderGetArtifact))
-	m.HandleFunc("GET /api/builder/self", s.builderAuth(s.hBuilderSelf))
-	m.HandleFunc("POST /api/builds", s.maintainer(s.hCreateBuild))
-	m.HandleFunc("POST /api/installed/{release}/manifest", s.maintainer(s.hFreezeManifest))
-	m.HandleFunc("POST /api/installed/{release}/entry/{device}", s.maintainer(s.hFreezeEntry))
-	m.HandleFunc("POST /api/installed/{release}/promote", s.maintainer(s.hPromote))
-	m.HandleFunc("GET /api/installed/{release}", s.viewer(s.hInstalledStatus))
-	m.HandleFunc("GET /api/builds", s.viewer(s.hBuilds))
-	m.HandleFunc("GET /api/builds/{id}", s.viewer(s.hBuild))
-	m.HandleFunc("GET /api/builds/{id}/log", s.viewer(s.hBuildLog))
-	m.HandleFunc("GET /api/builds/{id}/files/{name}", s.viewer(s.hBuildFile))
-	m.HandleFunc("POST /api/builds/{id}/cancel", s.maintainer(s.hCancelBuild))
-	m.HandleFunc("GET /api/builders", s.viewer(s.hBuilders))
-	m.HandleFunc("POST /api/builders", s.maintainer(s.hAddBuilder))
-	m.HandleFunc("DELETE /api/builders/{name}", s.maintainer(s.hRemoveBuilder))
-	m.HandleFunc("POST /api/devices/{name}/exec", s.maintainer(s.hExec))
-	m.HandleFunc("GET /api/devices/{name}/audit", s.maintainer(s.hAudit))
-	m.HandleFunc("GET /api/maintainers", s.maintainer(s.hMaintainers))
-	m.HandleFunc("POST /api/maintainers", s.maintainer(s.hAddMaintainer))
-	m.HandleFunc("DELETE /api/maintainers/{name}", s.maintainer(s.hRemoveMaintainer))
+	for _, rt := range s.routes() {
+		s.register(m, rt)
+	}
+	// The UI's own files and themes: no Mac's data, so anyone.
 	web.Register(m, s.basePath())
 	return s.edge(m)
+}
+
+// routes is every API route and who may reach it (see reach).
+func (s *Server) routes() []route {
+	return []route{
+		{"POST /api/agent/enroll", anyone, s.hEnroll},
+		{"POST /api/agent/checkin", ownMac, s.hCheckin},
+		{"POST /api/agent/report", ownMac, s.hReport},
+		{"GET /api/agent/enrollment", ownMac, s.hAgentEnrollment},
+		{"POST /api/agent/left", ownMac, s.hAgentLeave},
+		{"GET /api/agent/artifacts/{sha}", ownMac, s.hAgentArtifact},
+		{"POST /api/agent/upload", ownMac, s.hUpload},
+		{"POST /api/agent/leave", ownMac, s.hLeave},
+		{"GET /api/agent/published", ownMac, s.hAgentPublished},
+
+		{"GET /api/auth", anyone, s.hAuth},
+		// healthz answers that labd is up, to anyone: a Kubernetes probe. It
+		// says nothing else.
+		{"GET /healthz", anyone, func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok\n") }},
+		{"POST /api/devices/{name}/recovery-mode", maintainers, s.hRecoveryMode},
+		{"GET /api/recovery", maintainers, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, api.RecoveryCapabilities{Schema: 1, Modes: []string{api.RecoveryNetworkOnly, api.RecoverySerialAssisted}, PerJobOOBIsolation: true, TransactionIsolation: true})
+		}},
+		{"GET /api/mesa", maintainers, func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, api.MesaCapabilities{Schema: 1, Staged: true, OfficialGPU: false, AgentMin: mesaMinAgent})
+		}},
+		{"GET /api/devices", scoped, s.hDevices},
+		{"GET /api/devices/{name}", macNamed, s.hDevice},
+		{"PATCH /api/devices/{name}", maintainers, s.hPatchDevice},
+		{"DELETE /api/devices/{name}", maintainers, s.hForgetDevice},
+		{"POST /api/devices/{name}/end-enrollment", maintainers, s.hEndEnrollment},
+		{"POST /api/devices/{name}/lease", maintainers, s.hLease},
+		{"DELETE /api/devices/{name}/lease", maintainers, s.hRelease},
+		{"POST /api/devices/{name}/reset", maintainers, s.hReset},
+		{"GET /api/devices/{name}/serial", maintainers, s.hSerial},
+		{"GET /api/devices/{name}/oob", macNamed, s.hOOBStatus},
+		{"GET /api/stream", scoped, s.hStream},
+		{"POST /api/devices/{name}/screenshot", maintainers, s.hScreenshot},
+		{"GET /api/devices/{name}/screen", macNamed, s.hScreen},
+		{"GET /api/devices/{name}/screens", macNamed, s.hScreens},
+		{"GET /api/devices/{name}/screens/{file}", macNamed, s.hScreen},
+		{"GET /api/devices/{name}/logs", macNamed, s.hLogs},
+		{"GET /api/devices/{name}/console", maintainers, s.hConsoleRaw},
+		{"POST /api/devices/{name}/console", maintainers, s.hConsoleWrite},
+		{"POST /api/devices/{name}/console/arm", maintainers, s.hConsoleArm},
+		{"POST /api/agent/screen", ownMac, s.hAgentScreen},
+		{"POST /api/enroll-tokens", maintainers, s.hEnrollToken},
+		{"POST /api/volunteer", people, s.hVolunteer},
+		{"GET /api/volunteer/lab-agent", people, s.hVolunteerAgent},
+		{"GET /api/join/lab-agent", invited, s.hVolunteerAgent},
+		{"GET /api/join/terms", invited, s.hJoinTerms},
+		{"DELETE /api/enroll-tokens/{name}", maintainers, s.hRevokeEnrollTokens},
+		{"POST /api/devices/{name}/artifact-grants", maintainers, s.hArtifactGrants},
+		{"POST /api/artifacts", maintainers, s.hPutArtifact},
+		{"POST /api/mesa/jobs", maintainers, s.hSubmit},
+		{"POST /api/jobs", maintainers, s.hSubmit},
+		{"GET /api/jobs", scoped, s.hJobs},
+		{"GET /api/jobs/{id}", jobNamed, s.hJob},
+		{"GET /api/jobs/{id}/wait", jobNamed, s.hWait},
+		{"POST /api/jobs/{id}/cancel", maintainers, s.hCancel},
+		{"POST /api/jobs/{id}/retry", maintainers, s.hRetry},
+		{"POST /api/jobs/{id}/publish", maintainers, s.hPublish},
+		{"POST /api/jobs/{id}/exclude", maintainers, s.hExclude},
+		{"DELETE /api/jobs/{id}/exclude", maintainers, s.hExclude},
+		{"GET /api/jobs/{id}/files/{name...}", jobNamed, s.hJobFile},
+		{"GET /api/gate/{kernel}", maintainers, s.hGate},
+		{"POST /api/builder/poll", builder, s.hBuilderPoll},
+		{"POST /api/builder/builds/{id}/progress", builder, s.hBuilderProgress},
+		{"POST /api/builder/builds/{id}/done", builder, s.hBuilderDone},
+		{"POST /api/builder/artifacts", builder, s.hBuilderArtifact},
+		{"GET /api/builder/artifacts/{sha}", builder, s.hBuilderGetArtifact},
+		{"GET /api/builder/self", builder, s.hBuilderSelf},
+		{"POST /api/builds", maintainers, s.hCreateBuild},
+		{"POST /api/installed/{release}/manifest", maintainers, s.hFreezeManifest},
+		{"POST /api/installed/{release}/entry/{device}", maintainers, s.hFreezeEntry},
+		{"POST /api/installed/{release}/promote", maintainers, s.hPromote},
+		{"GET /api/installed/{release}", maintainers, s.hInstalledStatus},
+		{"GET /api/builds", maintainers, s.hBuilds},
+		{"GET /api/builds/{id}", maintainers, s.hBuild},
+		{"GET /api/builds/{id}/log", maintainers, s.hBuildLog},
+		{"GET /api/builds/{id}/files/{name}", maintainers, s.hBuildFile},
+		{"POST /api/builds/{id}/cancel", maintainers, s.hCancelBuild},
+		{"GET /api/builders", maintainers, s.hBuilders},
+		{"POST /api/builders", maintainers, s.hAddBuilder},
+		{"DELETE /api/builders/{name}", maintainers, s.hRemoveBuilder},
+		{"POST /api/devices/{name}/exec", maintainers, s.hExec},
+		{"GET /api/devices/{name}/audit", maintainers, s.hAudit},
+		{"GET /api/maintainers", maintainers, s.hMaintainers},
+		{"POST /api/maintainers", maintainers, s.hAddMaintainer},
+		{"DELETE /api/maintainers/{name}", maintainers, s.hRemoveMaintainer},
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -686,6 +713,18 @@ func (s *Server) hEnrollToken(w http.ResponseWriter, r *http.Request) {
 	if !reName.MatchString(req.Name) {
 		httpErr(w, 400, "device name must be lowercase letters, digits and dashes")
 		return
+	}
+	if req.VolunteerLogin != "" {
+		if strings.TrimSpace(req.VolunteerName) == "" {
+			httpErr(w, 400, "a Volunteer's login goes on a Volunteer's token, with their name and contact")
+			return
+		}
+		l, err := volunteerLogin(req.VolunteerLogin)
+		if err != nil {
+			httpErr(w, 400, "%v", err)
+			return
+		}
+		req.VolunteerLogin = l
 	}
 	// Activation is one-time, so a Mac that enrolled but never checked in
 	// still holds its name: a new token for it would only be refused.
@@ -795,6 +834,8 @@ func decodeBody(w http.ResponseWriter, r *http.Request, max int64, v any) bool {
 
 // volunteerMacsLocked names the Macs that login's volunteer tokens enrolled,
 // left ones included until lab forget drops them. The caller holds s.mu.
+// Macs a Maintainer linked to the login don't count: the limit keeps one
+// person from filling the lab, and a Maintainer chose to let those in.
 func (s *Server) volunteerMacsLocked(login string) []string {
 	var names []string
 	for name, v := range s.devs {
@@ -812,25 +853,20 @@ func tooManyMacs(w http.ResponseWriter, login string, names []string) {
 		"(./volunteer leave on it, then the lab's maintainer runs `lab forget <name>`)", login, len(names), strings.Join(names, ", "))
 }
 
-// hVolunteer gives anyone who may look at the lab, such as any tailnet peer
-// under --tailscale, a token to enroll their own Mac: ./volunteer runs
-// lab-agent setup with it. The Mac is named after what it sent, made into a
-// free device name, labelled with the volunteer's tailnet login and marked a
-// volunteer's. Tagged tailnet devices are machines, lab Macs among them, not
-// people, so they get no token, and a person with maxVolunteerMacs Macs in
-// the lab gets none either. Maintainers may ask too, with their token,
-// outside the limits: they can make any token with POST /api/enroll-tokens
-// anyway.
+// hVolunteer gives any person on the tailnet under --tailscale a token to
+// enroll their own Mac: ./volunteer runs lab-agent setup with it. The Mac is
+// named after what it sent, made into a free device name, labelled with the
+// volunteer's tailnet login and marked a volunteer's. Tagged tailnet devices
+// are machines, lab Macs among them, not people, so they never get here (see
+// tokenless), and a person with maxVolunteerMacs Macs in the lab gets no
+// token either. Maintainers may ask too, with their token, outside the
+// limits: they can make any token with POST /api/enroll-tokens anyway.
 func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	a, who := s.access(r)
 	volunteer := ""
 	if a == adminAccess {
 		who = "" // a Maintainer, not a volunteer's tailnet login
 	} else {
-		if s.taggedPeer(r) {
-			httpErr(w, 403, "%s is a tagged tailnet device, a machine rather than a person: only a person may volunteer a Mac", who)
-			return
-		}
 		if volunteer = strings.ToLower(who); volunteer == "" {
 			httpErr(w, 403, "labd can't tell who you are on the tailnet")
 			return
@@ -848,6 +884,9 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Label, req.Volunteer = who, true
+	// Only a Maintainer links a login (POST /api/enroll-tokens): a person's
+	// Mac is theirs alone.
+	req.VolunteerLogin = ""
 	if volunteer != "" { // a tailnet login is all labd knows of the person
 		req.VolunteerName, req.Contact = who, who
 	}
@@ -860,12 +899,6 @@ func (s *Server) hVolunteer(w http.ResponseWriter, r *http.Request) {
 	}
 	s.log.Printf("enroll token for %s, asked for by volunteer %s", req.Name, orStr(who, "(Maintainer "+maintainerName(r)+")"))
 	s.issueToken(w, r, req, volunteer)
-}
-
-// taggedPeer reports whether r comes from a tagged tailnet device.
-func (s *Server) taggedPeer(r *http.Request) bool {
-	p := s.tailnetPeer(r)
-	return p != nil && len(p.Tags) > 0
 }
 
 var reNameRun = regexp.MustCompile(`[^a-z0-9]+`)
@@ -954,7 +987,7 @@ func (s *Server) hEnroll(w http.ResponseWriter, r *http.Request) {
 	if keyHash == "" { // an older lab-agent: no enrolling again with this token
 		keyHash = "none-" + randHex(16)
 	}
-	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy,
+	d := api.Device{ID: "d-" + randHex(6), Name: t.Name, Label: t.Label, Model: t.Model, VolunteeredBy: t.VolunteeredBy, LinkedLogin: t.VolunteerLogin,
 		State: api.StateNew, StateReason: "enrolled; run a baseline job", Facts: req.Facts, Enrollment: enrollment(t, api.Enrollment{}),
 		TermsSHA256: req.TermsSHA256, TermsAccepted: s.now()}
 	d.Volunteer = d.IsVolunteer()
@@ -1091,9 +1124,9 @@ func (s *Server) hReport(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, reportBodyMax, &rep) {
 		return
 	}
-	agentDev(r).report(rep)
+	forgotten, wanted := agentDev(r).report(rep)
 	agentDev(r).copyAudit(rep.Audit)
-	w.Write([]byte("ok"))
+	writeJSON(w, api.ReportReply{Forgotten: forgotten, Proto: 1, Wanted: wanted})
 }
 
 var reSHA = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -1140,10 +1173,14 @@ func (s *Server) view(v *dev) DeviceView {
 	return v.viewLocked()
 }
 
+// hDevices lists the Macs the caller sees.
 func (s *Server) hDevices(w http.ResponseWriter, r *http.Request) {
+	c := callerOf(r)
 	out := []DeviceView{}
 	for _, v := range s.allDevs() {
-		out = append(out, s.view(v))
+		if s.sees(c, v.d.Name) {
+			out = append(out, s.view(v))
+		}
 	}
 	writeJSON(w, out)
 }
@@ -1175,7 +1212,32 @@ func (s *Server) hPatchDevice(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "%v", err)
 		return
 	}
+	link := ""
+	if p.VolunteerLogin != nil && *p.VolunteerLogin != "" {
+		var err error
+		if link, err = volunteerLogin(*p.VolunteerLogin); err != nil {
+			httpErr(w, 400, "%v", err)
+			return
+		}
+	}
 	v.mu.Lock()
+	if p.VolunteerLogin != nil {
+		// Checked before anything changes: a refused link leaves the Mac as it was.
+		switch {
+		case !v.d.IsVolunteer():
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is a Lab-owned Mac: only a Volunteer's Mac is linked to a login", v.d.Name)
+			return
+		case v.volunteeredBy != "":
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is %s's, who volunteered it with ./volunteer: it can't be linked to another login", v.d.Name, v.volunteeredBy)
+			return
+		}
+		if old := v.d.LinkedLogin; old != link {
+			s.log.Printf("Maintainer %s linked %s to %q (was %q)", maintainerName(r), v.d.Name, link, old)
+		}
+		v.d.LinkedLogin = link
+	}
 	if p.Label != nil {
 		v.d.Label = *p.Label
 	}
@@ -1223,6 +1285,23 @@ func (s *Server) hForgetDevice(w http.ResponseWriter, r *http.Request) {
 // write the row back, and Submit queues nothing more on it. A lease held by
 // holder doesn't count; force skips the lease and live-agent checks, never
 // the job check.
+// dropNamedState clears what labd keeps under a forgotten Mac's name, since
+// the name can be taken again by another Mac, or another person's: its
+// screens, serial log and baselines go; its Audit log is kept, renamed after
+// the enrollment (id), for Maintainers. Its jobs stay, for Maintainers only
+// (seesJob).
+func (s *Server) dropNamedState(name, id string) {
+	for _, p := range []string{s.screenDir(name), s.serialPath(name), s.baselinePath(name), s.omtBaselinePath(name)} {
+		if err := os.RemoveAll(p); err != nil {
+			s.log.Printf("forget %s: %v", name, err)
+		}
+	}
+	a := s.auditPath(name)
+	if err := os.Rename(a, strings.TrimSuffix(a, ".jsonl")+"."+id+".jsonl"); err != nil && !os.IsNotExist(err) {
+		s.log.Printf("forget %s: audit log: %v", name, err)
+	}
+}
+
 func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -1236,12 +1315,18 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	if err != nil {
 		return 500, err
 	}
+	l := v.d.Lease
+	leased := l != nil && s.now().Before(l.Expires)
+	if leased && len(v.parked) > 0 {
+		return 409, fmt.Errorf("%s has %d queued jobs set aside by %s's lease until %s: end the lease (`lab release %s --force`) so they run, or cancel them, first",
+			name, len(v.parked), l.Who(), l.Expires.Format(time.DateTime), name)
+	}
 	if v.d.State == api.StateBusy || v.d.State == api.StateRecovering || len(v.queue) > 0 || len(open) > 0 {
 		return 409, fmt.Errorf("%s has a job running or queued; cancel it first", name)
 	}
-	if l := v.d.Lease; !force && l != nil && s.now().Before(l.Expires) && l.Holder != holder {
-		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s --holder %s`), or pass --force",
-			name, l.Holder, l.Expires.Format(time.DateTime), name, l.Holder)
+	if !force && leased && l.Holder != holder {
+		return 409, fmt.Errorf("%s is leased by %s until %s: release the lease first (`lab release %s`, or `lab release %s --force` if it is another Maintainer's), or pass --force",
+			name, l.Who(), l.Expires.Format(time.DateTime), name, name)
 	}
 	// An agent that told labd it is leaving may still check in until
 	// uninstall has stopped it. Any other one that checks in is still set up,
@@ -1264,6 +1349,7 @@ func (s *Server) forget(v *dev, holder string, force bool) (int, error) {
 	}
 	v.oobStop, v.oob, v.serialUp = nil, nil, false
 	close(v.gone)
+	s.dropNamedState(name, v.d.ID)
 	return 200, nil
 }
 
@@ -1281,17 +1367,18 @@ func (s *Server) hLease(w http.ResponseWriter, r *http.Request) {
 	if req.TTLSec <= 0 {
 		req.TTLSec = 3600
 	}
+	me := maintainerName(r)
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && s.now().Before(l.Expires) && l.Holder != req.Holder {
-		httpErr(w, 409, "%s is leased by %s until %s", v.d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+	if why := v.leaseHoldsBackLocked(req.Holder, me); why != "" {
+		httpErr(w, 409, "%s", why)
 		return
 	}
-	if v.d.IsVolunteer() && v.openUntilLocked().IsZero() {
-		httpErr(w, 409, "%s's Availability window is closed: a lease on a Volunteer's Mac lasts only inside it", v.d.Name)
+	if err := s.mayDoLocked(callerOf(r), v, actLease); err != nil {
+		httpErr(w, 409, "%v", err)
 		return
 	}
-	v.d.Lease = &api.Lease{Holder: req.Holder, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
+	v.d.Lease = &api.Lease{Holder: req.Holder, Maintainer: me, By: me, Expires: s.now().Add(time.Duration(req.TTLSec) * time.Second)}
 	v.capLeaseLocked()
 	v.saveLocked()
 	writeJSON(w, v.d.Lease)
@@ -1303,14 +1390,35 @@ func (s *Server) hRelease(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	holder := r.URL.Query().Get("holder")
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	me := maintainerName(r)
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if l := v.d.Lease; l != nil && holder != "" && l.Holder != holder && s.now().Before(l.Expires) {
-		httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
-		return
+	l := v.d.Lease
+	live := l != nil && s.now().Before(l.Expires)
+	if live && !force {
+		// Only the Maintainer who took a lease ends it early, unless another
+		// Maintainer forces it: one forgotten would otherwise hold the Mac.
+		if l.Owner() != "" && l.Owner() != me {
+			v.mu.Unlock()
+			httpErr(w, 409, "%s is leased by %s until %s; only %s can release it, or another Maintainer with `lab release %s --force`", v.d.Name, l.Who(), l.Expires.Format(time.TimeOnly), l.Owner(), v.d.Name)
+			return
+		}
+		if holder != "" && l.Holder != holder {
+			v.mu.Unlock()
+			httpErr(w, 409, "leased by %s, not %s", l.Holder, holder)
+			return
+		}
 	}
-	v.d.Lease = nil
-	v.saveLocked()
+	forced := live && force && (l.Owner() != me || (holder != "" && l.Holder != holder))
+	v.mu.Unlock()
+	if forced {
+		if !s.endLease(v, l, "ended early by Maintainer "+me+" (lab release --force)") {
+			httpErr(w, 409, "%s's lease changed meanwhile; look again before releasing it", v.d.Name)
+			return
+		}
+	} else {
+		s.endLease(v, nil, "")
+	}
 	w.Write([]byte("ok"))
 }
 
@@ -1334,8 +1442,8 @@ func (s *Server) hReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A reset reboots the Mac, so a lease fences it like a job.
-	if lease != nil && s.now().Before(lease.Expires) && lease.Holder != by {
-		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Holder, lease.Expires.Format(time.DateTime))
+	if lease != nil && s.now().Before(lease.Expires) && !lease.HeldBy(by, maintainerName(r)) {
+		httpErr(w, 409, "%s is leased by %s until %s; only the lease holder can reset it", v.d.Name, lease.Who(), lease.Expires.Format(time.DateTime))
 		return
 	}
 	back, err := s.rejoin(v, "reset requested by "+orStr(by, "an admin"))
@@ -1508,6 +1616,18 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
+const watchdogRequireMinAgent = "0.8.1"
+
+func validateRequiredWatchdog(tests []api.TestSpec, d api.Device) error {
+	for _, t := range tests {
+		if t.RequireWatchdog && !versionAtLeast(d.Facts.AgentVersion, watchdogRequireMinAgent) {
+			return fmt.Errorf("%s runs lab-agent %s; test %s requires watchdog support from %s or later",
+				d.Name, orStr(d.Facts.AgentVersion, "(unknown)"), t.Name, watchdogRequireMinAgent)
+		}
+	}
+	return nil
+}
+
 // submit queues a job for the Maintainer who asked; retryOf names the job it retries, whose source may
 // come with the kernel already built from it, and notes go in the job's
 // events after the first. The job records what lab gate needs to know about
@@ -1576,7 +1696,7 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 		}
 	}
 	if why := needsFull(spec); why != "" {
-		if err := refuseAtAccessLevel(v.snapshot(), "Maintainer's script ("+why+")"); err != nil {
+		if err := s.mayDo(callerFor(maintainer), v, actScript(why)); err != nil {
 			return nil, 403, err
 		}
 	}
@@ -1586,6 +1706,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	d := s.view(v)
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
+	}
+	if err := validateRequiredWatchdog(spec.Tests, d.Device); err != nil {
+		return nil, 409, err
 	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {
@@ -1625,19 +1748,26 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 		if code, err := s.validateInstalled(spec, d.Device); err != nil {
 			return nil, code, err
 		}
-		if p := installedPreflight(d.Facts.Problems); !d.Facts.PreflightOK && len(p) > 0 {
+	}
+	if spec.InstalledManifest != "" || spec.Baseline {
+		// An install removes the known-good kernel by design, and a baseline is
+		// how the running kernel takes its place after a distro kernel update.
+		if p := withoutStaleKnownGood(d.Facts.Problems); !d.Facts.PreflightOK && len(p) > 0 {
 			return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, strings.Join(p, "; "))
 		}
 	} else if !d.Facts.PreflightOK {
-		return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, strings.Join(d.Facts.Problems, "; "))
+		return nil, 409, fmt.Errorf("%s fails preflight: %s", d.Name, preflightProblems(d.Device))
 	}
 	if spec.Mesa != nil {
 		if code, err := s.validateMesa(spec, d.Device); err != nil {
 			return nil, code, err
 		}
 	}
-	if l := d.Lease; l != nil && l.Holder != spec.Holder {
-		return nil, 409, fmt.Errorf("%s is leased by %s until %s", d.Name, l.Holder, l.Expires.Format(time.TimeOnly))
+	v.mu.Lock()
+	leased := v.leaseHoldsBackLocked(spec.Holder, maintainer)
+	v.mu.Unlock()
+	if leased != "" {
+		return nil, 409, errors.New(leased)
 	}
 	now := s.now()
 	msg := "queued"
@@ -1680,12 +1810,26 @@ func (s *Server) hRetry(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, j)
 }
 
+// hJobs lists the newest jobs on the Macs the caller sees; ?device= keeps
+// to one of them.
 func (s *Server) hJobs(w http.ResponseWriter, r *http.Request) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if n <= 0 {
 		n = 20
 	}
-	jobs, err := s.store.jobs(r.URL.Query().Get("device"), n, false)
+	c, device := callerOf(r), r.URL.Query().Get("device")
+	var (
+		jobs []*api.Job
+		err  error
+	)
+	switch {
+	case c.maintainer != "":
+		jobs, err = s.store.jobs(device, n, false)
+	default:
+		// By enrollment, not name: a Mac's name may have been someone else's
+		// Mac before it was forgotten (seesJob).
+		jobs, err = s.store.jobsOfEnrollments(s.seenEnrollments(c, device), n)
+	}
 	if err != nil {
 		httpErr(w, 500, "%v", err)
 		return
@@ -1713,9 +1857,12 @@ func (s *Server) hWait(w http.ResponseWriter, r *http.Request) {
 		sec = 60
 	}
 	deadline := s.now().Add(time.Duration(sec) * time.Second)
+	c := callerOf(r)
 	for {
+		// jobInScope asked once, but a wait lasts up to an hour: a person a
+		// Maintainer unlinks meanwhile gets nothing more of the job.
 		j, err := s.store.job(id)
-		if err != nil {
+		if err != nil || !s.seesJob(c, j) {
 			httpErr(w, 404, "no job %s", id)
 			return
 		}

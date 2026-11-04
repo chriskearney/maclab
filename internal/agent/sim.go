@@ -27,8 +27,11 @@ import (
 // Wi-Fi fails in omarchy-m-test), panic (at boot),
 // hang (at boot), silent (hang with no serial output), crash-in-test,
 // reboot-in-test (reboots with no kernel message), hang-in-test (goes silent
-// for HangFor, then a watchdog resets it, again with no kernel message) and
-// no-network (boots to the login prompt, then never reaches labd). A field
+// for HangFor, then a watchdog resets it, again with no kernel message),
+// crash-after-boot (reaches labd, then reboots with no kernel message as labd
+// takes its first screenshot, which never answers), crash-after-tests (the
+// same, at the first screenshot after a test ran) and no-network (boots to
+// the login prompt, then never reaches labd). A field
 // apple_wdt=n says the kernel was built without apple_wdt.
 // A test named suspend-* puts it to sleep for SuspendFor, announcing it the way
 // logind does; one named quiet-suspend-* sleeps without announcing it. The
@@ -59,6 +62,7 @@ type Sim struct {
 	armed        string
 	staged       map[string]simEntry
 	behavior     string
+	tested       bool // a test has run on this boot
 	gen          int
 	kmsg         chan string
 	Boots        int
@@ -81,6 +85,9 @@ type Sim struct {
 	CollectHook func(boot, outDir string) error
 	// PackagedKernels are releases installed as packages (installed-mode jobs).
 	PackagedKernels []string
+	// removedKernels are kernel packages a distro update took off the Mac;
+	// see UpgradeKernel.
+	removedKernels []string
 	// installHook, when set, is called with the Release before the simulated
 	// installer installs it; see SetInstallHook. installs are the Releases it
 	// installed, in order.
@@ -89,6 +96,13 @@ type Sim struct {
 
 	stageFail  func(attempt int) error
 	stageTries int
+
+	armFail func(arm int) (wrote bool, err error) // see FailArm
+	arms    int
+	bootOps []string // see BootOps
+	// rebootFails and cancelFails are how many plain reboots and one-shot
+	// cancels fail before they work again; see FailReboots and FailCancels.
+	rebootFails, cancelFails int
 
 	// A Volunteer's Mac. Every knob is off by default.
 	// Encrypted holds every cold boot at the disk password prompt until TypePassword.
@@ -181,8 +195,48 @@ func (s *Sim) Facts() api.Facts {
 	if model == "" {
 		model = "Simulated Mac"
 	}
-	return api.Facts{Hostname: "sim", Machine: "aarch64", DTModel: model, Bootloader: "grub",
+	f := api.Facts{Hostname: "sim", Machine: "aarch64", DTModel: model, Bootloader: "grub",
 		Initramfs: "mkinitcpio", GUIUser: "sim", Watchdog: true, WatchdogArmed: true, PanicTimeout: 10, PreflightOK: true}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if kg := s.knownGoodLocked(); slices.Contains(s.removedKernels, kg) {
+		f.Problems, f.PreflightOK = []string{"known-good kernel " + kg + " is no longer installed"}, false
+	}
+	return f
+}
+
+// knownGoodLocked is the agent's recorded known-good kernel.
+func (s *Sim) knownGoodLocked() string {
+	if s.RecordedKnownGood != "" {
+		return s.RecordedKnownGood
+	}
+	return SimKnownGood
+}
+
+// UpgradeKernel is a distro update (pacman -Syu) replacing the kernel package
+// a plain reboot boots with krel, which then boots instead. The kernel it
+// replaced is no longer installed. The Mac boots krel at its next reboot.
+func (s *Sim) UpgradeKernel(krel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	old := s.DefaultKernel
+	if old == "" {
+		old = SimKnownGood
+	}
+	s.removedKernels = append(s.removedKernels, old)
+	s.PackagedKernels = append(slices.DeleteFunc(s.PackagedKernels, func(k string) bool { return k == old }), krel)
+	s.DefaultKernel = krel
+}
+
+// SetDefaultKernel makes krel, an installed kernel package, what a plain
+// reboot boots, as choosing another default entry in the bootloader does.
+func (s *Sim) SetDefaultKernel(krel string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !slices.Contains(s.PackagedKernels, krel) {
+		s.PackagedKernels = append(s.PackagedKernels, krel)
+	}
+	s.DefaultKernel = krel
 }
 
 // SetSnapshotable says whether the simulated Mac's @ can be snapshotted
@@ -238,6 +292,57 @@ func (s *Sim) FailStage(f func(attempt int) error) {
 	s.stageFail, s.stageTries = f, 0
 }
 
+// FailArm makes arming the one-shot fail where f says: it is called with
+// each arm's number from 1, and an error fails that arm, after the one-shot
+// is written if wrote, as a persist or readback failing would.
+func (s *Sim) FailArm(f func(arm int) (wrote bool, err error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.armFail, s.arms = f, 0
+}
+
+// BootOps are the boot-menu operations in the order they happened: "arm",
+// "cancel", "quiesce", "resume" and "reboot".
+func (s *Sim) BootOps() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.bootOps...)
+}
+
+func (s *Sim) QuiesceBootSync() (resume func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootOps = append(s.bootOps, "quiesce")
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.bootOps = append(s.bootOps, "resume")
+	}
+}
+
+// FailReboots makes the next n plain reboots fail, as an inhibited or
+// refused systemctl reboot would: the Mac stays up.
+func (s *Sim) FailReboots(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rebootFails = n
+}
+
+// FailCancels makes the next n one-shot cancels fail, as one waiting on the
+// boot-partition lock would: the one-shot stays armed.
+func (s *Sim) FailCancels(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cancelFails = n
+}
+
+// Armed is the one-shot boot entry, "" if none.
+func (s *Sim) Armed() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.armed
+}
+
 // Quiet makes the machine unreachable for d on the same boot, as a network
 // outage would: no check-ins, no reports, and whatever runs carries on.
 func (s *Sim) Quiet(d time.Duration) { s.suspend(d, false) }
@@ -270,7 +375,14 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 		s.mu.Unlock()
 		return api.StageResult{KernelRelease: in.Release, Entry: entryPrefix + job, Cmdline: cmdline}, nil
 	}
-	e := simEntry{krel: SimKnownGood, behavior: "ok"}
+	s.mu.Lock()
+	kg := s.knownGoodLocked()
+	gone := slices.Contains(s.removedKernels, kg)
+	s.mu.Unlock()
+	if gone && a.Artifact == "" {
+		return api.StageResult{}, fmt.Errorf("known-good kernel %s is no longer installed", kg)
+	}
+	e := simEntry{krel: kg, behavior: "ok"}
 	if a.Artifact != "" {
 		p := filepath.Join(s.WorkDir, job+".art")
 		if err := fetch(ctx, a.Artifact, p); err != nil {
@@ -301,11 +413,33 @@ func (s *Sim) Stage(ctx context.Context, job string, a api.StageArgs, fetch Fetc
 	return api.StageResult{KernelRelease: e.krel, Entry: entryPrefix + job, Cmdline: e.cmdline, NoAppleWDT: e.noAppleWDT}, nil
 }
 
+func (s *Sim) CancelBootOnce() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.bootOps = append(s.bootOps, "cancel")
+	if s.cancelFails > 0 {
+		s.cancelFails--
+		return errors.New("boot partition lock: held for a minute")
+	}
+	s.armed = ""
+	return nil
+}
+
 func (s *Sim) BootOnce(entry string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.staged[strings.TrimPrefix(entry, entryPrefix)]; !ok {
 		return fmt.Errorf("entry %s is not staged", entry)
+	}
+	s.arms++
+	s.bootOps = append(s.bootOps, "arm")
+	if s.armFail != nil {
+		if wrote, err := s.armFail(s.arms); err != nil {
+			if wrote {
+				s.armed = entry
+			}
+			return err
+		}
 	}
 	s.armed = entry
 	return nil
@@ -356,7 +490,18 @@ func (s *Sim) SetInstalledObs(f func(phase, job, bootID, kernel, cmdline string)
 	s.InstalledObs = f
 }
 
-func (s *Sim) Reboot() error { s.boot("reboot: Restarting system"); return nil }
+func (s *Sim) Reboot() error {
+	s.mu.Lock()
+	s.bootOps = append(s.bootOps, "reboot")
+	if s.rebootFails > 0 {
+		s.rebootFails--
+		s.mu.Unlock()
+		return errors.New("systemctl reboot: inhibited")
+	}
+	s.mu.Unlock()
+	s.boot("reboot: Restarting system")
+	return nil
+}
 
 // OpenWatchdog fails: the Sim has no hardware watchdog.
 func (s *Sim) OpenWatchdog() (io.Writer, error) { return nil, errors.New("no hardware watchdog") }
@@ -447,6 +592,7 @@ func (s *Sim) up(gen int, e simEntry) {
 		return
 	}
 	s.kernel, s.cmdline, s.behavior, s.noAppleWDT = e.krel, e.cmdline, e.behavior, e.noAppleWDT
+	s.tested = false
 	s.alive = e.behavior != "no-network" // up, but labd never hears from it
 	if unit := s.earlyUnit; unit != nil {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -637,6 +783,7 @@ func (s *Sim) Inhibitors() []string {
 func (s *Sim) RunTest(ctx context.Context, job string, t api.TestSpec, fetch Fetcher, quiet Quieter, outDir string) api.TestResult {
 	s.mu.Lock()
 	b, length, down := s.behavior, s.testLength, s.down
+	s.tested = true
 	s.mu.Unlock()
 	if length > 0 {
 		wait := time.NewTimer(length)
@@ -733,8 +880,13 @@ func (s *Sim) Collect(ctx context.Context, boot, outDir string) error {
 
 func (s *Sim) Screenshot(ctx context.Context, path string, wait time.Duration) (int, int, error) {
 	s.mu.Lock()
-	k := s.kernel
+	k, b, tested := s.kernel, s.behavior, s.tested
 	s.mu.Unlock()
+	if b == "crash-after-boot" || b == "crash-after-tests" && tested {
+		s.boot("")
+		<-ctx.Done()
+		return 0, 0, errors.New("machine went away")
+	}
 	const w, h = 640, 400
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
 	// A desktop-ish frame: dark background, a bar, and a window whose tint encodes the kernel.
@@ -865,6 +1017,10 @@ func (s *Sim) RecordKnownGood(kernel string) error {
 	defer s.mu.Unlock()
 	if s.kernel != kernel || strings.Contains(s.cmdline, "maclab.job=") {
 		return fmt.Errorf("running %s (%q), not %s outside a lab boot", s.kernel, s.cmdline, kernel)
+	}
+	if slices.Contains(s.removedKernels, kernel) {
+		// the running kernel's package was updated away, and it has not rebooted since
+		return fmt.Errorf("running kernel %s has no /usr/lib/modules/%s/vmlinuz to build a baseline UKI from", kernel, kernel)
 	}
 	s.RecordedKnownGood = kernel
 	return nil

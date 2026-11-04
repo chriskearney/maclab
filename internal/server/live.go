@@ -74,9 +74,11 @@ func (h *hub) unsubscribe(s *sub) {
 	h.mu.Unlock()
 }
 
-// hStream serves server-sent events: device, job, serial, kevent, screen.
-// ?device= limits it to one Mac. Browsers read it with fetch (EventSource
-// cannot send the Authorization header).
+// hStream serves server-sent events: device, job, serial, kevent, screen,
+// build. ?device= limits it to one Mac. A caller gets only the events of the
+// Macs they see (see sees), and the fleet's own (builds) only as a
+// Maintainer. Browsers read it with fetch (EventSource cannot send the
+// Authorization header).
 func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
@@ -86,10 +88,10 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
-	// Serial lines carry the console (lab shell, serial lab exec), so only admins
-	// get them, as with the stored serial log.
-	a, _ := s.access(r)
-	serial := a == adminAccess
+	// Serial lines carry the console (lab shell, serial lab exec), so only
+	// Maintainers get them, as with the stored serial log.
+	c := callerOf(r)
+	serial := c.maintainer != ""
 	sb := s.hub.subscribe(r.URL.Query().Get("device"))
 	defer s.hub.unsubscribe(sb)
 	fmt.Fprint(w, ": maclab stream\n\n")
@@ -105,7 +107,7 @@ func (s *Server) hStream(w http.ResponseWriter, r *http.Request) {
 		case <-keep.C():
 			fmt.Fprint(w, ": keepalive\n\n")
 		case e := <-sb.ch:
-			if e.kind == "serial" && !serial {
+			if (e.kind == "serial" && !serial) || !s.sees(c, e.device) {
 				continue
 			}
 			fmt.Fprintf(w, "event: %s\ndata: %s\n\n", e.kind, e.data)
@@ -127,7 +129,7 @@ func (v *dev) viewLocked() DeviceView {
 		oob.Token = ""
 		d.OOB = &oob
 	}
-	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue), ScreenAt: v.screenAt}
+	return DeviceView{Device: d, Tier: d.Tier(), Alive: v.aliveLocked(), Queued: len(v.queue) + len(v.parked), ScreenAt: v.screenAt}
 }
 
 // publishLocked sends the device to the web UI, which adds a device it
@@ -213,8 +215,8 @@ func (s *Server) hScreenshot(w http.ResponseWriter, r *http.Request) {
 	if v == nil {
 		return
 	}
-	if why := v.refuseWatching(); why != "" {
-		httpErr(w, 409, "%s", why)
+	if err := s.mayDo(callerOf(r), v, actWatch); err != nil {
+		httpErr(w, 409, "%v", err)
 		return
 	}
 	v.shotMu.Lock()
@@ -280,8 +282,8 @@ func (s *Server) hLogs(w http.ResponseWriter, r *http.Request) {
 	if v == nil {
 		return
 	}
-	if why := v.refuseWatching(); why != "" {
-		httpErr(w, 409, "%s", why)
+	if err := s.mayDo(callerOf(r), v, actWatch); err != nil {
+		httpErr(w, 409, "%v", err)
 		return
 	}
 	v.mu.Lock()
@@ -297,6 +299,12 @@ func (s *Server) hLogs(w http.ResponseWriter, r *http.Request) {
 	var out string
 	if err := v.call(r.Context(), api.CmdLogs, "", args, 45*time.Second, &out); err != nil {
 		httpErr(w, 502, "%v", err)
+		return
+	}
+	// The Mac may take up to 45 s to answer: a person a Maintainer unlinked
+	// meanwhile doesn't get its journal.
+	if !s.sees(callerOf(r), r.PathValue("name")) {
+		httpErr(w, 404, "no device %q", r.PathValue("name"))
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")

@@ -6,6 +6,7 @@ import (
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/oob"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
@@ -243,7 +244,7 @@ func TestRecoveryTransactionIsolatesExecBeforeAnyJob(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/", strings.NewReader(q))
 	req.SetPathValue("name", l.name)
-	l.s.hRecoveryMode(rec, req)
+	l.s.hRecoveryMode(rec, byMaintainer(req))
 	if rec.Code != 200 {
 		t.Fatal(rec.Code, rec.Body.String())
 	}
@@ -261,7 +262,7 @@ func TestRecoveryTransactionIsolatesExecBeforeAnyJob(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("POST", "/", strings.NewReader(`{"command":"DO_NOT_EXECUTE"}`))
 	req.SetPathValue("name", l.name)
-	l.s.hExec(rec, req)
+	l.s.hExec(rec, byMaintainer(req))
 	if rec.Code != 409 || c.counts() != before {
 		t.Fatal("pre-job serial fallback escaped transaction", rec.Code, c.counts())
 	}
@@ -287,8 +288,14 @@ func TestRecoveryTransactionRefusesForeignLeaseBeforeControllerUse(t *testing.T)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"mode":"serial-assisted","holder":"foreign","transaction":"wrong"}`))
 	req.SetPathValue("name", l.name)
-	l.s.hRecoveryMode(rec, req)
+	l.s.hRecoveryMode(rec, byMaintainer(req))
 	if rec.Code != 409 || c.counts() != before {
 		t.Fatal("foreign lease touched controller", rec.Code, c.counts())
 	}
+}
+
+// byMaintainer is req as a Maintainer's, for a handler called past the
+// routes' own wrappers.
+func byMaintainer(req *http.Request) *http.Request {
+	return req.WithContext(context.WithValue(req.Context(), maintainerKey{}, "ada"))
 }

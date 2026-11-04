@@ -5,6 +5,33 @@
 # Out: /io/out/{kernel,module-build}.tar.zst, /io/release, /io/kernel
 # Keeps /cache bounded: one shared git store, one reused worktree, two build dirs, capped ccache.
 set -euo pipefail
+
+# toolchain_for CONFIG: "llvm" for a config built with clang (linux-aurora's are clang + LLD),
+# else "gnu". make must use the same toolchain, or olddefconfig rewrites CC_IS_*, LD_IS_*,
+# AS_IS_* and every option that depends on them.
+toolchain_for() {
+  if grep -q '^CONFIG_CC_IS_CLANG=y' "$1"; then echo llvm; else echo gnu; fi
+}
+
+# config_report IN OUT (run in the source tree): warn about what olddefconfig changed.
+# scripts/diffconfig prints "-SYM val" (gone), "+SYM val" (new), " SYM old -> new" (changed).
+config_report() {
+  ./scripts/diffconfig "$1" "$2" | awk '
+    { s = $1; sub(/^[-+]/, "", s); toolchain = s ~ /^(CC|LD|AS)_IS_/ }
+    !toolchain && /^-/ && ($2 == "y" || $2 == "m") { drop = drop " " s "=" $2 }
+    !toolchain && /^ / && ($2 == "y" || $2 == "m") && $4 != "y" && $4 != "m" { drop = drop " " s "=" $2 "->" $4 }
+    toolchain {
+      if ($0 ~ /^-/) c = $2 "->unset"; else if ($0 ~ /^\+/) c = "unset->" $2; else c = $2 "->" $4
+      tc = tc " " s "=" c
+    }
+    END {
+      if (tc != "") print "config: warning: toolchain options changed:" tc
+      if (drop != "") print "config: warning: olddefconfig dropped:" drop
+      if (tc == "" && drop == "") print "config: olddefconfig dropped no =y/=m option"
+    }'
+}
+[ "${KBUILD_FUNCS_ONLY:-}" = 1 ] && return 0  # tests source just the functions above
+
 : "${URL:?}" "${SHA:?}" "${LABVER:?}"
 unset LOCALVERSION  # make appends this env var to the release; ours goes in the config
 C=/cache
@@ -13,8 +40,13 @@ KEEP_BUILDS=${KEEP_BUILDS:-3}
 NEED_GB=${NEED_GB:-12} # free space a build starts with: a full object tree is ~9.5 GB
 mkdir -p $C/git $C/build $C/ccache $C/tmp
 export CCACHE_DIR=$C/ccache CCACHE_COMPILERCHECK=content
-# ccache via its gcc wrappers: CC stays one word, which rustc needs as a linker.
-export PATH=/usr/lib/ccache:$PATH
+# ccache via one-word compiler wrappers on PATH (gcc, or clang under LLVM=1): CC and HOSTCC stay
+# one word, which rustc needs as a linker (-Clinker=$HOSTCC). Debian's /usr/lib/ccache may have
+# no clang link, so make our own.
+W=$C/tmp/ccache-bin
+mkdir -p $W
+for t in gcc cc g++ c++ clang clang++; do ln -sfn "$(command -v ccache)" "$W/$t"; done
+export PATH=$W:$PATH
 ccache -M "$CCACHE_MAX" >/dev/null
 step() { echo "==> $*"; echo "@@stage ${1%% *}"; }
 
@@ -72,11 +104,21 @@ touch "$O/.last-used"
 make_room
 cp /io/config "$O/.config"
 ./scripts/config --file "$O/.config" --set-str LOCALVERSION "$LABVER" -d LOCALVERSION_AUTO
+cp "$O/.config" "$O/.config.in"
+# The kernel Makefile picks the toolchain from LLVM=1, not from the config: follow the config.
+mk=(make -s O="$O")
+if [ "$(toolchain_for /io/config)" = llvm ]; then
+  mk+=(LLVM=1)
+  echo "toolchain: llvm ($(clang --version | head -1), ld.lld), because the config has CONFIG_CC_IS_CLANG=y"
+else
+  echo "toolchain: gnu ($(gcc --version | head -1)), because the config has no CONFIG_CC_IS_CLANG=y"
+fi
 if [ -f rust-toolchain.toml ]; then export RUSTUP_TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml); fi
 
 step "configure"
-make -s O="$O" olddefconfig
-make -s O="$O" rustavailable >/dev/null 2>&1 && echo "rust: available ($(rustc --version))" || echo "rust: not available"
+"${mk[@]}" olddefconfig
+config_report "$O/.config.in" "$O/.config" || echo "config: warning: could not compare configs"
+"${mk[@]}" rustavailable >/dev/null 2>&1 && echo "rust: available ($(rustc --version))" || echo "rust: not available"
 
 step "build ($(nproc) cpus)"
 start=$(date +%s)
@@ -86,13 +128,13 @@ total=$(cat "$O/.objcount" 2>/dev/null || cat $C/.objcount 2>/dev/null || echo 0
 ticker=$!
 trap 'kill $ticker 2>/dev/null || true' EXIT
 # -s: no per-file lines, but every warning and error still shows.
-make -s O="$O" -j"$(nproc)" Image modules dtbs || { echo "build failed"; exit 1; }
+"${mk[@]}" -j"$(nproc)" Image modules dtbs || { echo "build failed"; exit 1; }
 kill $ticker 2>/dev/null || true
 n=$(find "$O" -name '*.o' | wc -l); echo "$n" > "$O/.objcount"; echo "$n" > $C/.objcount
 echo "@@progress $n $n"
 echo "build: $(( $(date +%s) - start ))s"
 # Read the release only after building: make refreshes it during prepare.
-krel=$(make -s O="$O" kernelrelease)
+krel=$("${mk[@]}" kernelrelease)
 echo "release: $krel"
 case "$krel" in *"$LABVER") ;; *) echo "release $krel does not end in $LABVER"; exit 1 ;; esac
 
@@ -100,11 +142,11 @@ step "package"
 P=$C/tmp/pkg
 rm -rf "$P"
 mkdir -p "$P/usr"
-make -s O="$O" INSTALL_MOD_PATH="$P/usr" INSTALL_MOD_STRIP=1 modules_install
+"${mk[@]}" INSTALL_MOD_PATH="$P/usr" INSTALL_MOD_STRIP=1 modules_install
 M=$P/usr/lib/modules/$krel
 rm -f "$M/build" "$M/source"
 cp "$O/arch/arm64/boot/Image" "$M/vmlinuz"
-make -s O="$O" INSTALL_DTBS_PATH="$M/dtbs" dtbs_install
+"${mk[@]}" INSTALL_DTBS_PATH="$M/dtbs" dtbs_install
 python3 /usr/local/bin/module-build.py "$C/src" "$O" /io "$C/git"
 tar -C "$P" --zstd -cf /io/out/kernel.tar.zst usr
 echo kernel.tar.zst > /io/kernel

@@ -8,6 +8,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+      - run: bash -n scripts/lab-only-autounlock
+      - run: python3 scripts/test-lab-only-autounlock.py
       - run: go vet ./...
-      - run: go test -race -timeout 20m ./...
+      - run: go test -race -timeout 40m ./...
       - run: make all
+      # labd and lab also run on the controller Mac
+      - run: CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build ./cmd/labd ./cmd/lab

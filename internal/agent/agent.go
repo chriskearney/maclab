@@ -29,7 +29,7 @@ import (
 	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
-const Version = "0.8.0"
+const Version = "0.8.1"
 
 type Config struct {
 	Server   string `json:"server"`
@@ -121,11 +121,12 @@ type Agent struct {
 	factsRevision     uint64
 	sentFactsRevision uint64
 	lastFacts         time.Time
-	after             []func() // actions to run once pending results reach labd
-	contacted         string   // the Lab boot whose contact with labd is on record
-	kind              string   // the Mac's kind, as labd's check-ins say
-	held              bool     // a job or lease holds the Mac, as labd's latest answer says
-	auditSent         int64    // how much of the Audit log labd's copy holds, in bytes
+	after             []afterAck      // actions to run once pending results reach labd
+	forgotten         map[string]bool // after's commands labd said it gave up on
+	contacted         string          // the Lab boot whose contact with labd is on record
+	kind              string          // the Mac's kind, as labd's check-ins say
+	held              bool            // a job or lease holds the Mac, as labd's latest answer says
+	auditSent         int64           // how much of the Audit log labd's copy holds, in bytes
 	awake             awakeHold
 	wake              chan struct{}
 	life              context.Context    // commands outlive the poll that delivered them
@@ -158,15 +159,16 @@ func New(cfg *Config, sys System, logger *log.Logger) *Agent {
 		logger.Print(legacyPlainWarning(cfg.Server))
 	}
 	return &Agent{
-		cfg:     cfg,
-		sys:     sys,
-		rt:      rt,
-		http:    labhttp.Client(rt, cfg.httpTimeout()),
-		log:     logger,
-		seen:    map[string]bool{},
-		running: map[string]runningCmd{},
-		wake:    make(chan struct{}, 1),
-		now:     time.Now,
+		cfg:       cfg,
+		sys:       sys,
+		rt:        rt,
+		http:      labhttp.Client(rt, cfg.httpTimeout()),
+		log:       logger,
+		seen:      map[string]bool{},
+		running:   map[string]runningCmd{},
+		forgotten: map[string]bool{},
+		wake:      make(chan struct{}, 1),
+		now:       time.Now,
 	}
 }
 
@@ -324,10 +326,25 @@ func (a *Agent) holdWatchdog(ctx context.Context) {
 func (a *Agent) feedWatchdog(ctx context.Context, w io.Writer) {
 	d := newLabWatchdog(w, a.now)
 	d.logf = a.log.Printf
+	d.onLostLabd = a.noteLostLabd
 	a.armWatchdog(d)
 	go d.feed(ctx)
 	go d.watchPID1(ctx, a.sys.PingInit)
 	a.log.Printf("test boot: holding the hardware watchdog, fed while PID 1 answers and each step is within its budget")
+}
+
+// noteLostLabd records, where the early unit records its deadlines, that the
+// watchdog is about to reset this Lab boot for having lost labd: collect_lost
+// then tells labd lost_contact, not a kernel that hung.
+func (a *Agent) noteLostLabd() {
+	bootID, _, _ := a.sys.Identity()
+	a.log.Printf("nothing from labd for %s: letting the watchdog reset this Lab boot", watchdogIdle)
+	seen := labBootSeen{BootID: bootID, Deadline: api.DeadlineLostLabd}
+	if err := writeJSONAtomic(filepath.Join(a.labBootDir(), labBootSeenFile), seen); err != nil {
+		a.log.Printf("Lab boot %s: %v", bootID, err)
+		return
+	}
+	syncDisks()
 }
 
 // armWatchdog has budgets fed from d from now on. A test already running,
@@ -550,6 +567,7 @@ func (a *Agent) report(ctx context.Context) error {
 	if len(rep.Results) == 0 && len(rep.Events) == 0 && len(rep.Audit) == 0 {
 		return nil
 	}
+	a.checkBeforeReport(rep.Results)
 	err := a.post(ctx, rep)
 	audited := err == nil
 	switch {
@@ -566,19 +584,93 @@ func (a *Agent) report(ctx context.Context) error {
 	if n := len(rep.Audit); n > 0 && audited && rep.Audit[n-1].End > a.auditSent {
 		a.auditSent = rep.Audit[n-1].End
 	}
-	var after []func()
+	var after []afterAck
 	if len(a.results) == 0 {
 		after, a.after = a.after, nil
 	}
 	a.mu.Unlock()
 	for _, f := range after {
-		f()
+		a.mu.Lock()
+		gone := a.forgotten[f.id]
+		delete(a.forgotten, f.id)
+		a.mu.Unlock()
+		if gone && f.dropped != nil {
+			a.log.Printf("command %s: labd gave up waiting for it", f.id)
+			f.dropped()
+			continue
+		}
+		f.run()
 	}
 	return nil
 }
 
+// checkBeforeReport runs the checks of the afterAcks waiting on results,
+// just before those results go to labd. A check that fails turns its result
+// into a failed one and drops its afterAck, in rep (results labd is about to
+// get) and in the queue alike.
+func (a *Agent) checkBeforeReport(rep []api.CommandResult) {
+	a.mu.Lock()
+	var checks []afterAck
+	for _, f := range a.after {
+		if f.check != nil && !f.checked {
+			checks = append(checks, f)
+		}
+	}
+	a.mu.Unlock()
+	for _, f := range checks {
+		i := slices.IndexFunc(rep, func(r api.CommandResult) bool { return r.ID == f.id })
+		if i < 0 {
+			continue
+		}
+		err := f.check()
+		if err == nil {
+			a.mu.Lock()
+			if j := slices.IndexFunc(a.after, func(g afterAck) bool { return g.id == f.id }); j >= 0 {
+				a.after[j].checked = true
+			}
+			a.mu.Unlock()
+			continue
+		}
+		a.log.Printf("command %s failed: %v", f.id, err)
+		fail := func(r *api.CommandResult) { r.OK, r.Error, r.Output = false, err.Error(), nil }
+		fail(&rep[i])
+		a.mu.Lock()
+		if j := slices.IndexFunc(a.results, func(r api.CommandResult) bool { return r.ID == f.id }); j >= 0 {
+			fail(&a.results[j])
+		}
+		a.after = slices.DeleteFunc(a.after, func(g afterAck) bool { return g.id == f.id })
+		a.mu.Unlock()
+	}
+}
+
 func (a *Agent) post(ctx context.Context, rep api.Report) error {
-	return postJSON(ctx, a.http, a.url("/api/agent/report"), a.cfg.Secret, rep, nil)
+	b, _ := json.Marshal(rep)
+	req, _ := http.NewRequestWithContext(ctx, "POST", a.url("/api/agent/report"), bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	body, err := doBody(a.http, req, a.cfg.Secret)
+	if err != nil {
+		return err
+	}
+	var reply api.ReportReply // an older labd answers "ok"
+	if json.Valid(body) && json.Unmarshal(body, &reply) == nil {
+		a.mu.Lock()
+		if reply.Proto >= 1 {
+			// labd says which of these results it wants: refuse the rest, as
+			// if forgotten (one it lost track of must not reboot the Mac).
+			for _, r := range rep.Results {
+				if !slices.Contains(reply.Wanted, r.ID) && slices.ContainsFunc(a.after, func(f afterAck) bool { return f.id == r.ID }) {
+					a.forgotten[r.ID] = true
+				}
+			}
+		}
+		for _, id := range reply.Forgotten {
+			if slices.ContainsFunc(a.after, func(f afterAck) bool { return f.id == id }) {
+				a.forgotten[id] = true
+			}
+		}
+		a.mu.Unlock()
+	}
+	return nil
 }
 
 // reported takes the first n results and m events off the queue: labd has
@@ -744,15 +836,22 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 	a.mu.Unlock()
 	a.keepAwake()
 	a.log.Printf("command %s %s job=%s", c.ID, c.Kind, c.JobID)
-	a.wd.Load().idle()
+	a.wd.Load().idle() // labd sent it
 	go func() {
 		defer stop(nil)
 		out, after, err := a.exec(ctx, c)
-		a.wd.Load().idle()
+		// ending is not a sign of labd: a command whose uploads can't reach it
+		// mustn't keep a test boot fed
 		if cause := context.Cause(ctx); err != nil && errors.Is(cause, errStoppedAtWindowClose) {
 			err = cause // whatever the command made of being stopped
 		}
 		if cause := context.Cause(ctx); errors.Is(cause, errAccessLevel) {
+			if err == nil && c.Kind == api.CmdBootOnce {
+				// It armed, but labd hears it failed: cancel, as a failed arm does.
+				if cerr := a.sys.CancelBootOnce(); cerr != nil {
+					a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+				}
+			}
 			err = cause // a test stopped this way ends the job, not the test alone
 		}
 		r := api.CommandResult{ID: c.ID, OK: err == nil,
@@ -773,7 +872,8 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 		if now == bootID {
 			a.results = append(a.results, r)
 			if after != nil && err == nil {
-				a.after = append(a.after, after)
+				after.id = c.ID
+				a.after = append(a.after, *after)
 			}
 		}
 		a.mu.Unlock()
@@ -782,9 +882,22 @@ func (a *Agent) start(ctx context.Context, c api.Command) {
 	}()
 }
 
-// exec runs one command. The returned func runs only after the result reaches labd,
-// so a reboot never swallows its own acknowledgement.
-func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
+// afterAck is what a command leaves to do once its result reaches labd.
+type afterAck struct {
+	id string // the command whose result it waits on
+	// check, if set, runs just before that result goes to labd: an error
+	// fails the command instead, and run never runs.
+	check   func() error
+	checked bool // check passed: it runs once, not on every retried report
+	run     func()
+	// dropped, if set, runs instead of run when labd answers that it gave up
+	// waiting for the command (api.ReportReply.Forgotten).
+	dropped func()
+}
+
+// exec runs one command. The returned afterAck runs only after the result
+// reaches labd, so a reboot never swallows its own acknowledgement.
+func (a *Agent) exec(ctx context.Context, c api.Command) (any, *afterAck, error) {
 	refused := a.refuseOutsideWindow(c)
 	if refused == nil {
 		refused = a.refuseByAccess(c)
@@ -829,25 +942,33 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 			return nil, nil, err
 		}
 		if err := a.sys.BootOnce(args.Entry); err != nil {
+			// It may have failed after writing the one-shot: cancel it, as a
+			// failed re-arm does, since labd hears that nothing is armed.
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
 			return nil, nil, err
 		}
-		return nil, a.rebootLater, nil
+		return nil, a.labBootAfterAck(args.Entry), nil
 	case api.CmdReboot:
-		return nil, a.rebootLater, nil
+		return nil, &afterAck{run: a.rebootLater}, nil
 	case api.CmdCrash:
 		var args api.CrashArgs
 		if err := json.Unmarshal(c.Args, &args); err != nil {
 			return nil, nil, err
 		}
-		return nil, func() {
+		return nil, &afterAck{run: func() {
 			if err := a.sys.Crash(args.Mode); err != nil {
 				a.log.Printf("crash: %v", err)
 			}
-		}, nil
+		}}, nil
 	case api.CmdRunTest:
 		var t api.TestSpec
 		if err := json.Unmarshal(c.Args, &t); err != nil {
 			return nil, nil, err
+		}
+		if t.RequireWatchdog && a.wd.Load() == nil {
+			return nil, nil, fmt.Errorf("test %s: agent-held watchdog required", t.Name)
 		}
 		dir, err := a.outDir(c)
 		if err != nil {
@@ -951,7 +1072,7 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 // reCollectDir is a job directory labd may collect logs into.
 var reCollectDir = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenArgs) (any, func(), error) {
+func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenArgs) (any, *afterAck, error) {
 	dir, err := a.outDir(c)
 	if err != nil {
 		return nil, nil, err
@@ -1080,6 +1201,59 @@ func (a *Agent) collectLost(ctx context.Context, job, dir string) api.LostBoot {
 	}
 	lost.Files = a.uploadDir(ctx, job, "prevboot", dir)
 	return lost
+}
+
+// labBootAfterAck re-arms the Lab boot of entry twice before the reboot:
+// once just before the result goes to labd, and again just before the
+// reboot. In between, limine-snapper-sync (hourly, and on every snapshot) or
+// limine-update can rewrite limine.conf and drop the lab's block; the Mac
+// would then boot its default entry, and labd would blame the test kernel
+// (boot_failed) for an infra fault. arm takes the boot-partition locks,
+// writes the block back and checks the entry and the one-shot. A re-arm that
+// fails before the report fails the command, as a failed arm does, so labd
+// records infra_error. One that fails after it leaves the Mac up: a reboot
+// then could only boot the default entry.
+func (a *Agent) labBootAfterAck(entry string) *afterAck {
+	// A re-arm that fails may have left the first arm's one-shot set, and
+	// labd is then told the boot failed to arm (or not told at all): cancel
+	// it, so a later plain reboot can't boot the test kernel unwatched.
+	rearm := func() error {
+		if err := a.sys.BootOnce(entry); err != nil {
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
+			return fmt.Errorf("re-arming the Lab boot before the reboot: %w", err)
+		}
+		return nil
+	}
+	// labd gave up on the arm (its arm timeout, a cancel) before it heard it
+	// worked: no reboot, and nothing left armed for a later one.
+	dropped := func() {
+		if err := a.sys.CancelBootOnce(); err != nil {
+			a.log.Printf("cancelling the Lab boot's one-shot: %v", err)
+		}
+	}
+	return &afterAck{check: rearm, dropped: dropped, run: func() {
+		// Nothing may rewrite limine.conf between the last re-arm and the
+		// firmware reading it: a snapshot sync during shutdown would drop the
+		// block, and labd would blame the test kernel.
+		resume := a.sys.QuiesceBootSync()
+		if err := rearm(); err != nil {
+			a.log.Printf("not rebooting: %v", err)
+			resume()
+			return
+		}
+		a.log.Printf("rebooting")
+		if err := a.sys.Reboot(); err != nil {
+			// Still up, with labd told the boot is coming: cancel the
+			// one-shot, so no later plain reboot boots it unwatched.
+			a.log.Printf("reboot: %v", err)
+			if cerr := a.sys.CancelBootOnce(); cerr != nil {
+				a.log.Printf("cancelling the Lab boot's one-shot: %v", cerr)
+			}
+			resume()
+		}
+	}}
 }
 
 func (a *Agent) rebootLater() {
@@ -1267,22 +1441,28 @@ func getJSON(ctx context.Context, c *http.Client, u, secret string, out any) err
 }
 
 func doJSON(c *http.Client, req *http.Request, secret string, out any) error {
+	body, err := doBody(c, req, secret)
+	if err == nil && out != nil {
+		return json.Unmarshal(body, out)
+	}
+	return err
+}
+
+// doBody sends req and returns the body of a 200 answer.
+func doBody(c *http.Client, req *http.Request, secret string) ([]byte, error) {
 	if secret != "" {
 		req.Header.Set("Authorization", "Bearer "+secret)
 	}
 	resp, err := c.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		return &statusError{Code: resp.StatusCode, Header: resp.Header, msg: fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
+		return nil, &statusError{Code: resp.StatusCode, Header: resp.Header, msg: fmt.Sprintf("%s: %s", resp.Status, strings.TrimSpace(string(body)))}
 	}
-	if out != nil {
-		return json.Unmarshal(body, out)
-	}
-	return nil
+	return body, nil
 }
 
 // tooLarge reports whether labd refused a request as too large (413).

@@ -185,6 +185,14 @@ func TestStageIntegrityAndCancellation(t *testing.T) {
 		})
 	}
 }
+func TestHashRegularFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "f")
+	os.WriteFile(p, []byte("staged\n"), 0o644)
+	if got, e := Hash(p, 1<<20); e != nil || got != Sum([]byte("staged\n")) {
+		t.Fatalf("Hash = %q, %v", got, e)
+	}
+}
+
 func TestSafeHashNoDataOpenForSpecialFiles(t *testing.T) {
 	for _, p := range []string{"/dev/null", t.TempDir()} {
 		if _, e := Hash(p, 1<<20); e == nil {

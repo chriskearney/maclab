@@ -41,8 +41,37 @@ type OOBConfig struct {
 }
 
 type Lease struct {
-	Holder  string    `json:"holder"`
+	Holder string `json:"holder"`
+	// Maintainer is whose token took the lease; empty for one labd stored
+	// before it recorded that. Only they renew it, release it, or run jobs
+	// under it, whatever holder another Maintainer names.
+	Maintainer string `json:"maintainer,omitempty"`
+	// By preserves attribution written by controllers with PR #62.
+	By      string    `json:"by,omitempty"`
 	Expires time.Time `json:"expires"`
+}
+
+// HeldBy is whether the lease is holder's, acting for maintainer.
+func (l *Lease) HeldBy(holder, maintainer string) bool {
+	return l.Holder == holder && (l.Owner() == "" || l.Owner() == maintainer)
+}
+
+// Owner names the authenticated Maintainer recorded for the lease. By is
+// the persisted attribution field used before ownership enforcement.
+func (l *Lease) Owner() string {
+	if l.Maintainer != "" {
+		return l.Maintainer
+	}
+	return l.By
+}
+
+// Who names the lease holder and the Maintainer who took it.
+func (l *Lease) Who() string {
+	owner := l.Owner()
+	if owner == "" || owner == l.Holder {
+		return l.Holder
+	}
+	return l.Holder + " (" + owner + ")"
 }
 
 // HumanAction is the one instruction a person needs when the lab cannot recover a device itself.
@@ -82,6 +111,12 @@ type Device struct {
 	// Mac, lowercased; empty for a token an admin asked for. It counts toward
 	// that login's limit of Macs (see POST /api/volunteer).
 	VolunteeredBy string `json:"volunteered_by,omitempty"`
+	// LinkedLogin is the tailnet login a Maintainer linked to a Volunteer's
+	// Mac (lab enroll --login, lab device --login), lowercased: that person
+	// sees the Mac in labd as if they had volunteered it. Unlike
+	// VolunteeredBy it can change, and it doesn't count toward the login's
+	// limit of Macs.
+	LinkedLogin string `json:"linked_login,omitempty"`
 	Enrollment
 	// SnapshotEligible is whether the Mac's @ can be snapshotted, as its
 	// latest check-in said: a Mac that can't is not eligible for Installed runs.
@@ -168,6 +203,20 @@ type Facts struct {
 	Warnings      []string `json:"warnings,omitempty"` // costs evidence, not the Mac: jobs still run
 }
 
+// StaleKnownGood is whether a preflight problem is lab-agent's known-good
+// kernel no longer being installed: a distro kernel update, or an install,
+// replaced its package. lab baseline makes the running kernel the known-good
+// again, on the Mac and on labd.
+func StaleKnownGood(problem string) bool {
+	return strings.HasPrefix(problem, "known-good kernel ") && strings.HasSuffix(problem, " is no longer installed")
+}
+
+// StaleKnownGoodFix is what to do about a StaleKnownGood problem on Mac name,
+// running kernel.
+func StaleKnownGoodFix(name, kernel string) string {
+	return fmt.Sprintf("run `lab baseline %s` to make the running kernel %s its known-good", name, kernel)
+}
+
 type Health struct {
 	Uptime      float64 `json:"uptime"`
 	SystemState string  `json:"system_state"` // systemctl is-system-running
@@ -217,6 +266,24 @@ type Report struct {
 	Audit []AuditEntry `json:"audit,omitempty"`
 }
 
+// ReportReply is labd's answer to a Report (an older labd answers "ok").
+type ReportReply struct {
+	// Forgotten are results of commands labd gave up waiting for (a timeout,
+	// a cancel): what was to follow their acknowledgement, a Lab boot's
+	// reboot, must not happen.
+	Forgotten []string `json:"forgotten,omitempty"`
+	// Proto is 1 from a labd that answers Wanted. Without it (an older labd,
+	// or "ok") the agent has only Forgotten to go by.
+	Proto int `json:"proto,omitempty"`
+	// Wanted are the results in the Report that labd is waiting for or has
+	// taken. With Proto 1, the agent runs what follows the acknowledgement of a
+	// command only if its id is here: a result labd knows nothing of (it
+	// restarted, or forgot the command long ago) must not reboot the Mac into
+	// a Lab boot no job is waiting for. Forgotten is a list of what to refuse;
+	// Wanted is a list of what to allow, so it fails closed.
+	Wanted []string `json:"wanted,omitempty"`
+}
+
 // Quiet is the agent saying, while it can, that the Mac is about to go off
 // the network on boot BootID for up to Seconds from now (suspend-devices,
 // whose suspend takes Wi-Fi down). labd waits that out on that boot before
@@ -230,10 +297,11 @@ type Quiet struct {
 // AuditEntry is one line of a Volunteer Mac's Audit log: a Maintainer action
 // that reached the Mac, written there before lab-agent acted on it.
 type AuditEntry struct {
-	Time       time.Time `json:"time"`
-	Maintainer string    `json:"maintainer,omitempty"` // "" when labd acted on its own
-	Job        string    `json:"job,omitempty"`
-	Action     string    `json:"action"` // what was done, with the command or script text
+	Time           time.Time `json:"time"`
+	Maintainer     string    `json:"maintainer,omitempty"`      // "" when labd acted on its own
+	VolunteerLogin string    `json:"volunteer_login,omitempty"` // the Mac's own Volunteer asked, through labd
+	Job            string    `json:"job,omitempty"`
+	Action         string    `json:"action"` // what was done, with the command or script text
 	// Refused is why lab-agent refused the action instead; "" when it acted.
 	Refused string `json:"refused,omitempty"`
 	// End is where the entry ends in the Mac's own log, in bytes: labd's copy
@@ -245,7 +313,10 @@ type AuditEntry struct {
 // time zone of loc.
 func (e AuditEntry) Line(loc *time.Location) string {
 	who := e.Maintainer
-	if who == "" {
+	switch {
+	case e.VolunteerLogin != "":
+		who = "Volunteer " + e.VolunteerLogin
+	case who == "":
 		who = "labd"
 	}
 	job := ""
@@ -298,7 +369,8 @@ const (
 	CmdExec        = "exec"
 	// CmdRecordKnownGood makes the running kernel the agent's known-good, as
 	// lab-agent setup does; it refuses unless the Mac runs exactly that kernel
-	// outside a lab boot. Promotion sends it.
+	// outside a lab boot. Promotion sends it, and so does a baseline on a Mac
+	// whose known-good kernel is no longer installed.
 	CmdRecordKnownGood = "record_known_good"
 	// CmdInstall installs a Release on the Mac as a named lab operation: the
 	// install step of an Installed run, which a Volunteer's Mac allows at
@@ -332,8 +404,11 @@ type Command struct {
 	JobID string `json:"job_id,omitempty"`
 	// Maintainer is who the command acts for: the Maintainer who asked, or
 	// whose job it is; "" when labd acts on its own.
-	Maintainer string          `json:"maintainer,omitempty"`
-	Args       json.RawMessage `json:"args,omitempty"`
+	Maintainer string `json:"maintainer,omitempty"`
+	// VolunteerLogin is the tailnet login of the Mac's own Volunteer when
+	// they asked for it through labd, such as reading its live journal.
+	VolunteerLogin string          `json:"volunteer_login,omitempty"`
+	Args           json.RawMessage `json:"args,omitempty"`
 }
 
 type CommandResult struct {
@@ -417,7 +492,7 @@ type StageResult struct {
 }
 
 // BootOnceArgs arms a Lab boot. lab-agent first writes its deadline record,
-// on its own clock: no contact (2x BootTimeoutSec from now, unless lab-agent
+// on its own clock: no contact (2x BootTimeoutSec from now, at most 9 minutes, unless lab-agent
 // reaches labd) and the hard ceiling (the job's end, JobSec from now).
 type BootOnceArgs struct {
 	Entry          string `json:"entry"`
@@ -461,6 +536,9 @@ const (
 	// DeadlineAccessLowered is the Volunteer lowering the Access level below
 	// what the Lab boot's job runs.
 	DeadlineAccessLowered Deadline = "access_lowered"
+	// DeadlineLostLabd is lab-agent's watchdog resetting a Lab boot that has
+	// heard nothing from labd for watchdogIdle outside a test.
+	DeadlineLostLabd Deadline = "lost_labd"
 )
 
 func (d Deadline) String() string {
@@ -509,11 +587,12 @@ type CrashArgs struct {
 }
 
 type TestSpec struct {
-	Name       string `json:"name"`
-	Builtin    string `json:"builtin,omitempty"` // name of a test embedded in the agent
-	Script     string `json:"script,omitempty"`  // artifact sha256 of a shell script
-	TimeoutSec int    `json:"timeout_sec,omitempty"`
-	GUI        bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
+	Name            string `json:"name"`
+	Builtin         string `json:"builtin,omitempty"` // name of a test embedded in the agent
+	Script          string `json:"script,omitempty"`  // artifact sha256 of a shell script
+	TimeoutSec      int    `json:"timeout_sec,omitempty"`
+	RequireWatchdog bool   `json:"require_watchdog,omitempty"`
+	GUI             bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
 	// SkipOnScreen leaves out the checks that need the screen visible: a
 	// Volunteer's Mac is locked while a test runs.
 	SkipOnScreen bool `json:"skip_on_screen,omitempty"`
@@ -858,6 +937,10 @@ type EnrollTokenRequest struct {
 	// neither. Either makes Volunteer true too.
 	VolunteerName string `json:"volunteer_name,omitempty"`
 	Contact       string `json:"contact,omitempty"`
+	// VolunteerLogin is the Volunteer's tailnet login, which labd links to
+	// the Mac when it enrolls (see Device.LinkedLogin). Only a Maintainer's
+	// token for a Volunteer's Mac carries one.
+	VolunteerLogin string `json:"volunteer_login,omitempty"`
 }
 
 type EnrollTokenResponse struct {
@@ -876,6 +959,9 @@ type DevicePatch struct {
 	Model *string    `json:"model,omitempty"`
 	OOB   *OOBConfig `json:"oob,omitempty"`
 	NoOOB bool       `json:"no_oob,omitempty"`
+	// VolunteerLogin links a Volunteer's Mac to that tailnet login (see
+	// Device.LinkedLogin); "" unlinks it.
+	VolunteerLogin *string `json:"volunteer_login,omitempty"`
 }
 
 // LeaveRequest is lab-agent uninstall telling labd, before it undoes

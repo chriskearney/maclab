@@ -80,15 +80,33 @@ func TestOwnBootsAreNotLabBoots(t *testing.T) {
 	}
 }
 
-func TestDeadlineRecordAllowsTwiceTheBootTimeoutAndEndsWithTheJob(t *testing.T) {
+func TestDeadlineRecordAllowsTwiceAShortBootTimeoutAndEndsWithTheJob(t *testing.T) {
 	now := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
 	jobEnd := now.Add(time.Hour)
-	d := newLabBootDeadlines(now, 5*time.Minute, jobEnd)
-	if !d.NoContact.Equal(now.Add(10 * time.Minute)) {
-		t.Errorf("no-contact deadline %s, want %s", d.NoContact, now.Add(10*time.Minute))
+	d := newLabBootDeadlines(now, 4*time.Minute, jobEnd)
+	if !d.NoContact.Equal(now.Add(8 * time.Minute)) {
+		t.Errorf("no-contact deadline %s, want %s", d.NoContact, now.Add(8*time.Minute))
 	}
 	if !d.Ceiling.Equal(jobEnd) {
 		t.Errorf("hard ceiling %s, want the job's end %s", d.Ceiling, jobEnd)
+	}
+}
+
+// The agent's watchdog resets a boot that never heard from labd watchdogIdle
+// after the agent starts and records nothing; the no-contact deadline must
+// pass first, with room for a clock that runs behind, or labd blames the
+// kernel. labd's default 6-minute boot timeout made it 12 minutes against the
+// watchdog's 11.
+func TestNoContactStaysAMarginInsideTheWatchdog(t *testing.T) {
+	now := time.Date(2026, 11, 2, 0, 0, 0, 0, time.UTC)
+	for _, boot := range []time.Duration{2 * time.Minute, 6 * time.Minute, 30 * time.Minute} {
+		d := newLabBootDeadlines(now, boot, now.Add(time.Hour))
+		if latest := now.Add(watchdogIdle - noContactMargin); d.NoContact.After(latest) {
+			t.Errorf("boot timeout %s: no-contact deadline %s, after %s", boot, d.NoContact, latest)
+		}
+	}
+	if noContactMargin < time.Minute {
+		t.Errorf("margin %s: a test boot with no network can't set its clock", noContactMargin)
 	}
 }
 
