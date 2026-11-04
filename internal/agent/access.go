@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -109,7 +108,7 @@ func publishCmd(ctx context.Context, cfg *Config, sys System, args []string, out
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	var pubs []api.Published
-	if err := getJSON(ctx, http.DefaultClient, strings.TrimRight(cfg.Server, "/")+"/api/agent/published", cfg.Secret, &pubs); err != nil {
+	if err := getJSON(ctx, cfg.client(0), strings.TrimRight(cfg.Server, "/")+"/api/agent/published", cfg.Secret, &pubs); err != nil {
 		fmt.Fprintf(out, "The reports published so far can't be listed now (labd did not answer: %v); run publish on again later to see them.\n", err)
 		return nil
 	}

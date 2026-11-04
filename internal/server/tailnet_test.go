@@ -211,7 +211,7 @@ func TestVolunteer(t *testing.T) {
 	if first.Name != "naeem-omarchy" || !strings.HasPrefix(first.Token, "enr_") {
 		t.Fatalf("first volunteer: %+v", first)
 	}
-	if w := do("POST", "/api/agent/enroll", peer, `{"token":"`+first.Token+`"}`); w.Code != 200 {
+	if w := do("POST", "/api/agent/enroll", peer, enrollJSON(first.Token)); w.Code != 200 {
 		t.Fatalf("enroll with the volunteer's token: %d %s", w.Code, w.Body)
 	}
 	var d api.Device

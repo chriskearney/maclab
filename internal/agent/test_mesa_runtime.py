@@ -98,7 +98,12 @@ class MapLifetimeControls(unittest.TestCase):
     with mock.patch.object(m,'hash_held',digest),mock.patch.object(m,'current_mapping') as checked:
      for _ in range(3):m.bind_mapping(row,m.sha(p),w,lambda r,p:os.open(p,os.O_PATH|os.O_NOFOLLOW))
      self.assertEqual(len(reads),1);self.assertEqual(checked.call_count,6);self.assertTrue(w.bindings);self.assertTrue(w.hashes)
-    p.write_bytes(b'changed bytes')
+    before=m.info(p.stat());deadline=time.monotonic()+2
+    while True:
+     p.write_bytes(b'changed bytes')
+     if m.info(p.stat())!=before:break
+     self.assertLess(time.monotonic(),deadline,'fixture could not observe changed metadata')
+     time.sleep(.01)
     with self.assertRaises(m.Stop):m.bind_mapping(row,m.hashlib.sha256(b'checked bytes').hexdigest(),w,lambda r,p:os.open(p,os.O_PATH|os.O_NOFOLLOW),check_current=False)
    finally:w.close()
    self.assertEqual(w.hashes,{})

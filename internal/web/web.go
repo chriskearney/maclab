@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"embed"
 	"encoding/json"
+	"html"
 	"io/fs"
 	"net/http"
 	"os"
@@ -137,16 +138,18 @@ func firstBackground(dir string) string {
 }
 
 // Register adds the UI and theme routes. Themes and wallpapers are public so
-// the lock screen can wear them before anyone has signed in.
-func Register(m *http.ServeMux) {
+// the lock screen can wear them before anyone has signed in. base is the
+// path prefix labd is served under, "" for none: the page says it in its
+// <base>, and every URL the UI uses is relative to that.
+func Register(m *http.ServeMux, base string) {
 	sub, _ := fs.Sub(static, "static")
 	files := http.FileServer(http.FS(sub))
 	m.Handle("GET /ui/", http.StripPrefix("/ui/", cache(files)))
+	index := IndexHTML(base)
 	m.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		b, _ := static.ReadFile("static/index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-cache")
-		w.Write(b)
+		w.Write(index)
 	})
 	m.HandleFunc("GET /api/themes", func(w http.ResponseWriter, r *http.Request) {
 		themes := loadThemes()
@@ -186,4 +189,12 @@ func cache(h http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-cache")
 		h.ServeHTTP(w, r)
 	})
+}
+
+// IndexHTML is the UI's page for a labd served under base: its <base> is
+// base/, against which the page's relative URLs resolve.
+func IndexHTML(base string) []byte {
+	b, _ := static.ReadFile("static/index.html")
+	tag := `<base href="` + html.EscapeString(base) + `/">`
+	return []byte(strings.Replace(string(b), "<head>\n", "<head>\n"+tag+"\n", 1))
 }

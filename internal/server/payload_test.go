@@ -1,12 +1,38 @@
 package server
 
 import (
+	"context"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/iconidentify/maclab/internal/api"
 )
+
+func TestStoredPayloadJobRefusesDowngradedAgent(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	v := l.s.dev(l.name)
+	v.mu.Lock()
+	v.d.Facts.AgentVersion = "0.8.1"
+	boot := v.d.BootID
+	v.mu.Unlock()
+	now := time.Now()
+	j := &api.Job{ID: "j1104-000000-feed", DeviceID: v.snapshot().ID, State: api.JobQueued, Created: now, Updated: now,
+		Spec: api.JobSpec{Device: l.name, Tests: []api.TestSpec{{Name: "probe", Script: l.artifact("script"), Payload: []api.PayloadFile{{Name: "probe.bin", SHA256: l.artifact("payload")}}}}}}
+	if err := l.s.store.saveJob(j); err != nil {
+		t.Fatal(err)
+	}
+	l.s.runJob(context.Background(), v, j)
+	got, err := l.s.store.job(j.ID)
+	if err != nil || got.State != api.JobDone || got.Outcome != api.OutcomeInfra {
+		t.Fatalf("stored job: %+v %v", got, err)
+	}
+	if snap := v.snapshot(); snap.BootID != boot || snap.ActiveJob != "" {
+		t.Fatal("downgraded agent was given device work")
+	}
+}
 
 func TestPayloadFilesAreCheckedAtSubmit(t *testing.T) {
 	l := newLab(t, false)

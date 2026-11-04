@@ -202,9 +202,24 @@ func TestDefaultLayoutNamesEverythingSetupWrites(t *testing.T) {
 			t.Errorf("unit %s is not in the default layout: %v", u, l.UnitNames)
 		}
 	}
-	for _, f := range []string{labBootAutologinPath, sysctlPath, watchdogCfg} {
+	for _, f := range []string{labBootAutologinPath, labBootAutologinLink, sysctlPath, watchdogCfg} {
 		if !slices.Contains(l.DropIns, f) {
 			t.Errorf("%s is not in the default layout: %v", f, l.DropIns)
 		}
+	}
+}
+
+// After the Lab boot the link in /etc dangles; leaving still removes it.
+func TestLeavingRemovesTheDanglingAutologinLink(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(root, "etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf")
+	os.MkdirAll(filepath.Dir(link), 0o755)
+	os.Symlink(filepath.Join(root, "run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"), link)
+	p, err := leaveCleanup(leaveLayout{DropIns: []string{link}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(p.Remove, link) {
+		t.Errorf("dangling link %s is not removed: %v", link, p.Remove)
 	}
 }

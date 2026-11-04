@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,13 +20,21 @@ import (
 // is decided per boot from the command line and lives under /run, so any boot
 // of the Volunteer's own entry (a deadline fallback, a power cut) can't have it.
 
+// SDDM reads /etc/sddm.conf.d, never /run/sddm.conf.d, so the drop-in is
+// reached through a link in /etc. On any other boot the link dangles, and SDDM
+// lists its config files with QDir::Files, which skips dangling links.
+
 // AutologinDropIn is the SDDM drop-in a Lab boot gets.
 type AutologinDropIn struct {
 	Path    string // under /run, so it never outlives the boot
+	Link    string // where SDDM reads it: a link to Path, named to sort after Omarchy's own
 	Content string
 }
 
-const labBootAutologinPath = "/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+const (
+	labBootAutologinPath = "/run/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+	labBootAutologinLink = "/etc/sddm.conf.d/zz-maclab-lab-boot-autologin.conf"
+)
 
 // labBootAutologin is the drop-in a boot needs, if any: only a Lab boot of a
 // Volunteer's unencrypted Mac with a GUI user. A Lab-owned Mac keeps its
@@ -34,7 +44,7 @@ func labBootAutologin(cmdline, kind, guiUser string, encrypted bool) (AutologinD
 	if !IsLabBoot(cmdline) || kind != api.KindVolunteer || guiUser == "" || encrypted {
 		return AutologinDropIn{}, false
 	}
-	return AutologinDropIn{Path: labBootAutologinPath, Content: fmt.Sprintf(
+	return AutologinDropIn{Path: labBootAutologinPath, Link: labBootAutologinLink, Content: fmt.Sprintf(
 		"# maclab: this is a Lab boot, so the GUI user is logged in (and locked at once). Gone with the boot.\n[Autologin]\nUser=%s\nSession=%s\nRelogin=false\n",
 		guiUser, desktopSession())}, true
 }
@@ -134,8 +144,27 @@ func WriteLabBootAutologin(cfg *Config, say func(string, ...any)) error {
 	if err := os.WriteFile(d.Path, []byte(d.Content), 0o644); err != nil {
 		return err
 	}
-	say("Lab boot: %s logs in as %s, locked at once", d.Path, cfg.GUIUser)
+	if err := linkDropIn(d.Link, d.Path); err != nil {
+		os.Remove(d.Path) // no half-done autologin: the lock unit keys off this file
+		return err
+	}
+	say("Lab boot: %s (via %s) logs in as %s, locked at once", d.Path, d.Link, cfg.GUIUser)
 	return nil
+}
+
+// linkDropIn makes link a symlink to target, replacing whatever is at link.
+// Anything else there would be read by SDDM on every boot, not just this one.
+func linkDropIn(link, target string) error {
+	if got, err := os.Readlink(link); err == nil && got == target {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		return err
+	}
+	if err := os.Remove(link); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return os.Symlink(target, link)
 }
 
 // labBootLockedPath is the lock unit's note of how locking went: "locked", or
@@ -155,7 +184,7 @@ func LockLabBootSession(cfg *Config, say func(string, ...any)) error {
 	}
 	err := lockSession(cfg.GUIUser, say)
 	if err == nil {
-		return nil // the lock was lifted by the Volunteer
+		return nil // locked (with hyprlock, and lifted again by the Volunteer)
 	}
 	say("%v: terminating the session", err)
 	os.WriteFile(labBootLockedPath, []byte("failed: "+err.Error()), 0o644)
@@ -163,8 +192,9 @@ func LockLabBootSession(cfg *Config, say func(string, ...any)) error {
 	return err
 }
 
-// lockSession runs the lock as user and returns when the Volunteer unlocks, or
-// with an error if the lock did not come up.
+// lockSession runs the lock as user and returns once it is up
+// (omarchy-system-lock) or when the Volunteer unlocks (hyprlock), or with an
+// error if the lock did not come up.
 func lockSession(user string, say func(string, ...any)) error {
 	argv, ok := lockCommand(func(n string) bool { _, err := exec.LookPath(n); return err == nil })
 	if !ok {
@@ -174,7 +204,31 @@ func lockSession(user string, say func(string, ...any)) error {
 	if err != nil {
 		return err
 	}
-	cmd := exec.Command("runuser", append([]string{"-u", u.Username, "--", "env"}, append(genv, argv...)...)...)
+	asUser := func(args ...string) *exec.Cmd {
+		return exec.Command("runuser", append([]string{"-u", u.Username, "--", "env"}, append(genv, args...)...)...)
+	}
+	if argv[0] == "omarchy-system-lock" {
+		// It asks Omarchy's shell to lock and returns at once, so the shell,
+		// not the process, says whether the lock is up. omarchy-shell refuses
+		// to run without the session's OMARCHY_PATH, which genv lacks.
+		inSession := func(args ...string) *exec.Cmd {
+			out, _ := asUser("systemctl", "--user", "show-environment").Output()
+			return asUser(append([]string{"OMARCHY_PATH=" + omarchyPath(out)}, args...)...)
+		}
+		err := confirmShellLock(func() { inSession(argv...).Run() }, func() (shellLock, error) {
+			out, err := inSession("omarchy-shell", "lock", "status").Output()
+			if err != nil {
+				return shellLock{}, err
+			}
+			return parseShellLock(out)
+		}, shellLockWait, time.Second)
+		if err != nil {
+			return err
+		}
+		say("locked %s's session with %s", u.Username, argv[0])
+		return os.WriteFile(labBootLockedPath, []byte("locked"), 0o644)
+	}
+	cmd := asUser(argv...)
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -189,6 +243,65 @@ func lockSession(user string, say func(string, ...any)) error {
 	os.WriteFile(labBootLockedPath, []byte("locked"), 0o644)
 	<-exited // the lock stays up until the Volunteer unlocks
 	return nil
+}
+
+// shellLockWait bounds how long Omarchy's shell gets to come up and confirm
+// the lock once the session exists.
+const shellLockWait = 30 * time.Second
+
+// shellLock is what `omarchy-shell lock status` reports.
+type shellLock struct {
+	Locked    bool   `json:"locked"`    // also true once a lock is only requested
+	Requested bool   `json:"requested"` // the shell has started locking
+	Secure    bool   `json:"secure"`    // the compositor confirmed every output is covered
+	LastEvent string `json:"lastEvent"`
+}
+
+// omarchyPath is OMARCHY_PATH from the user manager's environment (`systemctl
+// --user show-environment`, where uwsm puts the session's), else where
+// Omarchy installs itself.
+func omarchyPath(showEnv []byte) string {
+	for _, l := range strings.Split(string(showEnv), "\n") {
+		if v, ok := strings.CutPrefix(l, "OMARCHY_PATH="); ok && v != "" {
+			return v
+		}
+	}
+	return "/usr/share/omarchy"
+}
+
+func parseShellLock(b []byte) (shellLock, error) {
+	var s shellLock
+	if err := json.Unmarshal(b, &s); err != nil {
+		return s, fmt.Errorf("omarchy-shell lock status: %w", err)
+	}
+	return s, nil
+}
+
+// confirmShellLock asks for the lock until the shell has started locking, and
+// returns once the compositor has secured it. A shell that is not up yet
+// fails status; asking again while a lock is underway is left out, since the
+// shell takes a second request while locked as a sleep request.
+func confirmShellLock(request func(), status func() (shellLock, error), wait, every time.Duration) error {
+	deadline := time.Now().Add(wait)
+	var last string
+	for {
+		s, err := status()
+		switch {
+		case err == nil && s.Secure:
+			return nil
+		case err != nil:
+			last = err.Error()
+		default:
+			last = "not secured, last event " + s.LastEvent
+			if !s.Locked && !s.Requested {
+				request()
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Omarchy's shell did not confirm the lock within %s (%s)", wait, last)
+		}
+		time.Sleep(every)
+	}
 }
 
 // labBootLockWait bounds how long a job's tests wait for the lock.

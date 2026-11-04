@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,8 @@ import (
 
 func TestUKIRequiredSpace(t *testing.T) {
 	n, err := ukiRequiredSpace(4097, 4096)
-	if err != nil || n != limineMinFree+ukiMetadataAllowance+8192 {
+	margin, _ := ukiRetainedSpace(4097)
+	if err != nil || n != margin+8192 {
 		t.Fatal(n, err)
 	}
 	for _, p := range [][2]uint64{{0, 4096}, {1, 0}, {^uint64(0), 4096}, {^uint64(0) - 4095, 4096}} {
@@ -20,17 +22,17 @@ func TestUKIRequiredSpace(t *testing.T) {
 			t.Fatal(p)
 		}
 	}
-	// Real retained M3 numbers: old-default archival is not performed here.
+	// Real retained M3 numbers under the 10%-of-actual policy.
 	needed, err := ukiRequiredSpace(63985152, 4096)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if 132947968 >= needed || 195676672 < needed {
-		t.Fatal("wrong retained M3 capacity decisions", needed)
+	if want := uint64(63987712 + 6398516 + ukiMetadataAllowance); needed != want {
+		t.Fatal("wrong retained M3 capacity decision", needed, want)
 	}
 }
 func TestUKIReservePrivateBuildAndBoundary(t *testing.T) {
-	for _, test := range []string{"fits", "one byte too small", "post-copy space loss", "same filesystem", "build failure", "empty build", "symlink build", "cancel before copy", "lock failure"} {
+	for _, test := range []string{"fits", "66 MiB UKI fits 166 MiB", "one byte too small", "post-copy space loss", "same filesystem", "build failure", "empty build", "symlink build", "cancel before copy", "lock failure"} {
 		t.Run(test, func(t *testing.T) {
 			root := t.TempDir()
 			scratch := filepath.Join(root, "private")
@@ -40,7 +42,11 @@ func TestUKIReservePrivateBuildAndBoundary(t *testing.T) {
 			out := filepath.Join(esp, "uki.efi")
 			old := []byte("old owned staged UKI preserved until commit")
 			os.WriteFile(out, old, 0600)
-			image := bytes.Repeat([]byte{'k'}, 4097)
+			imageSize := 4097
+			if test == "66 MiB UKI fits 166 MiB" {
+				imageSize = 66 << 20
+			}
+			image := bytes.Repeat([]byte{'k'}, imageSize)
 			needed, _ := ukiRequiredSpace(uint64(len(image)), 4096)
 			held, built := false, false
 			dstCalls := 0
@@ -100,9 +106,12 @@ func TestUKIReservePrivateBuildAndBoundary(t *testing.T) {
 				}
 				if test == "one byte too small" {
 					available = needed - 1
+				} else if test == "66 MiB UKI fits 166 MiB" {
+					available = 166 << 20
 				}
 				if dstCalls >= 3 {
-					available = limineMinFree + ukiMetadataAllowance
+					retained, _ := ukiRetainedSpace(uint64(len(image)))
+					available = retained
 					if test == "post-copy space loss" {
 						available--
 					}
@@ -111,9 +120,9 @@ func TestUKIReservePrivateBuildAndBoundary(t *testing.T) {
 			}
 			err := writeUKIWith(ctx, "test-release", "kernel-image", "root=test", out, w)
 			got, _ := os.ReadFile(out)
-			if test == "fits" {
+			if test == "fits" || test == "66 MiB UKI fits 166 MiB" {
 				if err != nil || !bytes.Equal(got, image) {
-					t.Fatal(err, string(got))
+					t.Fatal(err, len(got))
 				}
 			} else if err == nil || !bytes.Equal(got, old) {
 				t.Fatalf("unsafe or clobbered on %s: %v", test, err)
@@ -130,5 +139,78 @@ func TestUKIReservePrivateBuildAndBoundary(t *testing.T) {
 				t.Fatal("ESP temporary file leaked")
 			}
 		})
+	}
+}
+
+// Preflight asks for what staging will: the UKI, rounded up, plus a 10%
+// margin over the measured UKI and the metadata allowance. The numbers are
+// the MacBook Neo's from the first encrypted-Mac run (chriskearney/maclab#38).
+func TestLimineStageProblem(t *testing.T) {
+	const alloc, neoUKI, neoFree = 4096, 62205952, 174837760
+	sized := func(t *testing.T, p string, n int64) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Truncate(p, n); err != nil { // sparse: no real space used
+			t.Fatal(err)
+		}
+	}
+	esp := t.TempDir()
+	own := filepath.Join(esp, "EFI/Linux/omarchy_linux-asahi.efi")
+	sized(t, own, neoUKI)
+	sized(t, filepath.Join(esp, "EFI/Linux/snapshots/old.efi"), 1000)
+	sized(t, filepath.Join(esp, "EFI/Linux/notes.txt"), 300<<20) // not a UKI
+	sized(t, filepath.Join(esp, "maclab/j1/uki.efi"), 300<<20)   // a staged job, not under EFI/Linux
+	if err := os.Symlink(filepath.Join(esp, "maclab/j1/uki.efi"), filepath.Join(esp, "EFI/Linux/link.efi")); err != nil {
+		t.Fatal(err)
+	}
+	if name, size := largestUKI(esp); name != own || size != neoUKI {
+		t.Fatalf("largestUKI = %s, %d; want %s, %d", name, size, own, neoUKI)
+	}
+	need, err := ukiRequiredSpace(neoUKI, alloc)
+	if err != nil || need != uint64(62205952+6220596+ukiMetadataAllowance) {
+		t.Fatalf("need %d, %v; want staging's margin-based need", need, err)
+	}
+	stage := filepath.Join(esp, "maclab")
+	for _, c := range []struct {
+		name string
+		free uint64
+		ok   bool
+	}{
+		{"the Neo's ESP", neoFree, true}, // the old 120 MiB floor rejected it
+		{"one byte short", need - 1, false},
+		{"exactly enough", need, true},
+		{"plenty", need + 100<<20, true},
+	} {
+		got := limineStageProblem(esp, stage, c.free, alloc)
+		if (got == "") != c.ok {
+			t.Errorf("%s: %q, want ok %v", c.name, got, c.ok)
+			continue
+		}
+		if !c.ok {
+			for _, want := range []string{fmt.Sprintf("needs %.1f MiB", mib(need)), fmt.Sprintf("%.1f MiB is free", mib(c.free)),
+				fmt.Sprintf("about %.1f MiB, the size of %s", mib(neoUKI), own), "10% margin over UKI size", stage} {
+				if !strings.Contains(got, want) {
+					t.Errorf("%s: %q doesn't say %q", c.name, got, want)
+				}
+			}
+		}
+	}
+
+	// No UKI to measure: assume a typical one.
+	empty := t.TempDir()
+	guess, _ := ukiRequiredSpace(ukiSizeGuess, alloc)
+	if got := limineStageProblem(empty, stage, guess, alloc); got != "" {
+		t.Errorf("enough for the guess: %q", got)
+	}
+	if got := limineStageProblem(empty, stage, guess-1, alloc); !strings.Contains(got, "a guess") {
+		t.Errorf("short of the guess: %q", got)
+	}
+	if got := limineStageProblem(esp, stage, need, 0); !strings.Contains(got, "can't work out") {
+		t.Errorf("no allocation unit: %q", got)
 	}
 }

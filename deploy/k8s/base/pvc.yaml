@@ -1,0 +1,14 @@
+# All of labd's state: labd.db (SQLite, WAL mode: labd.db, -wal, -shm), artifacts/ (the store, --artifact-budget-gb
+# caps it, default 20 GiB), jobs/, builds/, frozen/, baselines/, screens/, serial/, audit/, admin.token, builder.token.
+# Retain: deleting the PVC keeps the Linode volume. ReadWriteOnce: one node, one pod.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maclab-data
+  namespace: maclab
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: linode-block-storage-retain
+  resources:
+    requests:
+      storage: 60Gi

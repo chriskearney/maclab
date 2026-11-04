@@ -6,7 +6,9 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -19,7 +21,13 @@ import (
 
 func main() {
 	home, _ := os.UserHomeDir()
-	listen := flag.String("listen", envOr("MACLAB_LISTEN", "127.0.0.1:7770"), "address to serve the API on: labd's tailnet IP and port, e.g. 100.64.0.1:7770 (agents must reach it; the default is this machine only)")
+	listen := flag.String("listen", envOr("MACLAB_LISTEN", "127.0.0.1:7770"), "address to serve on (the default is this machine only, e.g. behind a reverse proxy); any other address needs --tls-cert/--tls-key or --allow-plain-http")
+	tlsCert := flag.String("tls-cert", "", "serve https with this PEM certificate (chain); re-read when it changes")
+	tlsKey := flag.String("tls-key", "", "the PEM private key for --tls-cert")
+	plainHTTP := flag.Bool("allow-plain-http", false, "serve plain http on an address other than loopback, e.g. a LAN or tailnet address or a pod behind its ingress: tokens and device secrets cross that network in the clear")
+	publicURL := flag.String("public-url", "", "the URL people and Macs reach labd at, e.g. https://chonkbase.net/maclab: its path is the prefix labd serves under (a reverse proxy passes the path on unchanged)")
+	trustedProxy := flag.String("trusted-proxy", "", "CIDRs of the reverse proxies in front of labd, comma separated: only they may forward X-Forwarded-Proto/Host, which must match --public-url (never with --tailscale)")
+	termsFile := flag.String("terms-file", "", "participation terms a Mac's owner accepts before it joins (default: labd's built-in terms)")
 	data := flag.String("data", filepath.Join(home, ".local/share/maclab"), "data directory")
 	ntfy := flag.String("ntfy", os.Getenv("MACLAB_NTFY"), "ntfy topic URL for notifications, e.g. https://ntfy.sh/<secret-topic>")
 	notifyCmd := flag.String("notify-cmd", os.Getenv("MACLAB_NOTIFY_CMD"), `shell command run per notification with $MACLAB_TITLE/$MACLAB_BODY, e.g. 'notify-send "$MACLAB_TITLE" "$MACLAB_BODY"'`)
@@ -47,6 +55,30 @@ func main() {
 	omtEvery := flag.Duration("omt-every", 0, "re-run omarchy-m-test on each idle Mac's known-good kernel this often, e.g. 24h (reboots the Mac); 0 never")
 	rebootWarning := flag.Duration("reboot-warning", 5*time.Minute, "how long before a Volunteer job's first reboot its Mac shows the Volunteer a notice, which the job then waits for; 0 shows none and waits for none")
 	flag.Parse()
+	var pub *url.URL
+	if *publicURL != "" {
+		u, err := server.ParsePublicURL(*publicURL)
+		if err != nil {
+			log.Fatal(err)
+		}
+		pub = u
+	}
+	proxies, err := server.ParseTrustedProxies(*trustedProxy)
+	if err != nil {
+		log.Fatal(err)
+	}
+	var terms string
+	if *termsFile != "" {
+		b, err := os.ReadFile(*termsFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		terms = string(b)
+	}
+	lc := server.ListenConfig{Addr: *listen, CertFile: *tlsCert, KeyFile: *tlsKey, AllowPlainHTTP: *plainHTTP}
+	if err := lc.Check(); err != nil {
+		log.Fatal(err)
+	}
 
 	if err := os.MkdirAll(*data, 0o700); err != nil {
 		log.Fatal(err)
@@ -75,7 +107,7 @@ func main() {
 	// ./volunteer downloads the lab-agent built alongside labd.
 	exe, _ := os.Executable()
 	s, err := server.New(ctx, server.Config{DataDir: *data, FirstMaintainer: *maintainer, FirstMaintainerToken: tok,
-		Tailscale: *tailscale, AllowHosts: allowHosts,
+		Tailscale: *tailscale, AllowHosts: allowHosts, PublicURL: pub, TrustedProxies: proxies, Terms: terms,
 		OMT: *omt, OMTSite: *omtSite, OMTPublish: *omtPublish, OMTEvery: *omtEvery,
 		BootTimeout: *bootTimeout, OfflineAfter: *offlineAfter, AliveWindow: *aliveWindow, QuietGrace: *quietGrace, StageTimeout: *stageTimeout, WatchdogOpenTimeout: *watchdogOpenTimeout, RebootWarning: *rebootWarning, NtfyURL: *ntfy, NotifyCmd: *notifyCmd,
 		BuilderToken: strings.TrimSpace(string(btok)), ArtifactBudget: *artifactGB << 30,
@@ -83,15 +115,27 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	hs := &http.Server{Addr: *listen, Handler: s.Handler()}
+	hs, err := lc.Server(s.Handler(), log.Default())
+	if err != nil {
+		log.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		log.Fatal(err)
+	}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		hs.Shutdown(sctx)
 	}()
-	log.Printf("labd listening on %s, data in %s", *listen, *data)
-	if err := hs.ListenAndServe(); err != http.ErrServerClosed {
+	scheme := map[bool]string{true: "https", false: "http"}[*tlsCert != ""]
+	if pub != nil {
+		log.Printf("labd listening on %s (%s), served as %s, data in %s", *listen, scheme, pub, *data)
+	} else {
+		log.Printf("labd listening on %s (%s), data in %s", *listen, scheme, *data)
+	}
+	if err := server.Serve(hs, ln); err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }

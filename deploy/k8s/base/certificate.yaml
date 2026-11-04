@@ -1,0 +1,13 @@
+# TLS for maclab.chonkbase.net, from the cluster's ClusterIssuer (the one the chonkbase hosts and slopblender use;
+# DNS-01 through the Linode webhook). Issued before the Ingress references it.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: maclab-tls
+  namespace: maclab
+spec:
+  secretName: maclab-tls
+  dnsNames: [maclab.chonkbase.net]
+  issuerRef:
+    name: letsencrypt-production
+    kind: ClusterIssuer

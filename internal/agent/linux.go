@@ -155,17 +155,18 @@ func (l *Linux) Preflight() (problems, warnings []string) {
 	}
 	bins := []string{"findmnt", "tar", "depmod", "journalctl"}
 	minFree := uint64(300 << 20)
+	var lim *limineLayout
 	b, err := detectBootloader()
 	if err != nil {
 		p = append(p, "bootloader: "+err.Error())
 	} else {
 		p = append(p, b.problems()...)
-		switch b.(type) {
+		switch b := b.(type) {
 		case *grubLayout:
 			bins = append(bins, "grub-editenv")
 		case *limineLayout:
 			bins = append(bins, "chattr", "objcopy")
-			minFree = limineMinFree
+			lim = b
 		}
 	}
 	hard, warnings := unattended(b)
@@ -197,8 +198,16 @@ func (l *Linux) Preflight() (problems, warnings []string) {
 	// Test kernels already staged there are deleted before the next job stages
 	// (a job starts by cleaning up its Mac), so they count as free: otherwise
 	// one staged job would block queueing the next.
-	if syscall.Statfs(probe, &st) == nil && st.Bavail*uint64(st.Bsize)+dirSize(stage) < minFree {
-		p = append(p, fmt.Sprintf("less than %d MB free where test kernels are staged (%s)", minFree>>20, stage))
+	if syscall.Statfs(probe, &st) == nil {
+		free := st.Bavail*uint64(st.Bsize) + dirSize(stage)
+		if lim != nil {
+			// Under Limine, staging needs what writeUKIWith checks, not just the reserve.
+			if msg := limineStageProblem(lim.ESP.Target, stage, free, uint64(st.Bsize)); msg != "" {
+				p = append(p, msg)
+			}
+		} else if free < minFree {
+			p = append(p, fmt.Sprintf("less than %d MB free where test kernels are staged (%s)", minFree>>20, stage))
+		}
 	}
 	return p, warnings
 }

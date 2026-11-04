@@ -9,14 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
 )
 
-// Allow for the directory entry, atomic menu update and persisted EFI store,
-// in addition to the rounded UKI allocation. Do not spend the retained 120MiB
-// reserve on these later steps. Only one UKI copy is created on the ESP.
+// Allow for the directory entry, atomic menu update and persisted EFI store.
+// Only one UKI copy is created on the ESP.
 const ukiMetadataAllowance uint64 = 1 << 20
 
 type ukiSpace struct{ Available, Allocation, Device uint64 }
@@ -105,7 +105,7 @@ func writeUKIWith(ctx context.Context, krel, image, cmdline, out string, w ukiWr
 		return err
 	}
 	if free.Available < needed {
-		return fmt.Errorf("ESP reserve: need %d bytes free for UKI allocation plus retained reserve and metadata, have %d", needed, free.Available)
+		return fmt.Errorf("ESP reserve: need %d bytes free for UKI allocation plus 10%% UKI margin and metadata, have %d", needed, free.Available)
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(out), ".maclab-uki-*")
 	if err != nil {
@@ -152,8 +152,12 @@ func writeUKIWith(ctx context.Context, krel, image, cmdline, out string, w ukiWr
 	if free.Device != destinationSpace.Device {
 		return fmt.Errorf("UKI destination filesystem changed after copy")
 	}
-	if free.Available < limineMinFree+ukiMetadataAllowance {
-		return fmt.Errorf("ESP reserve no longer available after UKI copy")
+	postCopyReserve, err := ukiRetainedSpace(uint64(st.Size()))
+	if err != nil {
+		return err
+	}
+	if free.Available < postCopyReserve {
+		return fmt.Errorf("ESP reserve no longer available after UKI copy: need %d bytes, have %d", postCopyReserve, free.Available)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
@@ -173,17 +177,31 @@ func writeUKIWith(ctx context.Context, krel, image, cmdline, out string, w ukiWr
 	}
 	return nil
 }
+func ukiRetainedSpace(size uint64) (uint64, error) {
+	margin := size / 10
+	if size%10 != 0 {
+		margin++
+	}
+	if margin > ^uint64(0)-ukiMetadataAllowance {
+		return 0, fmt.Errorf("UKI reserve overflow")
+	}
+	return margin + ukiMetadataAllowance, nil
+}
+
 func ukiRequiredSpace(size, allocation uint64) (uint64, error) {
 	max := ^uint64(0)
 	if size == 0 || allocation == 0 || size > max-(allocation-1) {
 		return 0, fmt.Errorf("invalid UKI allocation size")
 	}
 	rounded := (size + allocation - 1) / allocation * allocation
-	overhead := uint64(limineMinFree) + ukiMetadataAllowance
-	if rounded > max-overhead {
+	retained, err := ukiRetainedSpace(size)
+	if err != nil {
+		return 0, err
+	}
+	if rounded > max-retained {
 		return 0, fmt.Errorf("UKI allocation overflow")
 	}
-	return rounded + overhead, nil
+	return rounded + retained, nil
 }
 
 // buildUKIFile preserves the existing generator and flags. All generated
@@ -233,3 +251,48 @@ func ukiScratchPath(p string) (string, error) {
 	}
 	return abs, nil
 }
+
+// ukiSizeGuess is the UKI size preflight assumes when the ESP has none of its
+// own to measure. Omarchy's Asahi UKIs are about 60 MiB.
+const ukiSizeGuess uint64 = 64 << 20
+
+// largestUKI is the biggest UKI under <esp>/EFI/Linux, where Limine's tools
+// put the Mac's own. A staged test kernel is built from the known-good kernel
+// and an initramfs like theirs, so it is about that size. "" and 0: none.
+func largestUKI(esp string) (string, uint64) {
+	var name string
+	var size uint64
+	filepath.WalkDir(filepath.Join(esp, "EFI", "Linux"), func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.EqualFold(filepath.Ext(p), ".efi") {
+			return nil
+		}
+		if info, err := d.Info(); err == nil && info.Mode().IsRegular() && uint64(info.Size()) > size {
+			name, size = p, uint64(info.Size())
+		}
+		return nil
+	})
+	return name, size
+}
+
+// limineStageProblem says why the ESP can't take a staged test kernel, or ""
+// if it can. free is what staging may use (staged jobs count as free: a job
+// cleans them up first); allocation is the ESP's allocation unit.
+func limineStageProblem(esp, stage string, free, allocation uint64) string {
+	name, size := largestUKI(esp)
+	what := "the size of " + name
+	if size == 0 {
+		size, what = ukiSizeGuess, "a guess: there is no UKI in "+filepath.Join(esp, "EFI", "Linux")+" to measure"
+	}
+	need, err := ukiRequiredSpace(size, allocation)
+	if err != nil {
+		return fmt.Sprintf("can't work out the space staging a test kernel needs in %s: %v", stage, err)
+	}
+	if free >= need {
+		return ""
+	}
+	return fmt.Sprintf("not enough free space on the ESP to stage a test kernel in %s: staging needs %.1f MiB "+
+		"(a UKI of about %.1f MiB, %s, plus a 10%% margin over UKI size and %d MiB for metadata), and %.1f MiB is free",
+		stage, mib(need), mib(size), what, ukiMetadataAllowance>>20, mib(free))
+}
+
+func mib(n uint64) float64 { return float64(n) / (1 << 20) }
