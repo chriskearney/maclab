@@ -50,11 +50,11 @@ def package(source, obj, io, gitdir):
         if not path.is_file() or path.stat().st_size == 0:
             raise ValueError("missing completed-kernel input: " + name)
     release = (obj / "include/config/kernel.release").read_text().strip()
-    compiler = [
-        line
-        for line in (obj / "include/generated/compile.h").read_text().splitlines()
-        if line.startswith("#define LINUX_COMPILER ")
-    ]
+    compiler = []
+    for line in (obj / "include/generated/compile.h").read_text().splitlines():
+        fields = line.split(maxsplit=2)
+        if len(fields) == 3 and fields[:2] == ["#define", "LINUX_COMPILER"]:
+            compiler.append(line)
     if len(compiler) != 1 or not release:
         raise ValueError("missing compiled release/compiler identity")
     output = io / "out"
