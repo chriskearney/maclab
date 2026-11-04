@@ -56,7 +56,15 @@ sudo scripts/lab-only-autounlock disable
 `enable` refuses unless the root is LUKS2, unlocked by one `rd.luks.name=` or
 `rd.luks.uuid=` on the kernel command line, by a systemd initramfs
 (`systemd` and `sd-encrypt` hooks, not `encrypt`), and the Mac boots Limine
-UKIs. It then:
+UKIs. In the boot where an Omarchy Mac encrypts its root in place (the first
+boot of a fresh install), the running command line has no `rd.luks.*`: the
+initramfs opened the new volume itself. The script then takes the volume
+from `/etc/crypttab` (the entry for the mapping `/` is on, by `UUID=`) and
+requires the command line the next boot gets (`GRUB_CMDLINE_LINUX`, see
+step 4) to carry exactly one matching `rd.luks.name=<uuid>=<volume>`, which
+`omarchy-mac-encrypt` writes there. The unlock path is the same either way:
+`sd-encrypt` unlocks from `rd.luks.*` on the command line, and a plain
+`/etc/crypttab` line never reaches the initramfs. It then:
 
 1. backs up the LUKS header to `/root/lab-only-autounlock-backups/` (copy it
    off the Mac and keep it private);
@@ -83,14 +91,20 @@ UKIs. It then:
 
 All of `enable`'s refusals come before it asks you to confirm and before it
 adds the key slot, so a refused `enable` leaves nothing behind. Besides the
-layout above, it refuses an `/etc/crypttab.initramfs` entry for the volume,
+layout above, it refuses a crypttab entry for the volume that the initramfs
+gets (`/etc/crypttab.initramfs`, or an `/etc/crypttab` line with
+`x-initrd.attach`),
 another `rd.luks.key=` for it on the command line, a command line that isn't
 one plain double-quoted value, and an Omarchy Mac (the `omarchy-mac-*` tools
 are there) with no `/etc/default/grub`.
 
 Reboot: there should be no passphrase prompt, and preflight should accept the
-Mac. On the first hardware run (chriskearney/maclab#38) preflight accepted
-both encrypted Macs with no change to maclab, and their Lab boots unlocked
+Mac. Preflight reads the running command line, so a Mac enabled in its
+encrypting first boot passes only after that reboot.
+`omarchy-apple-silicon-boot-check` reports the `rd.luks.key=` while this is
+enabled ("still has rd.luks.key= after provisioning"); that is expected. On
+the first hardware run (chriskearney/maclab#38) preflight accepted both
+encrypted Macs with no change to maclab, and their Lab boots unlocked
 unattended.
 
 `status` reports each piece: the key slots, the key file and which slot it

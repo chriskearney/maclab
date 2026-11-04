@@ -20,6 +20,10 @@
 # image when the key file is gone), so the copies left on this Mac open nothing; then the key
 # file, the drop-in and the cmdline argument, rebuilds and checks. It can't undo what someone who
 # had the Mac while it was enabled may have kept: the volume key never changes.
+#
+# The volume is the one rd.luks.name= or rd.luks.uuid= on this boot's command line names. In the
+# boot where an Omarchy Mac encrypts its root in place there is none: then it is /'s volume in
+# /etc/crypttab, which the command line the next boot gets must name with rd.luks.name=.
 set -euo pipefail
 export LC_ALL=C
 
@@ -30,6 +34,8 @@ STATE=/boot/omarchy/encrypt.state # Omarchy Mac: the owner's and recovery key sl
 LIMINE=/etc/default/limine
 GRUB=/etc/default/grub
 CRYPTTAB=/etc/crypttab.initramfs
+ETC_CRYPTTAB=/etc/crypttab
+PROC_CMDLINE=/proc/cmdline
 BACKUPS=/root/lab-only-autounlock-backups
 TMPD=
 
@@ -102,34 +108,82 @@ orphan_slots() {
 
 state_value() { awk -F= -v k="$1" '$1 == k { sub(/^[^=]*=/, ""); print; exit }' "$STATE"; }
 
-# Sets UUID, VOLUME, DEVICE, KEY, TOKEN, MODE, CMDFILE, CMDLINE_RE, REBUILD, ESP, UKI_NAME,
-# LIMINE_CONF, KEEP.
-check_layout() {
-	local args hooks root state_uuid slots s owner recovery c
-	mapfile -t args < <(tr ' ' '\n' </proc/cmdline | grep -E '^rd\.luks\.(name|uuid)=' || true)
-	(( ${#args[@]} == 1 )) || die "expected exactly one rd.luks.name= or rd.luks.uuid= on the kernel command line, found ${#args[@]}; this needs a LUKS2 root that the systemd initramfs unlocks"
-	case ${args[0]} in
-		rd.luks.name=*)
-			args[0]=${args[0]#rd.luks.name=}
-			UUID=${args[0]%%=*}
-			VOLUME=${args[0]#*=} ;;
-		rd.luks.uuid=*)
-			UUID=${args[0]#rd.luks.uuid=}
-			UUID=${UUID#luks-}
-			VOLUME=luks-$UUID ;;
-	esac
-	[[ $UUID =~ ^[0-9a-fA-F-]{36}$ ]] || die "unexpected LUKS UUID on the kernel command line: $UUID"
-	[[ $VOLUME =~ ^[A-Za-z0-9_-]+$ ]] || die "unexpected volume name on the kernel command line: $VOLUME"
-	[[ -e /dev/disk/by-uuid/$UUID ]] || die "no disk with LUKS UUID $UUID"
-	DEVICE=$(readlink -f "/dev/disk/by-uuid/$UUID")
-	cryptsetup isLuks --type luks2 "$DEVICE" || die "$DEVICE isn't LUKS2"
-	[[ -e /dev/mapper/$VOLUME ]] || die "/dev/mapper/$VOLUME isn't open"
-	root=$(findmnt -no SOURCE /) || die "can't tell what / is mounted from"
-	root=${root%%\[*}
-	[[ $(readlink -f "$root") == "$(readlink -f "/dev/mapper/$VOLUME")" ]] || die "/ is on $root, not on /dev/mapper/$VOLUME; this only handles the root volume"
-	KEY=$KEYDIR/$VOLUME.key
-	TOKEN=rd.luks.key=$UUID=$KEY
+# The rd.luks.name= and rd.luks.uuid= words in the text on stdin, one per line.
+luks_args() { tr -s " \t\"'" '\n' | { grep -E '^rd\.luks\.(name|uuid)=' || true; }; }
 
+# Sets UUID and VOLUME from one rd.luks.name=<uuid>=<volume> or rd.luks.uuid=[luks-]<uuid>.
+parse_luks_arg() {
+	local v
+	case $1 in
+		rd.luks.name=*) v=${1#rd.luks.name=}; UUID=${v%%=*}; VOLUME=${v#*=} ;;
+		rd.luks.uuid=*) UUID=${1#rd.luks.uuid=}; UUID=${UUID#luks-}; VOLUME=luks-$UUID ;;
+	esac
+}
+
+# The /dev/mapper name of the dm device / is mounted from, or nothing.
+root_mapping() {
+	local src
+	src=$(findmnt -no SOURCE /) || return 0
+	src=${src%%\[*}
+	case $src in
+		/dev/mapper/*) printf '%s\n' "${src#/dev/mapper/}" ;;
+		*) cat "/sys/class/block/$(basename "$(readlink -f "$src")")/dm/name" 2>/dev/null || true ;;
+	esac
+}
+
+# "<crypttab>\t<device>" for each line of crypttab.initramfs and /etc/crypttab that sets up volume $1.
+crypttab_devices() {
+	local f
+	for f in "$CRYPTTAB" "$ETC_CRYPTTAB"; do
+		[[ -r $f ]] || continue
+		awk -v vol="$1" -v f="$f" '!/^[[:space:]]*(#|$)/ && $1 == vol { print f "\t" $2 }' "$f"
+	done
+}
+
+# Sets UUID, VOLUME and VOLUME_FROM (cmdline or crypttab): the LUKS volume / is on, as the systemd
+# initramfs unlocks it. Normally from the one rd.luks.name= or rd.luks.uuid= this boot had. The
+# boot in which an Omarchy Mac encrypts its root in place has none: the initramfs opened the new
+# volume itself, with the command line from before. omarchy-mac-encrypt has then written
+# /etc/crypttab and put rd.luks.name=<uuid>=root in the command line the next boot gets. So
+# without rd.luks.* this boot, the volume comes from crypttab, and CMDFILE's command line, where
+# the key's rd.luks.key= goes, must name the same volume: the initramfs reads only rd.luks.*,
+# crypttab.initramfs and x-initrd.attach lines, never a plain /etc/crypttab line.
+find_volume() {
+	local args vol lines l dev u cu cv
+	UUID= VOLUME= VOLUME_FROM=
+	mapfile -t args < <(luks_args <"$PROC_CMDLINE")
+	if (( ${#args[@]} == 1 )); then
+		parse_luks_arg "${args[0]}"; VOLUME_FROM=cmdline; return 0
+	fi
+	(( ${#args[@]} == 0 )) || die "expected exactly one rd.luks.name= or rd.luks.uuid= on the kernel command line, found ${#args[@]}; this needs a LUKS2 root that the systemd initramfs unlocks"
+	vol=$(root_mapping)
+	[[ $vol =~ ^[A-Za-z0-9_-]+$ ]] || die "no rd.luks.name= or rd.luks.uuid= on the kernel command line, and / isn't on a dm-crypt volume this can name; this needs a LUKS2 root that the systemd initramfs unlocks"
+	mapfile -t lines < <(crypttab_devices "$vol")
+	(( ${#lines[@]} )) || die "no rd.luks.name= or rd.luks.uuid= on the kernel command line, and no crypttab entry for $vol, which / is on; not guessing which LUKS volume that is"
+	for l in "${lines[@]}"; do
+		dev=${l#*$'\t'}
+		case $dev in
+			UUID=*) u=${dev#UUID=} ;;
+			/dev/disk/by-uuid/*) u=${dev#/dev/disk/by-uuid/} ;;
+			*) die "${l%%$'\t'*} names the device of $vol as $dev; this reads only UUID=<uuid> or /dev/disk/by-uuid/<uuid> there" ;;
+		esac
+		[[ -z $UUID || ${UUID,,} == "${u,,}" ]] || die "the crypttab entries for $vol name two LUKS UUIDs ($UUID and $u); not guessing"
+		UUID=$u
+	done
+	VOLUME=$vol
+	mapfile -t args < <({ grep -E "$CMDLINE_RE" "$CMDFILE" || true; } | luks_args | sort -u)
+	(( ${#args[@]} )) || die "no rd.luks.name= or rd.luks.uuid= on this boot's kernel command line or in $CMDFILE's: the next boot's initramfs wouldn't unlock $VOLUME from the kernel command line, so rd.luks.key there would do nothing. This needs rd.luks.name=$UUID=$VOLUME in $CMDFILE"
+	(( ${#args[@]} == 1 )) || die "$CMDFILE's command line has ${#args[@]} rd.luks.name=/rd.luks.uuid= arguments (${args[*]}); expected exactly one, for $VOLUME"
+	cu=$UUID cv=$VOLUME
+	parse_luks_arg "${args[0]}"
+	[[ ${UUID,,} == "${cu,,}" && $VOLUME == "$cv" ]] || die "/ is on $cv (LUKS $cu in crypttab), but $CMDFILE's command line, which the next boot gets, has ${args[0]}; not guessing which is right"
+	VOLUME_FROM=crypttab
+}
+
+# Sets UUID, VOLUME, VOLUME_FROM, DEVICE, KEY, TOKEN, MODE, CMDFILE, CMDLINE_RE, REBUILD, ESP,
+# UKI_NAME, LIMINE_CONF, KEEP.
+check_layout() {
+	local hooks root state_uuid slots s owner recovery c
 	hooks=$(effective_hooks)
 	grep -qx systemd <<<"$hooks" || die "the initramfs isn't systemd-based (no systemd hook in HOOKS)"
 	grep -qx sd-encrypt <<<"$hooks" || die "the initramfs has no sd-encrypt hook"
@@ -150,6 +204,20 @@ check_layout() {
 		grep -qE '^KERNEL_CMDLINE\[default\]\+?=' "$LIMINE" || die "$LIMINE has no KERNEL_CMDLINE[default] line to add rd.luks.key to"
 		MODE=limine CMDFILE=$LIMINE CMDLINE_RE='^KERNEL_CMDLINE\[default\]\+?=' REBUILD=limine-update
 	fi
+
+	find_volume
+	[[ $UUID =~ ^[0-9a-fA-F-]{36}$ ]] || die "unexpected LUKS UUID: $UUID"
+	[[ $VOLUME =~ ^[A-Za-z0-9_-]+$ ]] || die "unexpected volume name: $VOLUME"
+	[[ -e /dev/disk/by-uuid/$UUID ]] || die "no disk with LUKS UUID $UUID"
+	DEVICE=$(readlink -f "/dev/disk/by-uuid/$UUID")
+	cryptsetup isLuks --type luks2 "$DEVICE" || die "$DEVICE isn't LUKS2"
+	[[ -e /dev/mapper/$VOLUME ]] || die "/dev/mapper/$VOLUME isn't open"
+	root=$(findmnt -no SOURCE /) || die "can't tell what / is mounted from"
+	root=${root%%\[*}
+	[[ $(readlink -f "$root") == "$(readlink -f "/dev/mapper/$VOLUME")" ]] || die "/ is on $root, not on /dev/mapper/$VOLUME; this only handles the root volume"
+	KEY=$KEYDIR/$VOLUME.key
+	TOKEN=rd.luks.key=$UUID=$KEY
+
 	[[ $(limine_value ENABLE_UKI) == yes ]] || die "$LIMINE doesn't set ENABLE_UKI=yes"
 	UKI_NAME=$(limine_value CUSTOM_UKI_NAME)
 	[[ $UKI_NAME =~ ^[a-z0-9]+$ ]] || die "$LIMINE has no CUSTOM_UKI_NAME that Limine would use"
@@ -330,10 +398,20 @@ other_luks_keys() {
 		{ grep -vxF -- "$TOKEN" || true; } | { grep -iE "^rd\.luks\.key=(${UUID}=|[^0-9a-f])" || true; } | sort -u | paste -sd' '
 }
 
-# The entry for this volume in /etc/crypttab.initramfs, if any.
+# The crypttab entry for this volume that the initramfs reads, if any, as "<file>: <line>". sd-encrypt
+# copies /etc/crypttab.initramfs into the initramfs when there is one, and otherwise the
+# /etc/crypttab lines with x-initrd.attach in their options; a plain /etc/crypttab line stays out.
 crypttab_entry() {
-	[[ -r $CRYPTTAB ]] || return 0
-	awk -v vol="$VOLUME" -v uuid="${UUID,,}" '!/^[[:space:]]*(#|$)/ { if ($1 == vol || index(tolower($2), uuid)) { print; exit } }' "$CRYPTTAB"
+	local f all
+	for f in "$CRYPTTAB" "$ETC_CRYPTTAB"; do
+		[[ -r $f ]] || continue
+		all=$([[ $f == "$CRYPTTAB" ]] && echo 1 || true)
+		awk -v vol="$VOLUME" -v uuid="${UUID,,}" -v all="$all" -v f="$f" '
+			!/^[[:space:]]*(#|$)/ && (all || $4 ~ /(^|,)x-initrd\.attach(,|$)/) {
+				if ($1 == vol || index(tolower($2), uuid)) { print f ": " $0; exit }
+			}' "$f"
+		[[ ! -f $CRYPTTAB ]] || return 0 # with crypttab.initramfs there, /etc/crypttab stays out
+	done
 }
 
 # The checks edit_cmdline makes, run before anything changes, so a refusal there can't come after
@@ -551,8 +629,9 @@ status() {
 	e=$(other_luks_keys)
 	[[ -z $e ]] || say "command line: $CMDFILE also has $e (enable refuses while it is there)"
 	ct=$(crypttab_entry)
-	[[ -z $ct ]] || say "crypttab: $CRYPTTAB has an entry for this volume: $ct (enable refuses while it is there)"
-	if has_word "$(cat /proc/cmdline)" "$TOKEN"; then say "running boot: booted with it"; else say "running boot: booted without it"; fi
+	[[ -z $ct ]] || say "crypttab: the initramfs gets an entry for this volume: $ct (enable refuses while it is there)"
+	if has_word "$(cat "$PROC_CMDLINE")" "$TOKEN"; then say "running boot: booted with it"; else say "running boot: booted without it"; fi
+	[[ $VOLUME_FROM != crypttab ]] || say "running boot: had no rd.luks.* (the boot that encrypted the disk, not rebooted since?); $VOLUME and its UUID come from crypttab and the command line in $CMDFILE"
 	while read -r f; do
 		[[ -n $f ]] || continue
 		k=$(image_key "$f") t=$(uki_token "$f")
@@ -598,7 +677,7 @@ enable() {
 	# Every refusal comes here, before the confirmation and before a key slot is added, so a
 	# refused enable leaves nothing behind.
 	e=$(crypttab_entry)
-	[[ -z $e ]] || die "$CRYPTTAB has an entry for this volume ($e). The initramfs would take its options from there; this script only handles rd.luks.* on the kernel command line. Nothing changed"
+	[[ -z $e ]] || die "the initramfs gets a crypttab entry for this volume ($e) and would take its options from there; this script only handles rd.luks.* on the kernel command line. Nothing changed"
 	e=$(other_luks_keys)
 	[[ -z $e ]] || die "$CMDFILE already has $e for this volume; remove it (or set this up by hand) first. Nothing changed"
 	check_cmdfile add

@@ -234,5 +234,131 @@ shred() { forbidden shred; }
         self.assertEqual(effects, ['confirm'])
 
 
+AIR_UUID = 'c8761528-040e-4dad-992e-d8f1800d46e0'
+# The Omarchy 4.5 rc image in the boot that encrypted its root in place: the initramfs opened
+# the volume itself, so this boot's command line has no rd.luks.*; omarchy-mac-encrypt wrote
+# /etc/crypttab and the next boot's rd.luks.name= in GRUB_CMDLINE_LINUX.
+FIRST_BOOT_CMDLINE = ('root=UUID=4f4d5801-524f-4f54-8000-000000000001 rw rootflags=subvol=@,x-systemd.device-timeout=0 '
+                      'zswap.enabled=0 rootfstype=btrfs user4k=on quiet splash loglevel=0')
+FIRST_BOOT_GRUB = ('GRUB_DISTRIBUTOR="Omarchy"\n'
+                   'GRUB_CMDLINE_LINUX="zswap.enabled=0 rootfstype=btrfs rootflags=x-systemd.device-timeout=0 user4k=on '
+                   'rd.luks.name=' + AIR_UUID + '=root"\n'
+                   'GRUB_CMDLINE_LINUX_DEFAULT="quiet splash loglevel=0"\n')
+FIRST_BOOT_CRYPTTAB = 'root UUID=' + AIR_UUID + ' none luks\n'
+
+
+class VolumeTests(unittest.TestCase):
+    """find_volume and crypttab_entry against text fixtures of the two Omarchy Mac layouts."""
+
+    def run_fn(self, call, cmdline=FIRST_BOOT_CMDLINE, grub=FIRST_BOOT_GRUB, crypttab=FIRST_BOOT_CRYPTTAB,
+               initramfs_crypttab=None, mapping='root', volume='root', uuid=AIR_UUID):
+        functions = SCRIPT.read_text().split('# ---- main ', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='maclab-autounlock-volume-') as tmp:
+            root = Path(tmp)
+            (root / 'cmdline').write_text(cmdline + '\n')
+            (root / 'grub').write_text(grub)
+            if crypttab is not None:
+                (root / 'crypttab').write_text(crypttab)
+            if initramfs_crypttab is not None:
+                (root / 'crypttab.initramfs').write_text(initramfs_crypttab)
+            init = '\n'.join([
+                'FIX=' + shlex.quote(tmp), 'PROC_CMDLINE=$FIX/cmdline', 'ETC_CRYPTTAB=$FIX/crypttab',
+                'CRYPTTAB=$FIX/crypttab.initramfs', 'CMDFILE=$FIX/grub', "CMDLINE_RE='^GRUB_CMDLINE_LINUX='",
+                'VOLUME=' + shlex.quote(volume), 'UUID=' + shlex.quote(uuid),
+                'root_mapping() { printf "%s\\n" ' + shlex.quote(mapping) + '; }',
+                'findmnt() { echo FORBIDDEN: findmnt >&2; exit 99; }',
+                'cryptsetup() { echo FORBIDDEN: cryptsetup >&2; exit 99; }',
+            ])
+            fixture = root / 'volume-test.sh'
+            fixture.write_text(functions + '\n' + init + '\n' + call + '\n')
+            result = subprocess.run(['bash', '--noprofile', '--norc', str(fixture)], stdin=subprocess.DEVNULL,
+                                    text=True, capture_output=True,
+                                    env={'PATH': os.environ.get('PATH', os.defpath), 'LC_ALL': 'C'}, timeout=8)
+            output = result.stdout + result.stderr
+            self.assertNotIn('FORBIDDEN:', output)
+            return result.returncode, output
+
+    def volume(self, **kwargs):
+        return self.run_fn('find_volume; printf "%s %s %s\\n" "$UUID" "$VOLUME" "$VOLUME_FROM"', **kwargs)
+
+    def refused(self, **kwargs):
+        rc, output = self.volume(**kwargs)
+        self.assertEqual(rc, 1, output)
+        return output
+
+    def test_first_boot_volume_comes_from_crypttab_and_next_cmdline(self):
+        rc, output = self.volume()
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(output.strip(), AIR_UUID + ' root crypttab')
+
+    def test_crypttab_by_uuid_path_and_matching_initramfs_crypttab(self):
+        rc, output = self.volume(crypttab='root /dev/disk/by-uuid/' + AIR_UUID.upper() + ' none luks\n',
+                                 initramfs_crypttab='# comment\nroot UUID=' + AIR_UUID + ' none\n')
+        self.assertEqual(rc, 0, output)
+        self.assertTrue(output.strip().endswith(' root crypttab'), output)
+
+    def test_running_cmdline_rd_luks_name_still_wins(self):
+        rc, output = self.volume(cmdline=FIRST_BOOT_CMDLINE + ' rd.luks.name=' + AIR_UUID + '=root',
+                                 grub='GRUB_CMDLINE_LINUX=""\n', crypttab=None)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(output.strip(), AIR_UUID + ' root cmdline')
+
+    def test_running_cmdline_rd_luks_uuid_still_wins(self):
+        rc, output = self.volume(cmdline=FIRST_BOOT_CMDLINE + ' rd.luks.uuid=luks-' + AIR_UUID, crypttab=None)
+        self.assertEqual(rc, 0, output)
+        self.assertEqual(output.strip(), AIR_UUID + ' luks-' + AIR_UUID + ' cmdline')
+
+    def test_two_rd_luks_on_running_cmdline_refuse(self):
+        self.assertIn('found 2', self.refused(cmdline=FIRST_BOOT_CMDLINE + ' rd.luks.uuid=' + AIR_UUID +
+                                              ' rd.luks.name=' + AIR_UUID + '=root'))
+
+    def test_next_cmdline_without_rd_luks_refuses(self):
+        self.assertIn('rd.luks.key there would do nothing',
+                      self.refused(grub='GRUB_CMDLINE_LINUX="quiet"\nGRUB_CMDLINE_LINUX_DEFAULT="rd.luks.name=' + AIR_UUID + '=root"\n'))
+
+    def test_next_cmdline_naming_another_volume_refuses(self):
+        other = '11111111-2222-3333-4444-555555555555'
+        for grub in ('GRUB_CMDLINE_LINUX="rd.luks.name=' + other + '=root"\n',
+                     'GRUB_CMDLINE_LINUX="rd.luks.name=' + AIR_UUID + '=cryptroot"\n',
+                     'GRUB_CMDLINE_LINUX="rd.luks.uuid=' + AIR_UUID + '"\n'):
+            with self.subTest(grub=grub):
+                self.assertIn('not guessing which is right', self.refused(grub=grub))
+
+    def test_next_cmdline_with_two_rd_luks_refuses(self):
+        self.assertIn('expected exactly one', self.refused(
+            grub='GRUB_CMDLINE_LINUX="rd.luks.name=' + AIR_UUID + '=root rd.luks.uuid=' + AIR_UUID + '"\n'))
+
+    def test_root_not_on_a_mapping_refuses(self):
+        self.assertIn("isn't on a dm-crypt volume", self.refused(mapping=''))
+
+    def test_no_crypttab_entry_for_root_refuses(self):
+        for crypttab in (None, 'home UUID=' + AIR_UUID + ' none luks\n', '#root UUID=' + AIR_UUID + ' none\n'):
+            with self.subTest(crypttab=crypttab):
+                self.assertIn('no crypttab entry for root', self.refused(crypttab=crypttab))
+
+    def test_crypttab_device_not_by_uuid_refuses(self):
+        self.assertIn('reads only UUID=', self.refused(crypttab='root PARTUUID=a6dcab17-cb0e-4979-900b-6d64ba44cbb9 none luks\n'))
+
+    def test_crypttabs_disagreeing_on_uuid_refuse(self):
+        self.assertIn('two LUKS UUIDs', self.refused(
+            initramfs_crypttab='root UUID=11111111-2222-3333-4444-555555555555 none\n'))
+
+    def entry(self, **kwargs):
+        rc, output = self.run_fn('crypttab_entry', **kwargs)
+        self.assertEqual(rc, 0, output)
+        return output.strip()
+
+    def test_plain_etc_crypttab_line_does_not_reach_the_initramfs(self):
+        self.assertEqual(self.entry(), '')
+
+    def test_x_initrd_attach_line_reaches_the_initramfs(self):
+        self.assertIn('x-initrd.attach', self.entry(crypttab='root UUID=' + AIR_UUID + ' none luks,x-initrd.attach\n'))
+
+    def test_initramfs_crypttab_shadows_etc_crypttab(self):
+        self.assertEqual(self.entry(crypttab='root UUID=' + AIR_UUID + ' none x-initrd.attach\n',
+                                    initramfs_crypttab='swap /dev/sda2 /dev/urandom swap\n'), '')
+        self.assertIn('crypttab.initramfs: root', self.entry(initramfs_crypttab='root UUID=' + AIR_UUID + ' none\n'))
+
+
 if __name__ == '__main__':
     unittest.main()
