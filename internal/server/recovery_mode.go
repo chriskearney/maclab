@@ -186,7 +186,7 @@ func (s *Server) hRecoveryMode(w http.ResponseWriter, r *http.Request) {
 	if v == nil {
 		return
 	}
-	if err := refuseAtAccessLevel(v.snapshot(), "recovery-policy overrides"); err != nil {
+	if err := s.mayDo(callerOf(r), v, actRecovery); err != nil {
 		httpErr(w, 403, "%v", err)
 		return
 	}
@@ -209,7 +209,7 @@ func (s *Server) hRecoveryMode(w http.ResponseWriter, r *http.Request) {
 	v.recoveryMu.Lock()
 	defer v.recoveryMu.Unlock()
 	current := v.snapshot()
-	if current.Lease == nil || current.Lease.Holder != q.Holder || time.Until(current.Lease.Expires) < 30*time.Second || current.ActiveJob != "" || len(v.queue) > 0 {
+	if current.Lease == nil || !current.Lease.HeldBy(q.Holder, maintainerName(r)) || time.Until(current.Lease.Expires) < 30*time.Second || current.ActiveJob != "" || len(v.queue) > 0 {
 		httpErr(w, 409, "own lease covering transition and idle device required")
 		return
 	}

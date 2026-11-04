@@ -88,7 +88,7 @@ func (a *Agent) audit(ctx context.Context, c api.Command, refused error) error {
 	if !a.volunteer() {
 		return nil
 	}
-	e := api.AuditEntry{Time: a.clock().Now(), Maintainer: c.Maintainer, Job: c.JobID, Action: a.describeWithScript(ctx, c)}
+	e := api.AuditEntry{Time: a.clock().Now(), Maintainer: c.Maintainer, VolunteerLogin: c.VolunteerLogin, Job: c.JobID, Action: a.describeWithScript(ctx, c)}
 	if refused != nil {
 		e.Refused = strings.TrimPrefix(refused.Error(), "refused: ")
 	}

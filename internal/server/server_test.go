@@ -180,6 +180,7 @@ func newLabWith(t *testing.T, c labConfig) *lab {
 	logger := log.New(logw, "labd: ", log.Ltime|log.Lmicroseconds)
 	cfg := Config{DataDir: t.TempDir(), FirstMaintainer: harnessMaintainer, FirstMaintainerToken: harnessToken, Interval: 200 * time.Millisecond,
 		BootTimeout: 4 * time.Second, OfflineAfter: time.Hour, BuilderToken: "bld", Clock: clock,
+		RebootGrace: 2 * time.Second, LabClockSkew: time.Second, WatchdogIdleReset: 2 * time.Second,
 		OOBFactory: func(*api.Device) (oob.Controller, error) { return l.oob, nil }}
 	// labd's address is known before it starts, for its public URL.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -487,6 +488,33 @@ func TestRebootDuringTestWithNoKernelError(t *testing.T) {
 	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-reset behavior=reboot-in-test")})
 	l.expect(j, api.OutcomeCrashedOrHung)
 	if !strings.Contains(j.Summary, "crashed or hung during test boot-health: back ") || !strings.Contains(j.Summary, "quick, like a kernel panic") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+// A test kernel that goes down just after it reaches labd fails the job:
+// its tests go to the boot labd judged, and never run on the known-good
+// boot that replaced it, which would pass them.
+func TestRebootRightAfterBootIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-fragile behavior=crash-after-boot")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "crashed or hung during test boot-health") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+// So does one that goes down after its last test, before labd collects its
+// logs: they are not collected from the known-good boot, nor judged a pass.
+func TestRebootAfterTheTestsIsNotAPassOnTheKnownGoodKernel(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	j := l.run(api.JobSpec{Kernel: l.artifact("krel=7.2-fragile behavior=crash-after-tests")})
+	l.expect(j, api.OutcomeCrashedOrHung)
+	if !strings.Contains(j.Summary, "crashed or hung after its tests") {
 		t.Fatalf("summary: %s", j.Summary)
 	}
 	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
@@ -1654,6 +1682,41 @@ func (l *lab) cancelWhen(id, msg string) {
 // A cancel after the kernel failed keeps the failure as the outcome, so lab
 // gate counts it and a retry's pass reads as flaky, not clean. Tests the
 // cancel cut short are the cancel's, not the kernel's.
+// A cancel while labd waits for a Lab boot it lost, with no kernel error
+// seen, is the cancel's: the Mac may only have lost its network.
+func TestCancelWhileWaitingForALostMacIsNotTheKernels(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.HangFor = 20 * time.Second // silent long enough to cancel meanwhile
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-quiet behavior=hang-in-test")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.cancelWhen(j.ID, "waiting for it to come back")
+	j = l.wait(j.ID, 60*time.Second)
+	l.expect(j, api.OutcomeCanceled)
+	l.waitDevice(func(d api.Device) bool { return d.State == api.StateReady && d.Kernel == agent.SimKnownGood })
+}
+
+// A Lab boot that is off the network past quietGrace during its test, and
+// then back on the same boot, lost its network, not its kernel.
+func TestNetworkBackOnTheSameBootIsLostContact(t *testing.T) {
+	l := newLab(t, false)
+	l.baseline()
+	l.sim.SuspendFor = 8 * time.Second // past quietGrace (3s), unannounced
+	// labd waits for the lost test's budget too: keep it seconds long
+	l.s.cfg.TestGrace = 2 * time.Second
+	j, _, err := l.s.Submit(api.JobSpec{Device: l.name, Kernel: l.artifact("krel=7.2-ok behavior=ok"), Tests: []api.TestSpec{{Name: "quiet-suspend-wifi", Builtin: "x", TimeoutSec: 10}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	j = l.wait(j.ID, 2*time.Minute) // lostDuringTest waits at least a minute for a new boot first
+	l.expect(j, api.OutcomeLostContact)
+	if !strings.Contains(j.Summary, "came back on the same boot") {
+		t.Fatalf("summary: %s", j.Summary)
+	}
+}
+
 func TestCancelKeepsKernelFailure(t *testing.T) {
 	l := newLab(t, true)
 	l.baseline()

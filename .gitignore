@@ -8,3 +8,7 @@ __pycache__/
 # Local distribution output and generated Python caches
 dist/
 *.pyc
+/loop/
+
+# esprotation tests whose /tmp is tmpfs keep their archives here
+/internal/esprotation/.test-*/

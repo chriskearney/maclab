@@ -13,3 +13,17 @@ func TestLeaseWho(t *testing.T) {
 		}
 	}
 }
+
+func TestLeaseRecordedByOlderControllerKeepsItsOwner(t *testing.T) {
+	lease := &Lease{Holder: "review-worker", By: "ada"}
+	if !lease.HeldBy("review-worker", "ada") {
+		t.Fatal("recorded owner lost access to its lease")
+	}
+	if lease.HeldBy("review-worker", "other") {
+		t.Fatal("matching holder string bypassed the recorded owner")
+	}
+	lease.Maintainer = "new-owner"
+	if lease.HeldBy("review-worker", "ada") || !lease.HeldBy("review-worker", "new-owner") {
+		t.Fatal("explicit ownership must take precedence over legacy attribution")
+	}
+}

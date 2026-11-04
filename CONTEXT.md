@@ -5,11 +5,11 @@ A test lab that boots kernels once on real Apple Silicon Macs running Omarchy, t
 ## People
 
 **Volunteer**:
-A person other than a Maintainer who lends their own Omarchy Mac to the lab from wherever it lives. They are the human who answers when their Mac needs hands.
+A person other than a Maintainer who lends their own Omarchy Mac to the lab from wherever it lives. They are the human who answers when their Mac needs hands. In the lab they see only their own Macs, and only while those stay enrolled; their Macs see only themselves.
 _Avoid_: Contributor, donor, tester
 
 **Maintainer**:
-A named person with their own access to labd who runs jobs and decides whether a Release is qualified.
+A named person with their own access to labd who runs jobs and decides whether a Release is qualified. Only Maintainers see the whole fleet.
 _Avoid_: Admin, operator
 
 ## Machines
@@ -34,7 +34,7 @@ The kernel a Mac returns to after every lab boot, recorded on both labd and the 
 A boot of a Mac from an entry the lab put there (a test kernel or an installed Release), as opposed to a boot of the Mac's own default entry.
 
 **No-contact deadline**:
-The time by which a Lab boot must reach labd, about twice the job's boot timeout; a Lab boot that hasn't reached labd by then reboots to the Known-good kernel.
+The time by which a Lab boot must reach labd, about twice the job's boot timeout, at most 9 minutes (inside lab-agent's own 10-minute watchdog); a Lab boot that hasn't reached labd by then reboots to the Known-good kernel.
 _Avoid_: Boot timeout (labd's own wait, a different thing)
 
 **Hard ceiling**:
@@ -42,7 +42,7 @@ The time a Lab boot ends whatever happens, even in contact with labd: the job's 
 _Avoid_: Job timeout
 
 **Needs hands**:
-The state of a Mac that has to be power cycled by a person because it can't come back by itself. A Lab-owned Mac reaches it after the boot timeout and its recovery ladder; a Volunteer's Mac only after the Hard ceiling plus one boot timeout with no check-in, and its Volunteer is asked on the Mac's own topic.
+The state of a Mac that has to be power cycled by a person because it can't come back by itself. A Lab-owned Mac reaches it after the boot timeout and its recovery ladder, and one with no hard reset only once lab-agent's watchdog would have rebooted it too; a Volunteer's Mac only after the Hard ceiling plus one boot timeout with no check-in, and its Volunteer is asked on the Mac's own topic.
 _Avoid_: Stuck, bricked
 
 **Lost boot**:
@@ -74,6 +74,10 @@ A Volunteer opening their Mac's Availability window by hand, from now until a ti
 **Access level**:
 What Maintainers may do on a Volunteer's Mac, chosen by its Volunteer: Qualification (only what Qualification needs: no exec and no Maintainer's script) or Full (everything a lab-owned Mac allows). Lowering it stops at once whatever it no longer allows.
 _Avoid_: Permissions, trust level
+
+**Lease**:
+A Maintainer holding one Mac for a named holder (`lab lease`) until it runs out or they release it: only that holder's jobs, submitted with that Maintainer's token, run on it. A job already running finishes first; jobs others queued before it wait aside and run once it ends. Only the Maintainer who took it renews, releases or resets the Mac under it; another Maintainer can end it early (`lab release --force`), which labd records, and removing its Maintainer ends it. On a Volunteer's Mac it lasts only inside the Availability window, and lowering the Access level ends it.
+_Avoid_: Reservation, lock
 
 **Audit log**:
 The record, per Volunteer Mac, of every Maintainer action on it (who, what, when, which job), kept on the Mac itself and written before each action, which its Volunteer can read. labd keeps a copy.

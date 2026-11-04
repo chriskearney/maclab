@@ -208,6 +208,14 @@ func TestTheInstallIsANamedLabOperationNotAnExecOrAScript(t *testing.T) {
 func TestTheInstallIsRecordedInTheAuditLogWithTheMaintainerAndTheRelease(t *testing.T) {
 	l, clock, msha, _ := ioLab(t, labConfig{})
 	grace := l.addMaintainer(harnessToken, "grace")
+	// An Installed run needs its holder's lease, and naming ada's holder
+	// doesn't make it grace's: grace takes it.
+	if r, body := l.get("DELETE", "/api/devices/"+l.name+"/lease"); r.StatusCode != 200 {
+		t.Fatalf("release: %s %s", r.Status, body)
+	}
+	if r, body := l.as(grace.Token, "POST", "/api/devices/"+l.name+"/lease", api.LeaseRequest{Holder: "io-tester", TTLSec: 3600}); r.StatusCode != 200 {
+		t.Fatalf("grace's lease: %s %s", r.Status, body)
+	}
 	id := l.ioRun(grace.Token, msha)
 	l.expect(l.jobAPI(id, 180*time.Second), api.OutcomePass)
 	out := l.alWaitLog(id, ioRelease)

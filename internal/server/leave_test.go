@@ -32,7 +32,7 @@ func TestForgetRefusesLeaseAndLiveAgent(t *testing.T) {
 		t.Fatalf("lease: %d %s", resp.StatusCode, body)
 	}
 	if code, body := l.adminBody("DELETE", "/api/devices/"+l.name); code != http.StatusConflict ||
-		!strings.Contains(body, "leased by alice") || !strings.Contains(body, "lab release "+l.name+" --holder alice") {
+		!strings.Contains(body, "leased by alice") || !strings.Contains(body, "lab release "+l.name+" --force") {
 		t.Fatalf("forgetting a leased Mac: %d %s", code, body)
 	}
 	if l.s.dev(l.name) == nil || l.s.dev(l.name).snapshot().Lease == nil {

@@ -323,6 +323,11 @@ func (l *limineLayout) arm(entry string) error {
 	if !bytes.Contains(conf, []byte("\n/"+entry+"\n")) {
 		return fmt.Errorf("limine.conf has no /%s entry", entry)
 	}
+	// Armed already (lab-agent re-arms before the reboot): leave NVRAM and
+	// U-Boot's variable file alone rather than write them again.
+	if l.armed() == entry && l.varFileHas(entry) {
+		return nil
+	}
 	if err := writeEfivar("LoaderEntryOneShot", bliGUID, efiVarNV|efiVarBS|efiVarRT, utf16z(entry)); err != nil {
 		return err
 	}
@@ -332,12 +337,20 @@ func (l *limineLayout) arm(entry string) error {
 	if got := l.armed(); got != entry {
 		return fmt.Errorf("one-shot readback: got %q, want %q", got, entry)
 	}
-	if l.VarFile != "" {
-		if b, err := os.ReadFile(l.VarFile); err != nil || !bytes.Contains(b, utf16z(entry)) {
-			return fmt.Errorf("one-shot is not in %s, so U-Boot would not see it", l.VarFile)
-		}
+	if !l.varFileHas(entry) {
+		return fmt.Errorf("one-shot is not in %s, so U-Boot would not see it", l.VarFile)
 	}
 	return nil
+}
+
+// varFileHas is whether U-Boot's variable file holds entry as the one-shot,
+// or there is no such file to hold it.
+func (l *limineLayout) varFileHas(entry string) bool {
+	if l.VarFile == "" {
+		return true
+	}
+	b, err := os.ReadFile(l.VarFile)
+	return err == nil && bytes.Contains(b, utf16z(entry))
 }
 
 func (l *limineLayout) armed() string {

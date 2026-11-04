@@ -28,17 +28,11 @@ type Fetch func(context.Context, string, string) error
 
 func Sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 func JSON(v any) []byte   { b, _ := json.MarshalIndent(v, "", "  "); return append(b, '\n') }
+
+var errNonRegular = errors.New("nonregular: no data-open")
+
 func OpenRegular(p string) (*os.File, error) {
-	f, e := os.OpenFile(p, unix.O_PATH|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
-	if e != nil {
-		return nil, e
-	}
-	defer f.Close()
-	a, e := f.Stat()
-	if e != nil || !a.Mode().IsRegular() {
-		return nil, errors.New("nonregular: no data-open")
-	}
-	r, e := os.OpenFile(fmt.Sprintf("/proc/self/fd/%d", f.Fd()), os.O_RDONLY|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	r, a, e := openRegularData(p)
 	if e != nil {
 		return nil, e
 	}
@@ -56,7 +50,7 @@ func stable(a, b os.FileInfo) bool {
 		return false
 	}
 	y, ok := b.Sys().(*syscall.Stat_t)
-	return ok && a.Mode().IsRegular() && b.Mode().IsRegular() && x.Dev == y.Dev && x.Ino == y.Ino && x.Size == y.Size && x.Mtim == y.Mtim && x.Ctim == y.Ctim
+	return ok && a.Mode().IsRegular() && b.Mode().IsRegular() && x.Dev == y.Dev && x.Ino == y.Ino && x.Size == y.Size && statTimes(x) == statTimes(y)
 }
 func Hash(p string, max int64) (string, error) {
 	f, e := OpenRegular(p)

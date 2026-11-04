@@ -286,7 +286,7 @@ func serveMCP(ctx context.Context) error {
 		Device     string `json:"device"`
 		TTLMinutes int    `json:"ttl_minutes,omitempty" jsonschema:"default 60"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_lease", Description: "Reserve a Mac so only your jobs run on it."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_lease", Description: "Reserve a Mac so only your jobs run on it until the lease ends: others' new jobs are refused and their queued ones wait. A job already running finishes first. A 409 saying a Mac is leased by someone else means wait for it to end or use another Mac."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a leaseArg) (*mcp.CallToolResult, any, error) {
 			ttl := a.TTLMinutes
 			if ttl <= 0 {
@@ -295,8 +295,15 @@ func serveMCP(ctx context.Context) error {
 			l, err := c.Lease(ctx, a.Device, who, time.Duration(ttl)*time.Minute)
 			return text(l), nil, err
 		})
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_release", Description: "Release your lease on a Mac."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, a devArg) (*mcp.CallToolResult, any, error) {
+	type releaseArg struct {
+		Device string `json:"device"`
+		Force  bool   `json:"force,omitempty" jsonschema:"end another Maintainer's lease; labd records who ended it. Only when a person asks for it, never to get a Mac sooner"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_release", Description: "Release your lease on a Mac; only the Maintainer who took a lease can release it, unless force, which ends anyone's and is recorded."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, a releaseArg) (*mcp.CallToolResult, any, error) {
+			if a.Force {
+				return text("released"), nil, c.ForceRelease(ctx, a.Device)
+			}
 			return text("released"), nil, c.Release(ctx, a.Device, who)
 		})
 	mcp.AddTool(s, &mcp.Tool{Name: "lab_reset", Description: "Run the recovery ladder on an idle Mac that is wedged or offline (soft reboot, hard reset, then ask a human). A Mac that left the lab (lab-agent uninstall) goes back in it first."},
