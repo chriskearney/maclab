@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,5 +51,22 @@ func TestAgentStampsEventsWithTheLabClock(t *testing.T) {
 			t.Fatalf("no sleep event on the lab clock: %s", body)
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestALeaseNamesTheMaintainerWhoTookIt(t *testing.T) {
+	l := newLabWith(t, labConfig{})
+	if r, body := l.post("/api/devices/sim-mac/lease", api.LeaseRequest{Holder: "w7C-reload", TTLSec: 60}); r.StatusCode != 200 {
+		t.Fatalf("lease: %s %s", r.Status, body)
+	}
+	_, body := l.get("GET", "/api/devices/sim-mac")
+	var d api.Device
+	json.Unmarshal([]byte(body), &d)
+	if d.Lease == nil || d.Lease.Holder != "w7C-reload" || d.Lease.By != harnessMaintainer {
+		t.Fatalf("lease = %+v, want holder w7C-reload taken by %s", d.Lease, harnessMaintainer)
+	}
+	r, body := l.post("/api/devices/sim-mac/lease", api.LeaseRequest{Holder: "ada", TTLSec: 60})
+	if r.StatusCode != 409 || !strings.Contains(body, "w7C-reload ("+harnessMaintainer+")") {
+		t.Fatalf("a second holder should learn who took it: %s %s", r.Status, body)
 	}
 }

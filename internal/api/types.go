@@ -43,6 +43,19 @@ type OOBConfig struct {
 type Lease struct {
 	Holder  string    `json:"holder"`
 	Expires time.Time `json:"expires"`
+	// By is the Maintainer whose token took the lease: Holder is whatever
+	// name the client chose, so By is how anyone can tell who to ask. It's
+	// empty on a lease taken before labd recorded it.
+	By string `json:"by,omitempty"`
+}
+
+// Who names the lease's holder for people: the holder, then the Maintainer
+// who took it when that's a different name.
+func (l *Lease) Who() string {
+	if l.By == "" || l.By == l.Holder {
+		return l.Holder
+	}
+	return l.Holder + " (" + l.By + ")"
 }
 
 // HumanAction is the one instruction a person needs when the lab cannot recover a device itself.
