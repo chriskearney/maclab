@@ -29,7 +29,7 @@ import (
 	"github.com/iconidentify/maclab/internal/labhttp"
 )
 
-const Version = "0.8.0"
+const Version = "0.8.1"
 
 type Config struct {
 	Server   string `json:"server"`
@@ -848,6 +848,9 @@ func (a *Agent) exec(ctx context.Context, c api.Command) (any, func(), error) {
 		var t api.TestSpec
 		if err := json.Unmarshal(c.Args, &t); err != nil {
 			return nil, nil, err
+		}
+		if t.RequireWatchdog && a.wd.Load() == nil {
+			return nil, nil, fmt.Errorf("test %s: agent-held watchdog required", t.Name)
 		}
 		dir, err := a.outDir(c)
 		if err != nil {

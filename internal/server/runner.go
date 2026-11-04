@@ -106,6 +106,10 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		r.finish(api.OutcomeCanceled, "not run: "+why+"; submit it again")
 		return
 	}
+	if err := validateRequiredWatchdog(j.Spec.Tests, v.snapshot()); err != nil {
+		r.finish(api.OutcomeInfra, "stored job refused before device commands: "+err.Error())
+		return
+	}
 	if err := s.beginJobRecoveryMode(ctx, v, j); err != nil {
 		r.finish(api.OutcomeInfra, "recovery mode admission failed before device commands: "+err.Error())
 		return
@@ -171,6 +175,10 @@ func (s *Server) runJob(ctx context.Context, v *dev, j *api.Job) {
 		return
 	}
 
+	if err := validateRequiredWatchdog(j.Spec.Tests, v.snapshot()); err != nil {
+		r.finish(api.OutcomeInfra, "job refused before device commands: "+err.Error())
+		return
+	}
 	if j.Spec.Mesa != nil {
 		if _, err := s.validateMesa(j.Spec, v.snapshot()); err != nil {
 			r.finish(api.OutcomeInfra, "Mesa admission changed before device commands: "+err.Error())
@@ -512,6 +520,9 @@ func (r *jobRun) execute(ctx context.Context) (string, string) {
 	failed := 0
 	tests := r.tests()
 	for _, t := range tests {
+		if err := validateRequiredWatchdog([]api.TestSpec{t}, v.snapshot()); err != nil {
+			return api.OutcomeInfra, "test refused before execution: " + err.Error()
+		}
 		if n := realSleepNote(v.snapshot(), t); n != "" {
 			r.ev("warning: %s", n)
 		}

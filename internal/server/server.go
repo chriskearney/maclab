@@ -1508,6 +1508,18 @@ func (s *Server) pinnedSource(old *api.Job) (string, error) {
 	return b.Source.Repo + "#" + b.Source.SHA, nil
 }
 
+const watchdogRequireMinAgent = "0.8.1"
+
+func validateRequiredWatchdog(tests []api.TestSpec, d api.Device) error {
+	for _, t := range tests {
+		if t.RequireWatchdog && !versionAtLeast(d.Facts.AgentVersion, watchdogRequireMinAgent) {
+			return fmt.Errorf("%s runs lab-agent %s; test %s requires watchdog support from %s or later",
+				d.Name, orStr(d.Facts.AgentVersion, "(unknown)"), t.Name, watchdogRequireMinAgent)
+		}
+	}
+	return nil
+}
+
 // submit queues a job for the Maintainer who asked; retryOf names the job it retries, whose source may
 // come with the kernel already built from it, and notes go in the job's
 // events after the first. The job records what lab gate needs to know about
@@ -1586,6 +1598,9 @@ func (s *Server) submit(maintainer string, spec api.JobSpec, retryOf string, not
 	d := s.view(v)
 	if d.State == api.StateLeft {
 		return nil, 409, fmt.Errorf("%s left the lab (lab-agent uninstall): `lab forget %s` takes it off the list", d.Name, d.Name)
+	}
+	if err := validateRequiredWatchdog(spec.Tests, d.Device); err != nil {
+		return nil, 409, err
 	}
 	if spec.CmdlineBase != "" || len(spec.CmdlineStrip) > 0 {
 		if spec.Baseline || spec.Crash != "" {
