@@ -31,9 +31,10 @@ AI agents get the same operations over MCP (`lab mcp`).
    - **Limine** (Omarchy on Apple Silicon: U-Boot, then Limine, then a UKI on
      the ESP): a unified kernel image in `<esp>/maclab/<job>/uki.efi`, listed in
      a marked block at the end of `limine.conf`. Limine reads only FAT, so the
-     ESP needs room for one more UKI plus 121 MiB it keeps free (a 120 MiB
-     reserve and 1 MiB for metadata): about 180 MiB with Omarchy's ~60 MiB UKIs.
-     Preflight sizes the UKI by the largest one in `<esp>/EFI/Linux`.
+     ESP needs room for one UKI rounded up to its allocation unit, plus a
+     margin of `ceil(UKI size / 10)` and 1 MiB for metadata. Preflight uses
+     the largest UKI in `<esp>/EFI/Linux` (or a labelled 64 MiB guess if none
+     exists); the writer and post-copy gate use the generated UKI's actual size.
 
    A failed staging is tried again, up to 3 attempts, 30 s and then 2 min
    apart, with the failed attempt's leftovers removed first. Only an attempt
@@ -260,6 +261,12 @@ Mac still shows tier 1) and feeds it only while:
   is reset 10 minutes after it last heard from labd. Nothing lab-agent does by itself
   counts: a test or command ending, or an upload retrying while labd is out of reach,
   leaves a test boot that lost labd during a test with what is left of those 10 minutes.
+
+A test may set `require_watchdog: true` to refuse execution until lab-agent has
+opened the watchdog on that boot. The check records a successful open; it does
+not verify later writes or hardware resets. Deploy labd with this support before
+updating lab-agent, and use the option only after both are updated. Older labd
+versions can discard the field without enforcing it.
 
 Either way the one-shot is spent and the Mac comes back on its known-good kernel, except
 on a Mac whose one-shot didn't clear: that one comes back on the lab entry, so while labd

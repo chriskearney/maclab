@@ -143,7 +143,7 @@ func TestAnyMaintainerCanForceALeaseToEnd(t *testing.T) {
 		t.Fatalf("the lease outlived lab release --force: %+v", q)
 	}
 	const ended = "ended early by Maintainer joshua"
-	if logs := l.logs.String(); !strings.Contains(logs, "lease by ada@laptop (Maintainer ada)") || !strings.Contains(logs, ended) {
+	if logs := l.logs.String(); !strings.Contains(logs, "lease by ada@laptop (ada)") || !strings.Contains(logs, ended) {
 		t.Fatalf("labd's log doesn't say who ended whose lease:\n%s", logs)
 	}
 	j := l.jobAPI(theirs, 60*time.Second)
@@ -188,7 +188,7 @@ func TestOnlyTheMaintainerWhoTookALeaseUsesIt(t *testing.T) {
 	if r, body := l.post(path, api.LeaseRequest{Holder: "ada@laptop", TTLSec: 3600}); r.StatusCode != 200 {
 		t.Fatalf("lease: %s %s", r.Status, body)
 	}
-	if r, body := l.as(joshua.Token, "POST", path, api.LeaseRequest{Holder: "ada@laptop", TTLSec: 3600}); r.StatusCode != http.StatusConflict || !strings.Contains(body, "Maintainer ada") {
+	if r, body := l.as(joshua.Token, "POST", path, api.LeaseRequest{Holder: "ada@laptop", TTLSec: 3600}); r.StatusCode != http.StatusConflict || !strings.Contains(body, "ada@laptop (ada)") {
 		t.Fatalf("joshua renewing ada's lease by its holder: %s %s", r.Status, body)
 	}
 	if code, _, body := l.submitAs(joshua.Token, api.JobSpec{Kernel: l.artifact("krel=7.2-x behavior=ok"), Holder: "ada@laptop"}); code != http.StatusConflict {

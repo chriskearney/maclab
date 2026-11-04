@@ -45,21 +45,33 @@ type Lease struct {
 	// Maintainer is whose token took the lease; empty for one labd stored
 	// before it recorded that. Only they renew it, release it, or run jobs
 	// under it, whatever holder another Maintainer names.
-	Maintainer string    `json:"maintainer,omitempty"`
-	Expires    time.Time `json:"expires"`
+	Maintainer string `json:"maintainer,omitempty"`
+	// By preserves attribution written by controllers with PR #62.
+	By      string    `json:"by,omitempty"`
+	Expires time.Time `json:"expires"`
 }
 
 // HeldBy is whether the lease is holder's, acting for maintainer.
 func (l *Lease) HeldBy(holder, maintainer string) bool {
-	return l.Holder == holder && (l.Maintainer == "" || l.Maintainer == maintainer)
+	return l.Holder == holder && (l.Owner() == "" || l.Owner() == maintainer)
 }
 
-// Who names the lease's holder, and its Maintainer when that is someone else.
+// Owner names the authenticated Maintainer recorded for the lease. By is
+// the persisted attribution field used before ownership enforcement.
+func (l *Lease) Owner() string {
+	if l.Maintainer != "" {
+		return l.Maintainer
+	}
+	return l.By
+}
+
+// Who names the lease holder and the Maintainer who took it.
 func (l *Lease) Who() string {
-	if l.Maintainer == "" || l.Maintainer == l.Holder {
+	owner := l.Owner()
+	if owner == "" || owner == l.Holder {
 		return l.Holder
 	}
-	return l.Holder + " (Maintainer " + l.Maintainer + ")"
+	return l.Holder + " (" + owner + ")"
 }
 
 // HumanAction is the one instruction a person needs when the lab cannot recover a device itself.
@@ -575,11 +587,12 @@ type CrashArgs struct {
 }
 
 type TestSpec struct {
-	Name       string `json:"name"`
-	Builtin    string `json:"builtin,omitempty"` // name of a test embedded in the agent
-	Script     string `json:"script,omitempty"`  // artifact sha256 of a shell script
-	TimeoutSec int    `json:"timeout_sec,omitempty"`
-	GUI        bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
+	Name            string `json:"name"`
+	Builtin         string `json:"builtin,omitempty"` // name of a test embedded in the agent
+	Script          string `json:"script,omitempty"`  // artifact sha256 of a shell script
+	TimeoutSec      int    `json:"timeout_sec,omitempty"`
+	RequireWatchdog bool   `json:"require_watchdog,omitempty"`
+	GUI             bool   `json:"gui,omitempty"` // run as the GUI user inside their Wayland session
 	// SkipOnScreen leaves out the checks that need the screen visible: a
 	// Volunteer's Mac is locked while a test runs.
 	SkipOnScreen bool `json:"skip_on_screen,omitempty"`
