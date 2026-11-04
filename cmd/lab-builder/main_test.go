@@ -228,14 +228,16 @@ func TestCollect(t *testing.T) {
 	// A kernel-kind build needs its release.
 	f = newFakeLabd(t)
 	res = api.BuildResult{}
-	f.builder().collect(context.Background(), api.Build{ID: bd.ID}, scratch(map[string]string{"kernel.tar.zst": "k"}, nil), false, &res, push)
+	f.builder().collect(context.Background(), api.Build{ID: bd.ID}, scratch(map[string]string{"out/kernel.tar.zst": "k"}, nil), false, &res, push)
 	if res.Error == "" || len(f.got) != 0 {
 		t.Fatalf("kernel build without a release: %+v, %d uploads", res, len(f.got))
 	}
 	f = newFakeLabd(t)
 	res = api.BuildResult{}
-	f.builder().collect(context.Background(), api.Build{ID: bd.ID}, scratch(map[string]string{"kernel.tar.zst": "k", "release": "7.2.11-lab1-ab12"}, nil), false, &res, push)
-	if res.Error != "" || res.Release != "7.2.11-lab1-ab12" || res.Artifact == "" {
+	f.builder().collect(context.Background(), api.Build{ID: bd.ID}, scratch(map[string]string{
+		"release": "7.2.11-lab1-ab12", "kernel": "kernel.tar.zst", "out/kernel.tar.zst": "k",
+	}, nil), false, &res, push)
+	if res.Error != "" || res.Release != "7.2.11-lab1-ab12" || res.Artifact == "" || len(res.Files) != 1 {
 		t.Fatalf("kernel build: %+v", res)
 	}
 
@@ -249,8 +251,8 @@ func TestCollect(t *testing.T) {
 		"package release":  {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"release": marker}},
 		"package kernel":   {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"kernel": marker}},
 		"package out dir":  {true, nil, map[string]string{"out": host}},
-		"kernel tarball":   {false, map[string]string{"release": "r"}, map[string]string{"kernel.tar.zst": marker}},
-		"kernel release":   {false, map[string]string{"kernel.tar.zst": "k"}, map[string]string{"release": marker}},
+		"kernel tarball":   {false, map[string]string{"release": "r", "kernel": "kernel.tar.zst"}, map[string]string{"out/kernel.tar.zst": marker}},
+		"kernel release":   {false, map[string]string{"kernel": "kernel.tar.zst", "out/kernel.tar.zst": "k"}, map[string]string{"release": marker}},
 		"dangling release": {true, map[string]string{"out/a-1-1-aarch64.pkg.tar.zst": "a"}, map[string]string{"release": filepath.Join(host, "none")}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -381,6 +383,68 @@ func TestPkgbuildParses(t *testing.T) {
 	}
 	if out, err := parse(old); err == nil || !strings.Contains(out, "unexpected EOF") {
 		t.Errorf("bash -n passed pkgbuild with 7de96c65's jobs line: %v %q", err, out)
+	}
+}
+
+// A kernel build's out/ holds the boot artifact and the retained inputs for
+// external modules: both upload as named files, and the one the kernel file
+// names becomes the artifact. A refused upload is an error, not a silent gap.
+func TestUploadKernelAndModuleInputs(t *testing.T) {
+	for _, failInputs := range []bool{false, true} {
+		t.Run(map[bool]string{false: "retained", true: "upload refused"}[failInputs], func(t *testing.T) {
+			payloads := map[string]string{}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "POST" || r.URL.Path != "/api/builder/artifacts" || r.Header.Get("Authorization") != "Bearer fixture" {
+					http.Error(w, "wrong upload request", 400)
+					return
+				}
+				body, _ := io.ReadAll(r.Body)
+				if failInputs && string(body) == "module inputs" {
+					http.Error(w, "storage refused", 500)
+					return
+				}
+				sum := sha256.Sum256(body)
+				sha := hex.EncodeToString(sum[:])
+				payloads[sha] = string(body)
+				json.NewEncoder(w).Encode(map[string]string{"sha256": sha})
+			}))
+			defer srv.Close()
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, "out"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for name, body := range map[string]string{"kernel.tar.zst": "boot", "module-build.tar.zst": "module inputs"} {
+				if err := os.WriteFile(filepath.Join(dir, "out", name), []byte(body), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(dir, "kernel"), []byte("kernel.tar.zst\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := openOutputs(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer out.Close()
+			b := &builder{server: srv.URL, token: "fixture"}
+			var result api.BuildResult
+			b.uploadPackages(context.Background(), api.Build{}, out, &result, func(string) {})
+			if failInputs {
+				if result.Error == "" {
+					t.Fatal("failed archive upload reported success")
+				}
+				return
+			}
+			if result.Error != "" || len(result.Files) != 2 || payloads[result.Artifact] != "boot" {
+				t.Fatalf("result %+v", result)
+			}
+			for _, file := range result.Files {
+				want := map[string]string{"kernel.tar.zst": "boot", "module-build.tar.zst": "module inputs"}[file.Name]
+				if payloads[file.SHA256] != want || file.Size != int64(len(want)) {
+					t.Fatalf("file %+v", file)
+				}
+			}
+		})
 	}
 }
 

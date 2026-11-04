@@ -536,25 +536,12 @@ func (b *builder) collect(ctx context.Context, bd api.Build, dir string, pkg boo
 		return
 	}
 	push("@@stage upload")
-	if pkg {
-		b.uploadPackages(ctx, bd, out, result, push)
-		return
-	}
-	f, _, err := out.regular("kernel.tar.zst")
-	if err != nil {
-		result.Error = err.Error()
-		return
-	}
-	sha, err := b.upload(ctx, bd.ID, f)
-	if err != nil {
-		result.Error = err.Error()
-		return
-	}
-	result.Artifact = sha
+	b.uploadPackages(ctx, bd, out, result, push)
 }
 
-// uploadPackages uploads everything pkgbuild left in out/. The package that
-// holds a vmlinuz becomes the build's artifact, so `lab run` can boot it.
+// uploadPackages uploads everything a build left in out/. The file named in
+// kernel becomes the boot artifact; the other files remain named build
+// outputs.
 func (b *builder) uploadPackages(ctx context.Context, bd api.Build, out *outputs, result *api.BuildResult, push func(string)) {
 	kernel, err := out.small("kernel")
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -587,7 +574,7 @@ func (b *builder) uploadPackages(ctx context.Context, bd api.Build, out *outputs
 		}
 	}
 	if len(result.Files) == 0 {
-		result.Error = "makepkg made no packages"
+		result.Error = "build made no outputs"
 	}
 }
 
