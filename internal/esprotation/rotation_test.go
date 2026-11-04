@@ -510,11 +510,34 @@ func TestCapacityDriftStopsBeforeMenuMutation(t *testing.T) {
 }
 func TestCTimeDriftCannotHideBehindRestoredMTime(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "file")
-	os.WriteFile(p, []byte("before"), 0600)
-	before, _ := os.Stat(p)
-	os.WriteFile(p, []byte("after!"), 0600)
-	os.Chtimes(p, before.ModTime(), before.ModTime())
-	after, _ := os.Stat(p)
+	if err := os.WriteFile(p, []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var after os.FileInfo
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if err := os.WriteFile(p, []byte("after!"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		after, err = os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if before.Sys().(*syscall.Stat_t).Ctim != after.Sys().(*syscall.Stat_t).Ctim {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fixture could not observe a ctime change")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	if !after.ModTime().Equal(before.ModTime()) {
 		t.Fatal("fixture did not restore mtime")
 	}
