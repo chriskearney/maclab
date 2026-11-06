@@ -305,6 +305,8 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 		fs.Var(&guiTests, "gui-test", "builtin GUI test to run in the Wayland session (repeatable)")
 		fs.Var(&scripts, "script", "shell script test to upload and run (repeatable)")
 		fs.Var(&guiScripts, "gui-script", "shell script test to run in the Wayland session (repeatable)")
+		displayExpect := fs.String("display-expect", "", "with --test display-check: the external connector the job expects to connect (DP-1, HDMI-A-1, a glob like DP-*, or any); the test fails if none does in --display-wait")
+		displayWait := fs.Duration("display-wait", 0, "with --test display-check: how long to wait for an external connector before recording, e.g. 3m (default 2m with --display-expect, else no wait; at most 1h)")
 		var payload multi
 		fs.Var(&payload, "payload", "a file for the --script tests to read from $MACLAB_IN, NAME=FILE or NAME=SHA256 (repeatable), e.g. ane.ko=./ane.ko")
 		pos := parse(fs, args)
@@ -390,6 +392,9 @@ func dispatch(ctx context.Context, c *client.Client, cmd string, args []string) 
 			return err
 		}
 		if spec.Tests, err = withPayload(spec.Tests, files); err != nil {
+			return err
+		}
+		if spec.Tests, err = withDisplay(spec.Tests, *displayExpect, *displayWait); err != nil {
 			return err
 		}
 		return submit(ctx, c, spec, *noWait)
@@ -848,6 +853,37 @@ func withPayload(tests []api.TestSpec, files []api.PayloadFile) ([]api.TestSpec,
 	}
 	if n == 0 {
 		return nil, errors.New("--payload needs a --script test to read the files")
+	}
+	return tests, nil
+}
+
+// withDisplay gives the display options to the display-check test, with a
+// timeout that leaves the test time to record after the wait. It is an error
+// to give them with no display-check test.
+func withDisplay(tests []api.TestSpec, expect string, wait time.Duration) ([]api.TestSpec, error) {
+	if expect == "" && wait == 0 {
+		return tests, nil
+	}
+	if wait < 0 || wait > api.MaxDisplayWait {
+		return nil, fmt.Errorf("--display-wait %s: from 0 to %s", wait, api.MaxDisplayWait)
+	}
+	d := &api.DisplayCheck{Expect: expect, WaitSec: int(wait.Seconds())}
+	n := 0
+	for i := range tests {
+		if tests[i].Builtin != api.DisplayCheckTest {
+			continue
+		}
+		tests[i].Display = d
+		if need := int((d.Wait() + 2*time.Minute).Seconds()); tests[i].TimeoutSec < need && need > 300 {
+			tests[i].TimeoutSec = need
+		}
+		if err := tests[i].DisplayError(); err != nil {
+			return nil, err
+		}
+		n++
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("--display-expect and --display-wait need --test %s", api.DisplayCheckTest)
 	}
 	return tests, nil
 }

@@ -58,7 +58,8 @@ AI agents get the same operations over MCP (`lab mcp`).
    reads the serial console and classifies panics, oopses, RCU stalls and
    lockups as they happen.
 4. **Test.** `boot-health` always runs. It is followed by any builtin tests
-   (`gui-smoke`, `gui-terminal`, `suspend-devices`) or your own scripts. GUI
+   (`gui-smoke`, `gui-terminal`, `suspend-devices`, `display-check`; see
+   [Displays](#displays)) or your own scripts. GUI
    tests run inside the GUI user's Hyprland session. Anything written to
    `$MACLAB_OUT` comes back with the job. `suspend-devices` writes `devices` to
    `/sys/power/pm_test` and runs `systemctl suspend`: the kernel freezes tasks
@@ -656,7 +657,36 @@ login. A Mac leaves serial mode on every reboot, so labd asks oobd to re-arm aro
 
 On Apple Silicon each display has its own DCP: the internal panel's, and a `dcpext` for each
 external pipeline (USB-C DisplayPort, or HDMI through the dptx PHY on some boards). They are
-separate CRTCs of one DRM card.
+separate CRTCs of one DRM card. `display-check` records them, so a job needs no script of its own
+for external display bring-up:
+
+```sh
+lab run m1air --kernel kernel-7.2.11-lab1.tar.zst --test display-check                 # record only
+lab run m1air --kernel kernel-7.2.11-lab1.tar.zst --test display-check \
+    --display-expect any --display-wait 10m                                             # wait for a monitor
+```
+
+It writes `test-display-check/display.json` (machine-readable) and `summary.txt` (for people):
+
+- every DRM connector (`eDP-1`, `DP-1`, `HDMI-A-1`, ...): connected or not, enabled, its modes, the
+  mode its CRTC runs now, and its EDID: present, valid, manufacturer, product code, monitor name,
+  year, physical size and preferred mode. It never records an EDID's serial number (neither the
+  numeric one nor the serial descriptor; `serial_redacted` says there was one), the raw EDID, or
+  anything that identifies the Mac itself.
+- the active outputs: which CRTC and plane drive each connector (from debugfs's DRM state).
+- each DCP and `dcpext` device, whether a driver is bound to it (`dcpext_bound`), and its crashes.
+- this boot's DCP crashes (RTKit's crash report) and DART faults (translation faults and block
+  exceptions; the kernel rate-limits them, so a storm counts low).
+
+`--display-wait D` (at most 1h) waits up to D for an external connector to connect, and a little
+longer for it to be enabled, before it records. `--display-expect NAME` names the one the job
+expects: `DP-1`, a glob like `HDMI-*`, or `any`; it waits 2 minutes unless `--display-wait` says
+otherwise, and gives the test enough timeout for the wait. The test is informational: it fails only
+on a DCP crash this boot, a DART fault during the check (the wait included: faults from earlier in
+the boot are counted but don't fail it; they are in `new_error_lines` when the baseline lacks
+them), an expected connector that didn't connect in time, or a kernel log it couldn't read (it
+couldn't count crashes or faults without it). A hands-on run is plugging a monitor in while it
+waits.
 
 With two or more displays active, each job screenshot also captures every display, one
 `ffmpeg kmsgrab` per CRTC on its bottom plane, as `screen/<label>-<connector>.jpg`
@@ -1052,9 +1082,9 @@ emergency mode.
 - The named install operation (`pacman -U` of the Release's packages) and
   omarchy-m-test's preinstall run on a Volunteer's own, possibly locked,
   session.
-- The per-display screenshots with a real external monitor, on USB-C DisplayPort (`dcpext`) and
-  on HDMI. The DRM state parsing is tested against fixtures written from the kernel's format, not
-  against a capture from a Mac.
+- `display-check` and the per-display screenshots with a real external monitor, on USB-C
+  DisplayPort (`dcpext`) and on HDMI. The parsing is tested against fixtures written from the
+  kernel's formats, not against a capture from a Mac.
 - Whether `apple_wdt` can be armed before the kernel starts (m1n1/U-Boot).
   If it can, tier 1 would also cover early-boot hangs.
 

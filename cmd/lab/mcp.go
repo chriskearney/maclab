@@ -69,7 +69,9 @@ func serveMCP(ctx context.Context) error {
 		CmdlineStrip      []string      `json:"cmdline_strip,omitempty" jsonschema:"globs of base parameters to drop, e.g. asahi.* apple_t6030_display.*"`
 		VerboseBoot       bool          `json:"verbose_boot,omitempty" jsonschema:"boot with loglevel=7 and without quiet/splash; by default a test boot keeps the Mac's own (always verbose with a serial console)"`
 		InstalledManifest string        `json:"installed_manifest,omitempty" jsonschema:"sha256 of a frozen expected manifest: boot the INSTALLED release through its installer entry, check identity, compare with the frozen pre-install baseline, never promote (needs a lease)"`
-		Tests             []string      `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal, suspend-devices"`
+		Tests             []string      `json:"tests,omitempty" jsonschema:"builtin tests: boot-health (always run), gui-smoke, gui-terminal, suspend-devices, display-check"`
+		DisplayExpect     string        `json:"display_expect,omitempty" jsonschema:"with display-check in tests: the external connector the job expects to connect (DP-1, HDMI-A-1, a glob like DP-*, or any); the test fails if none does in display_wait_sec"`
+		DisplayWaitSec    int           `json:"display_wait_sec,omitempty" jsonschema:"with display-check in tests: seconds to wait for an external connector before recording (default 120 with display_expect, else no wait; at most 3600)"`
 		GUITests          []string      `json:"gui_tests,omitempty" jsonschema:"builtin tests to run inside the GUI user's Hyprland session: gui-smoke, gui-terminal"`
 		Scripts           []string      `json:"scripts,omitempty" jsonschema:"local paths of shell scripts to run as tests (as root); write outputs to $MACLAB_OUT"`
 		Payload           []string      `json:"payload,omitempty" jsonschema:"files for the scripts to read from $MACLAB_IN, each NAME=PATH (or NAME=sha256 of an uploaded file); given to every script, not to gui_scripts"`
@@ -109,6 +111,10 @@ func serveMCP(ctx context.Context) error {
 			}
 			for _, t := range a.GUITests {
 				spec.Tests = append(spec.Tests, api.TestSpec{Name: t, Builtin: t, GUI: true})
+			}
+			var err error
+			if spec.Tests, err = withDisplay(spec.Tests, a.DisplayExpect, time.Duration(a.DisplayWaitSec)*time.Second); err != nil {
+				return nil, nil, err
 			}
 			for i, list := range [][]string{a.Scripts, a.GUIScripts} {
 				for _, p := range list {
