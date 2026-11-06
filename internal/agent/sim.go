@@ -70,8 +70,11 @@ type Sim struct {
 	// Tests may stand in fixture files: OMTReport replaces the synthetic
 	// omarchy-m-test report, TestFiles adds files a test leaves in its output
 	// directory, and DmesgErrors replaces the collected kernel error lines.
-	OMTReport   func(kernel string) []byte
-	TestFiles   func(test, kernel string) map[string][]byte
+	OMTReport func(kernel string) []byte
+	TestFiles func(test, kernel string) map[string][]byte
+	// Outputs are the connectors of the displays the simulated Mac has
+	// active; with two or more, a job's screenshots capture each.
+	Outputs     []string
 	DmesgErrors func(kernel string) string
 	OnExec      func(command string) (stdout string, ok bool) // answers lab exec instead of echoing
 	// DefaultKernel, once an installer has run, is what a plain reboot boots
@@ -876,6 +879,27 @@ func (s *Sim) Collect(ctx context.Context, boot, outDir string) error {
 	os.WriteFile(filepath.Join(outDir, "journal.txt"), []byte("sim journal for boot "+boot+"\n"), 0o644)
 	os.WriteFile(filepath.Join(outDir, "kernel.txt"), []byte("[    0.000000] Linux version "+k+"\n[    0.000000] Kernel command line: "+cmdline+"\n"), 0o644)
 	return os.WriteFile(filepath.Join(outDir, "collect-status.txt"), []byte("journal.txt ok\nkernel.txt ok\ndmesg-errors.txt ok\n"), 0o644)
+}
+
+// ScreenshotOutputs captures each of Outputs, when there are two or more,
+// as the whole screen.
+func (s *Sim) ScreenshotOutputs(ctx context.Context, dir string) ([]shotOutput, error) {
+	s.mu.Lock()
+	outs := slices.Clone(s.Outputs)
+	s.mu.Unlock()
+	if len(outs) < 2 {
+		return nil, nil
+	}
+	var shots []shotOutput
+	for _, c := range outs {
+		p := filepath.Join(dir, c+".jpg")
+		w, h, err := s.Screenshot(ctx, p, 0)
+		if err != nil {
+			return shots, err
+		}
+		shots = append(shots, shotOutput{ScreenOutput: api.ScreenOutput{Connector: c, Width: w, Height: h}, Path: p})
+	}
+	return shots, nil
 }
 
 func (s *Sim) Screenshot(ctx context.Context, path string, wait time.Duration) (int, int, error) {

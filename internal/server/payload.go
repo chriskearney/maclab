@@ -18,6 +18,9 @@ func (s *Server) validatePayload(spec api.JobSpec, d api.Device) (int, error) {
 		if err := t.PayloadError(); err != nil {
 			return 400, fmt.Errorf("test %s: %w", t.Name, err)
 		}
+		if err := t.DisplayError(); err != nil {
+			return 400, fmt.Errorf("test %s: %w", t.Name, err)
+		}
 		for _, p := range t.Payload {
 			if _, err := os.Stat(s.artifactPath(p.SHA256)); err != nil {
 				return 400, fmt.Errorf("test %s: payload file %s: artifact %s not uploaded", t.Name, p.Name, p.SHA256)

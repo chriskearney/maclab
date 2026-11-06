@@ -575,6 +575,19 @@ type ScreenResult struct {
 	Time   time.Time `json:"time"`
 	Width  int       `json:"width,omitempty"`
 	Height int       `json:"height,omitempty"`
+	// Outputs are a job's captures of each active display, one per CRTC,
+	// stored as screen/<label>-<connector>.jpg beside Name. Only when two or
+	// more displays are active: with one, Name is it.
+	Outputs []ScreenOutput `json:"outputs,omitempty"`
+}
+
+// ScreenOutput is one display's capture: the lowest plane scanned out on the
+// CRTC that drives Connector.
+type ScreenOutput struct {
+	Connector string `json:"connector"`
+	Name      string `json:"name"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
 }
 
 // LogsArgs reads the running system's logs.
@@ -610,6 +623,66 @@ type TestSpec struct {
 	// Payload is files the script needs beside it, by artifact sha256: each
 	// lands in $MACLAB_IN under its name before the script runs.
 	Payload []PayloadFile `json:"payload,omitempty"`
+	// Display is what the display-check builtin waits for before it
+	// records the displays; only that builtin takes it.
+	Display *DisplayCheck `json:"display,omitempty"`
+}
+
+// DisplayCheckTest is the builtin that records each DRM connector, its EDID
+// (serial number redacted) and the display co-processors' crashes and DART
+// faults.
+const DisplayCheckTest = "display-check"
+
+// MaxDisplayWait is the longest display-check waits for a connector.
+const MaxDisplayWait = time.Hour
+
+// DisplayCheck asks display-check to wait for an external connector to
+// connect before it records.
+type DisplayCheck struct {
+	// Expect is the external connector the job expects: a name such as DP-1
+	// or HDMI-A-1, a glob such as DP-*, or "any". The test fails if none
+	// connects within the wait. Empty expects nothing: the test waits for
+	// any external connector, records what it finds and passes either way.
+	Expect string `json:"expect,omitempty"`
+	// WaitSec is how long to wait; with Expect and no WaitSec, 2 minutes.
+	WaitSec int `json:"wait_sec,omitempty"`
+}
+
+// Wait is how long display-check waits for an external connector.
+func (d *DisplayCheck) Wait() time.Duration {
+	switch {
+	case d == nil:
+		return 0
+	case d.WaitSec > 0:
+		return time.Duration(d.WaitSec) * time.Second
+	case d.Expect != "":
+		return 2 * time.Minute
+	}
+	return 0
+}
+
+var reConnectorGlob = regexp.MustCompile(`^[A-Za-z0-9*?-]{1,32}$`)
+
+// DisplayError is why the test's display options cannot be used, or nil.
+// labd asks it at submit and lab-agent asks it again before the test runs.
+func (t TestSpec) DisplayError() error {
+	if t.Display == nil {
+		return nil
+	}
+	if t.Builtin != DisplayCheckTest {
+		return fmt.Errorf("display options go only with the %s builtin", DisplayCheckTest)
+	}
+	if t.GUI {
+		return fmt.Errorf("%s runs as root, not in the GUI session", DisplayCheckTest)
+	}
+	d := t.Display
+	if d.WaitSec < 0 || d.Wait() > MaxDisplayWait {
+		return fmt.Errorf("display wait %ds: from 0 to %d seconds", d.WaitSec, int(MaxDisplayWait.Seconds()))
+	}
+	if d.Expect != "" && d.Expect != "any" && !reConnectorGlob.MatchString(d.Expect) {
+		return fmt.Errorf("display expect %q: a connector name such as DP-1 or HDMI-A-1, a glob such as DP-*, or any", d.Expect)
+	}
+	return nil
 }
 
 // MaxPayloadFiles is how many payload files one script test may carry.

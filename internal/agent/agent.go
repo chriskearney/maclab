@@ -1098,11 +1098,39 @@ func (a *Agent) screenshot(ctx context.Context, c api.Command, args api.ScreenAr
 			label = res.Time.Format("150405")
 		}
 		res.Name = "screen/" + label + ".jpg"
-		err = a.upload(ctx, c.JobID, res.Name, path)
+		if err = a.upload(ctx, c.JobID, res.Name, path); err != nil {
+			return res, nil, err
+		}
+		res.Outputs = a.screenOutputs(ctx, c.JobID, label, dir)
 	} else {
 		res.Name, err = a.uploadScreen(ctx, path)
 	}
 	return res, nil, err
+}
+
+// screenOutputs captures and uploads each active display of a job's
+// screenshot as screen/<label>-<connector>.jpg, when there are two or more.
+// It is best effort: the job's screenshot is already in.
+func (a *Agent) screenOutputs(ctx context.Context, job, label, dir string) []api.ScreenOutput {
+	odir := filepath.Join(dir, "outputs")
+	if err := os.MkdirAll(odir, 0o755); err != nil {
+		return nil
+	}
+	shots, err := a.sys.ScreenshotOutputs(ctx, odir)
+	if err != nil {
+		a.log.Printf("screenshot %s, per display: %v", label, err)
+	}
+	var outs []api.ScreenOutput
+	for _, s := range shots {
+		o := s.ScreenOutput
+		o.Name = "screen/" + label + "-" + o.Connector + ".jpg"
+		if err := a.upload(ctx, job, o.Name, s.Path); err != nil {
+			a.log.Printf("screenshot %s: %v", o.Name, err)
+			continue
+		}
+		outs = append(outs, o)
+	}
+	return outs
 }
 
 func (a *Agent) uploadScreen(ctx context.Context, path string) (string, error) {
