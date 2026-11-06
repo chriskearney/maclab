@@ -553,9 +553,7 @@ func kmsgrab(ctx context.Context, path string) error {
 	var last error = fmt.Errorf("no DRM card")
 	for _, card := range displayCards() {
 		cctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		out, err := exec.CommandContext(cctx, "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-			"-device", card, "-f", "kmsgrab", "-i", "-", "-frames:v", "1",
-			"-vf", "hwdownload,format=bgr0", "-q:v", "4", path).CombinedOutput()
+		out, err := exec.CommandContext(cctx, "ffmpeg", kmsgrabArgs(card, 0, path)...).CombinedOutput()
 		cancel()
 		if err == nil {
 			if st, serr := os.Stat(path); serr == nil && st.Size() > 0 {

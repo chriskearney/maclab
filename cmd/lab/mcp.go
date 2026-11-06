@@ -267,9 +267,9 @@ func serveMCP(ctx context.Context) error {
 		})
 	type shotArg struct {
 		JobID string `json:"job_id"`
-		File  string `json:"file" jsonschema:"e.g. test-gui-smoke/screenshot.png"`
+		File  string `json:"file" jsonschema:"e.g. test-gui-smoke/screenshot.png, screen/after-boot.jpg, or screen/after-boot-DP-1.jpg for one display of several"`
 	}
-	mcp.AddTool(s, &mcp.Tool{Name: "lab_screenshot", Description: "View a PNG a GUI test saved."},
+	mcp.AddTool(s, &mcp.Tool{Name: "lab_screenshot", Description: "View an image a job saved: a GUI test's PNG, or the job's screen/ captures (one per active display when there are two or more)."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, a shotArg) (*mcp.CallToolResult, any, error) {
 			b, err := c.File(ctx, a.JobID, a.File)
 			if err != nil {

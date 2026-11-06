@@ -575,6 +575,19 @@ type ScreenResult struct {
 	Time   time.Time `json:"time"`
 	Width  int       `json:"width,omitempty"`
 	Height int       `json:"height,omitempty"`
+	// Outputs are a job's captures of each active display, one per CRTC,
+	// stored as screen/<label>-<connector>.jpg beside Name. Only when two or
+	// more displays are active: with one, Name is it.
+	Outputs []ScreenOutput `json:"outputs,omitempty"`
+}
+
+// ScreenOutput is one display's capture: the lowest plane scanned out on the
+// CRTC that drives Connector.
+type ScreenOutput struct {
+	Connector string `json:"connector"`
+	Name      string `json:"name"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
 }
 
 // LogsArgs reads the running system's logs.

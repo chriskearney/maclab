@@ -324,7 +324,12 @@ func (r *jobRun) capture(label string) {
 		r.ev("no screenshot (%s): %v", label, err)
 		return
 	}
-	r.s.updateJob(r.j, func(j *api.Job) { j.Result.Logs = append(j.Result.Logs, res.Name) })
+	r.s.updateJob(r.j, func(j *api.Job) {
+		j.Result.Logs = append(j.Result.Logs, res.Name)
+		for _, o := range res.Outputs {
+			j.Result.Logs = append(j.Result.Logs, o.Name)
+		}
+	})
 	r.s.hub.publish("screen", r.j.Spec.Device, map[string]any{"device": r.j.Spec.Device, "job": r.j.ID, "name": res.Name, "time": res.Time})
 }
 

@@ -641,7 +641,8 @@ Everything a UI needs is on the API. The web UI uses it now, and a TUI can use i
 - `POST /api/devices/{n}/screenshot`, `GET .../screen`, `.../screens`: captures come from the display
   controller via `ffmpeg kmsgrab`. That works from the moment the display driver loads (boot splash,
   text console, emergency shell, login screen, desktop), with `grim` as a fallback. Jobs capture
-  `screen/after-boot.jpg` and `screen/after-tests.jpg`.
+  `screen/after-boot.jpg` and `screen/after-tests.jpg`, and with two or more displays active also
+  one per display (see [Displays](#displays)).
 - `GET /api/devices/{n}/logs?source=journal|kernel&lines=N`: live from the Mac.
 - `lab shell <device>`: an interactive shell over the out-of-band USB-C serial link (`GET/POST
   /api/devices/{n}/console`). It works with the Mac's network down. `lab-agent setup` enables an
@@ -650,6 +651,26 @@ Everything a UI needs is on the API. The web UI uses it now, and a TUI can use i
 Before the display driver loads, the screen can't be captured, but serial carries the text of every
 stage: m1n1, U-Boot, the kernel from `[0.000000]` (lab boots add `console=ttySAC0,115200`), and
 login. A Mac leaves serial mode on every reboot, so labd asks oobd to re-arm around each one.
+
+## Displays
+
+On Apple Silicon each display has its own DCP: the internal panel's, and a `dcpext` for each
+external pipeline (USB-C DisplayPort, or HDMI through the dptx PHY on some boards). They are
+separate CRTCs of one DRM card.
+
+With two or more displays active, each job screenshot also captures every display, one
+`ffmpeg kmsgrab` per CRTC on its bottom plane, as `screen/<label>-<connector>.jpg`
+(`screen/after-boot-DP-1.jpg`). `screen/after-boot.jpg` and `screen/after-tests.jpg` stay what they
+were, whatever kmsgrab grabs first (normally the internal panel). With one display there are no
+extra files. The per-display captures need debugfs's DRM state and ffmpeg; the `grim` fallback
+stays one image of the session. The live screenshot (`POST .../screenshot`, the web UI) still
+captures one display.
+
+What it proves: a per-display capture shows that the compositor drew into that display's framebuffer
+and that the modeset on its CRTC succeeded. It doesn't prove link training, or that a monitor shows
+a picture; only a person looking (or a capture card) can. And the device tree still comes from
+m1n1 on the ESP (see [Kernel artifacts](#kernel-artifacts)): a `dcpext` that only a new device
+tree enables isn't exercised by a lab boot.
 
 ## Build from a GitHub URL
 
@@ -1031,6 +1052,9 @@ emergency mode.
 - The named install operation (`pacman -U` of the Release's packages) and
   omarchy-m-test's preinstall run on a Volunteer's own, possibly locked,
   session.
+- The per-display screenshots with a real external monitor, on USB-C DisplayPort (`dcpext`) and
+  on HDMI. The DRM state parsing is tested against fixtures written from the kernel's format, not
+  against a capture from a Mac.
 - Whether `apple_wdt` can be armed before the kernel starts (m1n1/U-Boot).
   If it can, tier 1 would also cover early-boot hangs.
 

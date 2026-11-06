@@ -53,6 +53,9 @@ type System interface {
 	Cleanup(job string, all bool) error
 	// Screenshot captures the GUI session as JPEG to path.
 	Screenshot(ctx context.Context, path string, wait time.Duration) (w, h int, err error)
+	// ScreenshotOutputs captures each active display into dir, one JPEG per
+	// CRTC, when two or more are active; otherwise none.
+	ScreenshotOutputs(ctx context.Context, dir string) ([]shotOutput, error)
 	Logs(ctx context.Context, a api.LogsArgs) (string, error)
 	// KernelConfig is the running kernel's .config (/proc/config.gz).
 	KernelConfig() (string, error)
