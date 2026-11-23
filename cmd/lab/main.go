@@ -25,6 +25,7 @@ import (
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/client"
 	"github.com/iconidentify/maclab/internal/labhttp"
+	"github.com/iconidentify/maclab/internal/window"
 )
 
 const usage = `lab: run kernels and tests on Omarchy Macs
@@ -1084,13 +1085,13 @@ func showDevices(ctx context.Context, c *client.Client) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(w, "DEVICE\tSTATE\tTIER\tKERNEL\tLAST SEEN\tJOB\tLEASE")
+	fmt.Fprintln(w, "DEVICE\tSTATE\tTIER\tKERNEL\tLAST SEEN\tJOB\tLEASE\tWINDOW")
 	for _, d := range devs {
 		lease := ""
 		if d.Lease != nil {
 			lease = d.Lease.Who()
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\n", d.Name, d.State, d.Tier, d.Kernel, ago(d.LastSeen), d.ActiveJob, lease)
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n", d.Name, d.State, d.Tier, d.Kernel, ago(d.LastSeen), d.ActiveJob, lease, d.WindowState)
 	}
 	w.Flush()
 	for _, d := range devs {
@@ -1140,6 +1141,7 @@ func showDevice(ctx context.Context, c *client.Client, name string) error {
 	}
 	fmt.Printf("  kernel:      %s (known-good: %s)\n", d.Kernel, orDash(d.KnownGood, "no baseline yet"))
 	fmt.Printf("  last seen:   %s, uptime %.0fs, systemd %s\n", ago(d.LastSeen), d.Health.Uptime, d.Health.SystemState)
+	fmt.Printf("  window:      %s\n", windowStateForDevice(d.Window, time.Now()))
 	tiers := []string{"panic reboot + one-shot fallback", "+ hardware watchdog", "+ out-of-band reset and serial"}
 	fmt.Printf("  recovery:    tier %d (%s)\n", d.Tier, tiers[d.Tier])
 	if d.OOB != nil {
@@ -1604,4 +1606,63 @@ func maintainerCmd(ctx context.Context, c *client.Client, args []string) error {
 		return w.Flush()
 	}
 	return errors.New(use)
+}
+
+// windowStateForDevice is the availability-window state a device's
+// heartbeat state must be read beside: on 2026-11-20 ryan-m3max answered
+// its heartbeat while its owner's window was closed and the row was called
+// bookable. A device whose Volunteer set no window says so and is open
+// (labd treats an unset window as open).
+func windowStateForDevice(w *window.Settings, now time.Time) string {
+	if w == nil {
+		return "no availability window set (treated open)"
+	}
+	st := window.Evaluate(*w, now)
+	if st.Open {
+		if st.End.IsZero() {
+			return "window OPEN"
+		}
+		return fmt.Sprintf("window OPEN until %s", st.End.In(w.Location()).Format("Mon 15:04"))
+	}
+	if st.Next.IsZero() {
+		return "window CLOSED, no next opening scheduled"
+	}
+	dow := st.Next.Weekday()
+	// The rules repeat weekly, so the next opening is at most 7 days out.
+	label := dow.String()
+	switch dow {
+	case time.Sunday:
+		label = "Sun"
+	case time.Monday:
+		label = "Mon"
+	case time.Tuesday:
+		label = "Tue"
+	case time.Wednesday:
+		label = "Wed"
+	case time.Thursday:
+		label = "Thu"
+	case time.Friday:
+		label = "Fri"
+	case time.Saturday:
+		label = "Sat"
+	}
+	return fmt.Sprintf("window CLOSED, next opens %s %s", label, st.Next.Format("15:04"))
+}
+
+// devicesTable renders the lab status devices table with the availability
+// window beside each heartbeat state (drill d-0062 p2).
+func devicesTable(devs []api.Device, now time.Time) string {
+	var b strings.Builder
+	w := tabwriter.NewWriter(&b, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(&b, "DEVICE\tSTATE\tTIER\tKERNEL\tLAST SEEN\tJOB\tLEASE\tWINDOW")
+	for i := range devs {
+		d := &devs[i]
+		lease := ""
+		if d.Lease != nil {
+			lease = d.Lease.Who()
+		}
+		fmt.Fprintf(&b, "%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\n", d.Name, d.State, d.Tier(), d.Kernel, ago(d.LastSeen), d.ActiveJob, lease, windowStateForDevice(d.Window, now))
+	}
+	w.Flush()
+	return b.String()
 }

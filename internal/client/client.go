@@ -18,6 +18,7 @@ import (
 
 	"github.com/iconidentify/maclab/internal/api"
 	"github.com/iconidentify/maclab/internal/labhttp"
+	"github.com/iconidentify/maclab/internal/window"
 )
 
 type Client struct {
@@ -144,16 +145,54 @@ type Device struct {
 	Alive  bool              `json:"alive"`
 	Queued int               `json:"queued"`
 	Events []api.KernelEvent `json:"recent_events,omitempty"`
+	// WindowState is the rendered Availability window beside the heartbeat
+	// state (drill d-0062 p2): a heartbeat can say ready while the window
+	// is closed.
+	WindowState string `json:"window_state,omitempty"`
 }
 
 func (c *Client) Devices(ctx context.Context) ([]Device, error) {
 	var out []Device
-	return out, c.do(ctx, "GET", "/api/devices", nil, &out)
+	if err := c.do(ctx, "GET", "/api/devices", nil, &out); err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	for i := range out {
+		out[i].WindowState = windowState(&out[i].Device, now)
+	}
+	return out, nil
 }
 
 func (c *Client) Device(ctx context.Context, name string) (*Device, error) {
 	var out Device
-	return &out, c.do(ctx, "GET", "/api/devices/"+url.PathEscape(name), nil, &out)
+	if err := c.do(ctx, "GET", "/api/devices/"+url.PathEscape(name), nil, &out); err != nil {
+		return nil, err
+	}
+	out.WindowState = windowState(&out.Device, time.Now())
+	return &out, nil
+}
+
+// windowState renders a device's Availability window beside its heartbeat
+// state (drill d-0062 p2: a heartbeat can say ready while the window is
+// closed, and the row must not be read bookable). A device whose Volunteer
+// set no window is open.
+func windowState(d *api.Device, now time.Time) string {
+	if d.Window == nil {
+		return "no availability window set (treated open)"
+	}
+	st := window.Evaluate(*d.Window, now)
+	if st.Open {
+		if st.End.IsZero() {
+			return "window OPEN"
+		}
+		return fmt.Sprintf("window OPEN until %s", st.End.In(d.Window.Location()).Format("Mon 15:04"))
+	}
+	if st.Next.IsZero() {
+		return "window CLOSED, no next opening scheduled"
+	}
+	// The rules repeat weekly, so the next opening is at most 7 days out.
+	return fmt.Sprintf("window CLOSED, next opens %s %s",
+		st.Next.Format("Mon"), st.Next.Format("15:04"))
 }
 
 func (c *Client) PatchDevice(ctx context.Context, name string, p api.DevicePatch) (*Device, error) {
